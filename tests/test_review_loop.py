@@ -1,0 +1,824 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+import review_loop as loopr
+
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+
+
+def approval(sha: str = SHA_A) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "head_sha": sha,
+        "verdict": "APPROVE",
+        "review_body": "No blocking findings.",
+        "implementation_prompt": "",
+        "blocking_findings": [],
+        "non_blocking_notes": [],
+    }
+
+
+def request_changes(sha: str = SHA_A) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "head_sha": sha,
+        "verdict": "REQUEST_CHANGES",
+        "review_body": "A correctness defect blocks merge.",
+        "implementation_prompt": "Fix the boundary check and add a regression test.",
+        "blocking_findings": [
+            {
+                "id": "B1",
+                "title": "Boundary defect",
+                "description": "The final allowed value is rejected.",
+                "required_change": "Correct the comparison and cover the boundary.",
+            }
+        ],
+        "non_blocking_notes": ["A rename could be considered later."],
+    }
+
+
+def make_pr(sha: str = SHA_A, *, author: str = "author") -> loopr.PullRequest:
+    raw = {
+        "url": "https://github.com/acme/project/pull/7",
+        "number": 7,
+        "title": "Change",
+        "body": "Body",
+        "author": {"login": author},
+        "state": "OPEN",
+        "isDraft": False,
+        "baseRefName": "main",
+        "baseRefOid": "c" * 40,
+        "headRefName": "feature",
+        "headRefOid": sha,
+        "headRepository": {"name": "project"},
+        "headRepositoryOwner": {"login": "acme"},
+        "reviewDecision": "REVIEW_REQUIRED",
+        "changedFiles": 1,
+        "files": [{"path": "app.py", "status": "modified"}],
+        "statusCheckRollup": [],
+        "reviews": [],
+    }
+    return loopr.PullRequest.from_json("acme/project", raw)
+
+
+def args_for(repo: pathlib.Path, *, maximum: int = 5) -> argparse.Namespace:
+    return argparse.Namespace(
+        pr="7",
+        repo_dir=str(repo),
+        max_iterations=maximum,
+        oracle_thinking_time="heavy",
+        artifacts_dir=".pr-review-loop",
+        dry_run=False,
+    )
+
+
+class OracleContractTests(unittest.TestCase):
+    def test_valid_approval_fixture(self) -> None:
+        parsed = loopr.parse_oracle_review(json.dumps(approval()), SHA_A)
+        self.assertEqual("APPROVE", parsed.verdict)
+        self.assertFalse(parsed.blocking_findings)
+
+    def test_valid_request_changes_fixture(self) -> None:
+        parsed = loopr.parse_oracle_review(json.dumps(request_changes()), SHA_A)
+        self.assertEqual("REQUEST_CHANGES", parsed.verdict)
+        self.assertTrue(parsed.implementation_prompt)
+
+    def test_one_outer_json_fence_is_tolerated(self) -> None:
+        raw = "```json\n" + json.dumps(approval()) + "\n```"
+        self.assertEqual("APPROVE", loopr.parse_oracle_review(raw, SHA_A).verdict)
+
+    def test_malformed_and_trailing_output_fail(self) -> None:
+        fixtures = ["not json", json.dumps(approval()) + " trailing", "{}\n{}"]
+        for fixture in fixtures:
+            with (
+                self.subTest(fixture=fixture),
+                self.assertRaises(loopr.LoopError) as caught,
+            ):
+                loopr.parse_oracle_review(fixture, SHA_A)
+            self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
+
+    def test_stale_sha_fails(self) -> None:
+        with self.assertRaises(loopr.LoopError) as caught:
+            loopr.parse_oracle_review(json.dumps(approval(SHA_B)), SHA_A)
+        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
+
+    def test_verdict_invariants_are_enforced(self) -> None:
+        bad = approval()
+        bad["implementation_prompt"] = "make changes"
+        with self.assertRaises(loopr.LoopError):
+            loopr.parse_oracle_review(json.dumps(bad), SHA_A)
+        bad = request_changes()
+        bad["blocking_findings"] = []
+        with self.assertRaises(loopr.LoopError):
+            loopr.parse_oracle_review(json.dumps(bad), SHA_A)
+
+
+class InputAndIsolationTests(unittest.TestCase):
+    def test_pr_resolution_is_canonical_and_unambiguous(self) -> None:
+        self.assertEqual(
+            ("acme/project", 7, "https://github.com/acme/project/pull/7"),
+            loopr.resolve_pr_target("7", "acme/project"),
+        )
+        self.assertEqual(
+            ("acme/project", 8, "https://github.com/acme/project/pull/8"),
+            loopr.resolve_pr_target(
+                "https://github.com/acme/project/pull/8", "elsewhere/repo"
+            ),
+        )
+        for invalid in (
+            "0",
+            "https://evil.example/acme/project/pull/7",
+            "https://github.com/a/b/pull/7?x=1",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(loopr.LoopError):
+                loopr.resolve_pr_target(invalid, "acme/project")
+
+    def test_remote_normalization_rejects_non_github_hosts(self) -> None:
+        self.assertEqual(
+            "acme/project",
+            loopr.normalize_github_repo("git@github.com:acme/project.git"),
+        )
+        self.assertEqual(
+            "acme/project",
+            loopr.normalize_github_repo("https://github.com/acme/project.git"),
+        )
+        with self.assertRaises(loopr.LoopError):
+            loopr.normalize_github_repo("https://github.example/acme/project.git")
+
+    def test_model_environment_drops_credentials_and_ssh_agent(self) -> None:
+        source = {
+            "PATH": "/bin",
+            "HOME": "/home/test",
+            "GH_REVIEW_TOKEN": "review-secret",
+            "GH_TOKEN": "gh-secret",
+            "GITHUB_TOKEN": "github-secret",
+            "AWS_ACCESS_KEY_ID": "aws-secret",
+            "NPM_TOKEN": "npm-secret",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+            "SAFE_SETTING": "not-allowlisted",
+        }
+        env = loopr.CommandRunner(source).model_env()
+        for key in source.keys() - {"PATH", "HOME"}:
+            self.assertNotIn(key, env)
+
+    def test_reviewer_token_is_scoped_and_redacted(self) -> None:
+        runner = loopr.CommandRunner(
+            {"PATH": "/bin", "GH_REVIEW_TOKEN": "review-secret"}
+        )
+        self.assertNotIn("GH_REVIEW_TOKEN", runner.base_env())
+        review_env = runner.reviewer_env("review-secret")
+        self.assertEqual("review-secret", review_env["GH_TOKEN"])
+        self.assertEqual("failure [REDACTED]", runner.redact("failure review-secret"))
+
+    def test_same_pr_lock_rejects_second_process_and_releases(self) -> None:
+        first = loopr.PrLock("acme/project", 7)
+        second = loopr.PrLock("acme/project", 7)
+        with first:
+            with self.assertRaises(loopr.LoopError) as caught:
+                second.__enter__()
+            self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        with second:
+            self.assertTrue(second.path.exists())
+        self.assertFalse(second.path.exists())
+
+    def test_command_wrapper_bounds_and_redacts_diagnostics(self) -> None:
+        runner = loopr.CommandRunner(
+            {"PATH": os.environ["PATH"], "TEST_TOKEN": "hidden-value"}
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            result = runner.run(
+                ["python3", "-c", "print('ok')"],
+                cwd=pathlib.Path(temporary),
+                env=runner.base_env(),
+            )
+            self.assertEqual("ok\n", result.stdout)
+            with self.assertRaises(loopr.CommandError) as caught:
+                runner.run(
+                    [
+                        "python3",
+                        "-c",
+                        "import sys; print('hidden-value', file=sys.stderr); sys.exit(1)",
+                    ],
+                    cwd=pathlib.Path(temporary),
+                    env=runner.base_env(),
+                )
+            self.assertNotIn("hidden-value", str(caught.exception))
+            with self.assertRaises(loopr.CommandError) as bounded:
+                runner.run(
+                    ["python3", "-c", "print('x' * 10000)"],
+                    cwd=pathlib.Path(temporary),
+                    env=runner.base_env(),
+                    max_output_bytes=128,
+                )
+            self.assertIn("exceeded 128 bytes", str(bounded.exception))
+
+    def test_run_codex_receives_the_sanitized_environment(self) -> None:
+        source = {
+            "PATH": os.environ["PATH"],
+            "HOME": tempfile.gettempdir(),
+            "GH_REVIEW_TOKEN": "review-secret",
+            "GITHUB_TOKEN": "github-secret",
+            "AWS_SECRET_ACCESS_KEY": "cloud-secret",
+            "NPM_TOKEN": "registry-secret",
+            "SSH_AUTH_SOCK": "/tmp/agent.sock",
+        }
+        runner = loopr.CommandRunner(source)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            worktree = root / "worktree"
+            artifacts = root / "artifacts"
+            worktree.mkdir()
+            artifacts.mkdir()
+            instance = loopr.ReviewLoop(args_for(root), runner)
+            instance.repo_dir = root
+            instance.artifacts_dir = artifacts
+            instance.writer = loopr.ArtifactWriter(artifacts, runner)
+            captured: dict[str, str] = {}
+
+            def fake_command(
+                command: list[str], **kwargs: object
+            ) -> loopr.CommandResult:
+                environment = kwargs["env"]
+                assert isinstance(environment, dict)
+                captured.update(
+                    {str(key): str(value) for key, value in environment.items()}
+                )
+                final = pathlib.Path(
+                    command[command.index("--output-last-message") + 1]
+                )
+                final.write_text("Done.\n", encoding="utf-8")
+                return loopr.CommandResult(tuple(command), 0, '{"type":"done"}\n', "")
+
+            review = loopr.parse_oracle_review(json.dumps(request_changes()), SHA_A)
+            with (
+                mock.patch.object(instance, "_outside_state", return_value={}),
+                mock.patch.object(instance, "command", side_effect=fake_command),
+            ):
+                instance.run_codex(review, worktree, artifacts)
+            for key in (
+                "GH_REVIEW_TOKEN",
+                "GITHUB_TOKEN",
+                "AWS_SECRET_ACCESS_KEY",
+                "NPM_TOKEN",
+                "SSH_AUTH_SOCK",
+            ):
+                self.assertNotIn(key, captured)
+
+
+class ScriptedLoop(loopr.ReviewLoop):
+    def __init__(
+        self,
+        root: pathlib.Path,
+        reviews: list[dict[str, object]],
+        *,
+        maximum: int = 5,
+        no_op: bool = False,
+        race: bool = False,
+        author: str = "author",
+    ):
+        runner = loopr.CommandRunner(
+            {"PATH": os.environ["PATH"], "GH_REVIEW_TOKEN": "review-token"}
+        )
+        super().__init__(args_for(root, maximum=maximum), runner)
+        self.scripted_reviews = reviews
+        self.review_index = 0
+        self.current_sha = str(reviews[0]["head_sha"])
+        self.no_op = no_op
+        self.race = race
+        self.author = author
+        self.calls: list[str] = []
+
+    def _bootstrap(self) -> None:
+        self.repo_dir = pathlib.Path(self.args.repo_dir)
+        self.repo = "acme/project"
+        self.number = 7
+        self.pr_url = "https://github.com/acme/project/pull/7"
+        self.artifacts_dir = self.repo_dir / ".pr-review-loop"
+        self.writer = loopr.ArtifactWriter(self.artifacts_dir, self.runner)
+
+    def precheck(self) -> loopr.PullRequest:
+        self.calls.append("precheck")
+        if self.author == "reviewer":
+            raise loopr.LoopError(loopr.EXIT_PRECONDITION, "self-review is forbidden")
+        self.versions = {
+            "python": "test",
+            "node": "v24",
+            "git": "test",
+            "gh": "test",
+            "oracle": "test",
+            "codex": "test",
+            "chrome": "test",
+        }
+        return make_pr(self.current_sha, author=self.author)
+
+    def snapshot(self, *, reviewer: bool = False) -> loopr.PullRequest:
+        return make_pr(self.current_sha, author=self.author)
+
+    def prepare_worktree(self, pr: loopr.PullRequest) -> pathlib.Path:
+        self.calls.append("prepare")
+        path = self.artifacts_dir / "worktrees" / "pr-7"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def collect_bundle(
+        self, pr: loopr.PullRequest, worktree: pathlib.Path, iteration_dir: pathlib.Path
+    ) -> loopr.ReviewBundle:
+        self.calls.append("collect")
+        assert self.writer
+        paths = []
+        for name, content in {
+            "pr.json": json.dumps(pr.raw),
+            "context.md": pr.head_sha,
+            "diff.patch": "diff",
+            "changed-files.txt": "modified\tapp.py\n",
+            "attachments.json": "[]\n",
+        }.items():
+            path = iteration_dir / name
+            self.writer.text(path, content)
+            paths.append(path)
+        return loopr.ReviewBundle(iteration_dir, tuple(paths))
+
+    def oracle_review(
+        self, pr: loopr.PullRequest, bundle: loopr.ReviewBundle
+    ) -> loopr.OracleReview:
+        self.calls.append("oracle")
+        assert self.writer
+        value = self.scripted_reviews[self.review_index]
+        self.review_index += 1
+        raw = json.dumps(value)
+        self.writer.text(bundle.iteration_dir / "oracle-raw.md", raw)
+        parsed = loopr.parse_oracle_review(raw, pr.head_sha)
+        self.writer.json(bundle.iteration_dir / "oracle.json", parsed.raw)
+        return parsed
+
+    def post_review(
+        self,
+        pr: loopr.PullRequest,
+        review: loopr.OracleReview,
+        iteration: int,
+        iteration_dir: pathlib.Path,
+    ) -> None:
+        self.calls.append(f"post:{review.verdict}")
+        assert self.writer
+        self.writer.text(
+            iteration_dir / "review.md",
+            review.review_body + f"\n{pr.head_sha}\nIteration: {iteration}\n",
+        )
+
+    def verify_approval(self, expected_head_sha: str, expected_base_sha: str) -> None:
+        self.calls.append("verify")
+
+    def run_codex(
+        self,
+        review: loopr.OracleReview,
+        worktree: pathlib.Path,
+        iteration_dir: pathlib.Path,
+    ) -> tuple[dict[str, str], set[str]]:
+        self.calls.append("codex")
+        assert self.writer
+        self.writer.text(
+            iteration_dir / "codex-prompt.md",
+            loopr.CODEX_GUARDRAILS.format(
+                implementation_prompt=review.implementation_prompt
+            ),
+        )
+        self.writer.text(iteration_dir / "codex-events.jsonl", '{"type":"done"}\n')
+        self.writer.text(
+            iteration_dir / "codex-final.md", "Changed app.py; tests pass.\n"
+        )
+        return {}, set()
+
+    def validate_commit_push(
+        self,
+        pr: loopr.PullRequest,
+        worktree: pathlib.Path,
+        iteration: int,
+        iteration_dir: pathlib.Path,
+        outside_before: dict[str, str],
+        nested_before: set[str],
+    ) -> str:
+        self.calls.append("push")
+        if self.no_op:
+            raise loopr.LoopError(
+                loopr.EXIT_STALLED, "Codex produced no implementation changes"
+            )
+        if self.race:
+            raise loopr.LoopError(loopr.EXIT_RACE, "remote head changed")
+        assert self.writer
+        pushed = SHA_B if pr.head_sha == SHA_A else "d" * 40
+        self.writer.text(iteration_dir / "resulting.patch", "binary patch\n")
+        self.writer.text(iteration_dir / "pushed-commit.txt", pushed + "\n")
+        return pushed
+
+    def wait_for_github_head(self, expected_sha: str) -> None:
+        self.current_sha = expected_sha
+
+
+class AcceptanceStateMachineTests(unittest.TestCase):
+    def run_script(
+        self,
+        reviews: list[dict[str, object]],
+        *,
+        maximum: int = 5,
+        no_op: bool = False,
+        race: bool = False,
+        author: str = "author",
+    ) -> tuple[ScriptedLoop, int, pathlib.Path]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = pathlib.Path(temporary.name)
+        scripted = ScriptedLoop(
+            root,
+            reviews,
+            maximum=maximum,
+            no_op=no_op,
+            race=race,
+            author=author,
+        )
+        try:
+            code = scripted.execute()
+        except loopr.LoopError as exc:
+            code = exc.code
+        return scripted, code, root
+
+    def test_request_changes_codex_edit_push_then_approval(self) -> None:
+        scripted, code, _ = self.run_script([request_changes(SHA_A), approval(SHA_B)])
+        self.assertEqual(loopr.EXIT_OK, code)
+        self.assertEqual(1, scripted.calls.count("codex"))
+        self.assertEqual(1, scripted.calls.count("push"))
+        self.assertIn("post:REQUEST_CHANGES", scripted.calls)
+        self.assertIn("post:APPROVE", scripted.calls)
+
+    def test_approval_exits_zero_without_codex(self) -> None:
+        scripted, code, _ = self.run_script([approval()])
+        self.assertEqual(loopr.EXIT_OK, code)
+        self.assertNotIn("codex", scripted.calls)
+        self.assertEqual(1, scripted.calls.count("post:APPROVE"))
+
+    def test_dry_run_validates_without_artifacts_models_or_writes(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = pathlib.Path(temporary.name)
+        scripted = ScriptedLoop(root, [approval()])
+        scripted.args.dry_run = True
+        self.assertEqual(loopr.EXIT_OK, scripted.execute())
+        self.assertEqual(["precheck"], scripted.calls)
+        self.assertFalse((root / ".pr-review-loop").exists())
+
+    def test_no_op_codex_is_stalled_without_push(self) -> None:
+        scripted, code, _ = self.run_script([request_changes()], no_op=True)
+        self.assertEqual(loopr.EXIT_STALLED, code)
+        self.assertEqual(1, scripted.calls.count("push"))
+
+    def test_concurrent_remote_update_aborts(self) -> None:
+        _scripted, code, _ = self.run_script([request_changes()], race=True)
+        self.assertEqual(loopr.EXIT_RACE, code)
+
+    def test_malformed_oracle_output_causes_no_write_or_edit(self) -> None:
+        malformed = approval()
+        del malformed["schema_version"]
+        scripted, code, _ = self.run_script([malformed])
+        self.assertEqual(loopr.EXIT_ORACLE, code)
+        self.assertFalse(any(call.startswith("post:") for call in scripted.calls))
+        self.assertNotIn("codex", scripted.calls)
+        self.assertNotIn("push", scripted.calls)
+
+    def test_maximum_iteration_is_exact_and_does_not_leave_unreviewed_patch(
+        self,
+    ) -> None:
+        scripted, code, _ = self.run_script([request_changes()], maximum=1)
+        self.assertEqual(loopr.EXIT_STALLED, code)
+        self.assertEqual(1, scripted.calls.count("oracle"))
+        self.assertNotIn("codex", scripted.calls)
+        self.assertNotIn("push", scripted.calls)
+
+    def test_complete_approval_artifacts_exist(self) -> None:
+        scripted, code, _ = self.run_script([approval()])
+        self.assertEqual(loopr.EXIT_OK, code)
+        run = scripted.run_dir
+        assert run is not None
+        iteration = run / "iteration-01"
+        expected = {
+            "pr.json",
+            "context.md",
+            "diff.patch",
+            "changed-files.txt",
+            "attachments.json",
+            "oracle-raw.md",
+            "oracle.json",
+            "review.md",
+            "codex-prompt.md",
+            "codex-events.jsonl",
+            "codex-final.md",
+            "resulting.patch",
+            "pushed-commit.txt",
+            "versions.json",
+        }
+        self.assertTrue(expected.issubset({path.name for path in iteration.iterdir()}))
+        self.assertTrue((run / "state.json").is_file())
+        self.assertTrue((run / "final.json").is_file())
+        for path in run.rglob("*"):
+            if path.is_file():
+                self.assertNotIn("review-token", path.read_text(encoding="utf-8"))
+
+    def test_self_review_rejected_before_posting(self) -> None:
+        scripted, code, root = self.run_script([approval()], author="reviewer")
+        self.assertEqual(loopr.EXIT_PRECONDITION, code)
+        self.assertFalse(any(call.startswith("post:") for call in scripted.calls))
+        self.assertFalse((root / ".pr-review-loop").exists())
+
+
+class PatchSafetyTests(unittest.TestCase):
+    def git(self, cwd: pathlib.Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, text=True, capture_output=True
+        ).stdout.strip()
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temporary.name)
+        self.remote = root / "remote.git"
+        self.primary = root / "primary"
+        self.git(root, "init", "--bare", str(self.remote))
+        self.git(root, "clone", str(self.remote), str(self.primary))
+        self.git(self.primary, "config", "user.name", "Loop Test")
+        self.git(self.primary, "config", "user.email", "loop@example.test")
+        (self.primary / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        self.git(self.primary, "add", "app.py")
+        self.git(self.primary, "commit", "-m", "initial")
+        self.git(self.primary, "branch", "-M", "main")
+        self.git(self.primary, "push", "-u", "origin", "main")
+        self.git(self.primary, "checkout", "-b", "feature")
+        (self.primary / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+        self.git(self.primary, "commit", "-am", "feature")
+        self.git(self.primary, "push", "-u", "origin", "feature")
+        self.sha = self.git(self.primary, "rev-parse", "HEAD")
+        base = self.git(self.primary, "rev-parse", "main")
+        raw = make_pr(self.sha).raw | {"baseRefOid": base, "headRefOid": self.sha}
+        self.pr = loopr.PullRequest.from_json("acme/project", raw)
+        runner = loopr.CommandRunner(
+            {"PATH": os.environ["PATH"], "GH_REVIEW_TOKEN": "review-token"}
+        )
+        self.loop = loopr.ReviewLoop(args_for(self.primary), runner)
+        self.loop.repo_dir = self.primary
+        self.loop.repo = "acme/project"
+        self.loop.number = 7
+        self.loop.pr_url = "https://github.com/acme/project/pull/7"
+        self.loop.artifacts_dir = self.primary / ".pr-review-loop"
+        self.loop.artifacts_dir.mkdir()
+        self.loop.writer = loopr.ArtifactWriter(self.loop.artifacts_dir, runner)
+        self.worktree = self.loop.prepare_worktree(self.pr)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_patch_validation_commits_with_hooks_disabled_and_pushes_exact_ref(
+        self,
+    ) -> None:
+        git_dir = pathlib.Path(self.git(self.primary, "rev-parse", "--git-common-dir"))
+        if not git_dir.is_absolute():
+            git_dir = self.primary / git_dir
+        hooks = git_dir / "hooks"
+        hooks.mkdir(exist_ok=True)
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        hook.chmod(0o755)
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        iteration = self.loop.artifacts_dir / "iteration"
+        iteration.mkdir()
+        pushed = self.loop.validate_commit_push(
+            self.pr,
+            self.worktree,
+            1,
+            iteration,
+            self.loop._outside_state(self.worktree),
+            self.loop._nested_git_entries(self.worktree),
+        )
+        remote_sha = self.git(
+            self.primary, "ls-remote", "origin", "refs/heads/feature"
+        ).split()[0]
+        self.assertEqual(pushed, remote_sha)
+        self.assertTrue((iteration / "resulting.patch").read_text().strip())
+
+    def test_worktree_reuse_is_exact_and_dirty_state_fails_closed(self) -> None:
+        primary_before = self.git(
+            self.primary, "status", "--porcelain", "--untracked-files=all"
+        )
+        reused = self.loop.prepare_worktree(self.pr)
+        self.assertEqual(self.worktree, reused)
+        self.assertEqual(self.sha, self.git(reused, "rev-parse", "HEAD"))
+        self.assertFalse(
+            self.git(reused, "status", "--porcelain", "--untracked-files=all")
+        )
+        self.assertEqual(
+            primary_before,
+            self.git(self.primary, "status", "--porcelain", "--untracked-files=all"),
+        )
+        (reused / "dirty.txt").write_text("do not carry me\n", encoding="utf-8")
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.prepare_worktree(self.pr)
+        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+
+    def test_bundle_contains_complete_text_and_explicit_binary_entries(self) -> None:
+        self.git(self.primary, "checkout", "feature")
+        (self.primary / "AGENTS.md").write_text(
+            "Follow focused tests.\n", encoding="utf-8"
+        )
+        (self.primary / "binary.dat").write_bytes(b"\x00\x01\x02")
+        self.git(self.primary, "add", "AGENTS.md", "binary.dat")
+        self.git(self.primary, "commit", "-m", "add context fixtures")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 3
+        raw["files"] = [
+            {"path": "AGENTS.md", "status": "added"},
+            {"path": "app.py", "status": "modified"},
+            {"path": "binary.dat", "status": "added"},
+        ]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "bundle"
+        iteration.mkdir()
+        with (
+            mock.patch.object(
+                self.loop, "_gh", return_value="diff --git a/app.py b/app.py\n"
+            ),
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+        ):
+            bundle = self.loop.collect_bundle(pr, worktree, iteration)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        self.assertEqual("binary", by_path["binary.dat"]["kind"])
+        agents_attachment = iteration / by_path["AGENTS.md"]["attachment"]
+        self.assertEqual(
+            "Follow focused tests.\n", agents_attachment.read_text(encoding="utf-8")
+        )
+        self.assertIn(iteration / "diff.patch", bundle.attachments)
+        self.assertIn("binary 3 bytes", (iteration / "changed-files.txt").read_text())
+
+    def test_bundle_rejects_more_than_one_hundred_files_before_diff(self) -> None:
+        raw = dict(self.pr.raw)
+        raw["changedFiles"] = 101
+        raw["files"] = []
+        oversized = loopr.PullRequest.from_json("acme/project", raw)
+        iteration = self.loop.artifacts_dir / "oversized"
+        iteration.mkdir()
+        with (
+            mock.patch.object(self.loop, "_gh") as gh_call,
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.collect_bundle(oversized, self.worktree, iteration)
+        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        gh_call.assert_not_called()
+
+    def test_real_remote_race_is_detected_before_staging_or_commit(self) -> None:
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        other = pathlib.Path(self.temporary.name) / "other"
+        self.git(
+            pathlib.Path(self.temporary.name), "clone", str(self.remote), str(other)
+        )
+        self.git(other, "config", "user.name", "Other")
+        self.git(other, "config", "user.email", "other@example.test")
+        self.git(other, "checkout", "feature")
+        (other / "other.txt").write_text("race\n", encoding="utf-8")
+        self.git(other, "add", "other.txt")
+        self.git(other, "commit", "-m", "race")
+        self.git(other, "push", "origin", "feature")
+        iteration = self.loop.artifacts_dir / "iteration"
+        iteration.mkdir()
+        before = self.git(self.worktree, "rev-parse", "HEAD")
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                self.loop._outside_state(self.worktree),
+                self.loop._nested_git_entries(self.worktree),
+            )
+        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
+        self.assertEqual(before, self.git(self.worktree, "rev-parse", "HEAD"))
+        self.assertFalse(self.git(self.worktree, "diff", "--name-only", "--cached"))
+
+    def test_whitespace_errors_fail(self) -> None:
+        (self.worktree / "bad.txt").write_text("trailing space \n", encoding="utf-8")
+        iteration = self.loop.artifacts_dir / "iteration-a"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                self.loop._outside_state(self.worktree),
+                self.loop._nested_git_entries(self.worktree),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+
+    def test_new_nested_repository_fails(self) -> None:
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        nested = self.worktree / "vendor" / ".git"
+        nested.mkdir(parents=True)
+        iteration = self.loop.artifacts_dir / "iteration-b"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                self.loop._outside_state(self.worktree),
+                set(),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+
+    def test_new_submodule_url_fails(self) -> None:
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        (self.worktree / ".gitmodules").write_text(
+            '[submodule "vendor"]\n\tpath = vendor\n\turl = https://example.test/repo.git\n',
+            encoding="utf-8",
+        )
+        iteration = self.loop.artifacts_dir / "iteration-c"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                self.loop._outside_state(self.worktree),
+                self.loop._nested_git_entries(self.worktree),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+
+    def test_codex_cannot_change_head_or_pre_stage_files(self) -> None:
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        self.git(self.worktree, "add", "app.py")
+        iteration = self.loop.artifacts_dir / "iteration-d"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                self.loop._outside_state(self.worktree),
+                self.loop._nested_git_entries(self.worktree),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+
+    def test_codex_cannot_change_the_worktree_git_pointer(self) -> None:
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        (self.worktree / ".git").write_text(
+            "gitdir: /tmp/untrusted\n", encoding="utf-8"
+        )
+        iteration = self.loop.artifacts_dir / "iteration-e"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                {},
+                set(),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+
+    def test_codex_cannot_change_repository_git_configuration(self) -> None:
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        self.git(
+            self.worktree,
+            "config",
+            "remote.origin.pushurl",
+            "https://example.test/exfiltrate.git",
+        )
+        iteration = self.loop.artifacts_dir / "iteration-f"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                {},
+                set(),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+
+
+if __name__ == "__main__":
+    unittest.main()

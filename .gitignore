@@ -1,3 +1,6 @@
+# loopr runtime artifacts
+.pr-review-loop/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
