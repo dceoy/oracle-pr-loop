@@ -1447,6 +1447,49 @@ class ReviewLoop:
         self._repository_controls: dict[str, dict[str, str]] = {}
         self.current_iteration: int | None = None
 
+    def _content_filter_overrides(self, cwd: pathlib.Path) -> list[str]:
+        # A repository, global, or system config scope can predefine a
+        # filter.<name>.{clean,smudge,process} driver for legitimate local use.
+        # PR/Codex-controlled tracked content cannot add a new driver definition
+        # -- config writes are separately hashed and fail-closed -- but its
+        # .gitattributes *is* tracked content, and it can activate any driver
+        # already defined by naming it in a filter= attribute. Neutralizing
+        # every currently configured driver, rather than trusting attributes
+        # never to reference one, closes that path for checkout and staging.
+        # diff.external / diff.<name>.{textconv,command} are handled separately
+        # (see the "diff" branch in command()): overriding those to an empty
+        # value here does not disable them the way an empty filter.<name>.process
+        # does -- git instead tries to execute the empty command and fails the
+        # diff outright. Not cached: config is re-read on every git call so a
+        # driver defined between calls is still neutralized, matching the
+        # separate hash-based detection that already fails closed on a
+        # mid-run config change instead of relying on a possibly stale view.
+        try:
+            listing = self.runner.run(
+                [
+                    "git",
+                    "config",
+                    "--get-regexp",
+                    r"^filter\..*\.(clean|smudge|process)$",
+                ],
+                cwd=cwd,
+                env=self.base_env,
+                timeout=30,
+                check=False,
+            ).stdout
+        except CommandError:
+            listing = ""
+        overrides: list[str] = []
+        for line in str(listing or "").splitlines():
+            name = line.split(" ", 1)[0].strip()
+            if not name:
+                continue
+            if name.endswith((".clean", ".smudge")):
+                overrides += ["-c", f"{name}=cat"]
+            else:
+                overrides += ["-c", f"{name}="]
+        return overrides
+
     def command(
         self,
         args: Sequence[str],
@@ -1468,13 +1511,25 @@ class ReviewLoop:
             # point at) must never execute with this orchestrator's environment
             # or credentials. core.fsmonitor is a separate hook command from
             # core.hooksPath and is not covered by it.
+            rest = argv[1:]
+            if rest and rest[0] == "diff":
+                # A repository-configured diff.external, or a diff.<name>.command
+                # / diff.<name>.textconv driver PR-controlled .gitattributes can
+                # select via a diff= attribute, must not run with this
+                # orchestrator's environment or credentials either. Unlike the
+                # filter.* overrides above, these cannot be neutralized with a
+                # config override (an empty value makes git try to execute the
+                # empty string and fail the diff outright); the flags are the
+                # only way to disable them without breaking the diff.
+                rest = [rest[0], "--no-ext-diff", "--no-textconv", *rest[1:]]
             argv = [
                 "git",
                 "-c",
                 f"core.hooksPath={os.devnull}",
                 "-c",
                 "core.fsmonitor=false",
-                *argv[1:],
+                *self._content_filter_overrides(cwd or self.repo_dir),
+                *rest,
             ]
         return self.runner.run(
             argv,

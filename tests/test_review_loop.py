@@ -1008,6 +1008,85 @@ class PatchSafetyTests(unittest.TestCase):
         self.loop.command(["git", "status"], cwd=self.worktree)
         self.assertFalse(marker.exists())
 
+    def test_git_wrapper_ignores_a_tracked_gitattributes_smudge_filter(self) -> None:
+        # A filter.<name>.smudge driver can be configured on the repository
+        # (or global/system config) for legitimate local use; a PR-controlled
+        # .gitattributes cannot define a new driver, but it can activate this
+        # one on a checkout path via a filter= attribute.
+        marker = pathlib.Path(self.temporary.name) / "smudge-fired"
+        self.git(
+            self.primary, "config", "filter.marker.smudge", f"touch '{marker}'; cat"
+        )
+        (self.worktree / ".gitattributes").write_text(
+            "app.py filter=marker\n", encoding="utf-8"
+        )
+        self.git(self.worktree, "add", ".gitattributes")
+        self.git(self.worktree, "commit", "-m", "attributes")
+        (self.worktree / "app.py").unlink()
+        # The unwrapped setup calls above can themselves trip the smudge
+        # filter (git's racy-git re-verification re-cleans/smudges any
+        # attributed path whose mtime is not distinguishable from the index
+        # timestamp); reset the marker so the assertion checks only the
+        # wrapped call under test.
+        marker.unlink(missing_ok=True)
+        self.loop.command(["git", "checkout", "--", "app.py"], cwd=self.worktree)
+        self.assertFalse(marker.exists())
+        self.assertEqual("VALUE = 2\n", (self.worktree / "app.py").read_text())
+
+    def test_git_wrapper_ignores_a_tracked_gitattributes_clean_filter(self) -> None:
+        # Same escape as the smudge case, but on the staging side: a
+        # filter.<name>.clean driver runs when a filter=-attributed path is
+        # added to the index.
+        marker = pathlib.Path(self.temporary.name) / "clean-fired"
+        self.git(
+            self.primary, "config", "filter.marker.clean", f"touch '{marker}'; cat"
+        )
+        (self.worktree / ".gitattributes").write_text(
+            "app.py filter=marker\n", encoding="utf-8"
+        )
+        self.git(self.worktree, "add", ".gitattributes")
+        self.git(self.worktree, "commit", "-m", "attributes")
+        (self.worktree / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
+        # The unwrapped setup calls above can themselves trip the clean filter
+        # (git's racy-git re-verification re-cleans any attributed path whose
+        # mtime is not distinguishable from the index timestamp); reset the
+        # marker so the assertion below checks only the wrapped call under test.
+        marker.unlink(missing_ok=True)
+        self.loop.command(["git", "add", "app.py"], cwd=self.worktree)
+        self.assertFalse(marker.exists())
+
+    def test_git_wrapper_ignores_a_configured_filter_process_driver(self) -> None:
+        # filter.<name>.process takes priority over clean/smudge when defined;
+        # neutralizing it must not merely fail closed but must let the
+        # checkout proceed (content is passed through unfiltered).
+        marker = pathlib.Path(self.temporary.name) / "process-fired"
+        self.git(
+            self.primary,
+            "config",
+            "filter.marker.process",
+            f"touch '{marker}'; exit 1",
+        )
+        (self.worktree / ".gitattributes").write_text(
+            "app.py filter=marker\n", encoding="utf-8"
+        )
+        self.git(self.worktree, "add", ".gitattributes")
+        self.git(self.worktree, "commit", "-m", "attributes")
+        (self.worktree / "app.py").unlink()
+        marker.unlink(missing_ok=True)
+        self.loop.command(["git", "checkout", "--", "app.py"], cwd=self.worktree)
+        self.assertFalse(marker.exists())
+        self.assertEqual("VALUE = 2\n", (self.worktree / "app.py").read_text())
+
+    def test_git_diff_ignores_a_configured_external_diff_command(self) -> None:
+        # diff.external runs for every path with a working-tree change unless
+        # --no-ext-diff is passed; git tries to execute the value verbatim, so
+        # (unlike filter.*.process) it cannot be neutralized by emptying it.
+        marker = pathlib.Path(self.temporary.name) / "ext-diff-fired"
+        self.git(self.primary, "config", "diff.external", f"sh -c \"touch '{marker}'\"")
+        (self.worktree / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
+        self.loop.command(["git", "diff"], cwd=self.worktree)
+        self.assertFalse(marker.exists())
+
     def _install_post_index_change_hook(self) -> pathlib.Path:
         git_dir = pathlib.Path(self.git(self.primary, "rev-parse", "--git-common-dir"))
         if not git_dir.is_absolute():
