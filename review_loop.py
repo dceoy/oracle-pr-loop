@@ -9,6 +9,7 @@ oracle, and codex.
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import ctypes
 import dataclasses
@@ -1479,15 +1480,23 @@ class ReviewLoop:
             ).stdout
         except CommandError:
             listing = ""
-        overrides: list[str] = []
+        drivers: set[str] = set()
         for line in str(listing or "").splitlines():
-            name = line.split(" ", 1)[0].strip()
-            if not name:
+            name = line.split(None, 1)[0].strip() if line.strip() else ""
+            prefix, separator, endpoint = name.rpartition(".")
+            if not separator or endpoint not in {"clean", "smudge", "process"}:
                 continue
-            if name.endswith((".clean", ".smudge")):
-                overrides += ["-c", f"{name}=cat"]
-            else:
-                overrides += ["-c", f"{name}="]
+            if not prefix.startswith("filter."):
+                continue
+            driver = prefix.removeprefix("filter.")
+            if driver:
+                drivers.add(driver)
+        overrides: list[str] = []
+        for driver in sorted(drivers):
+            key = f"filter.{driver}"
+            for endpoint in ("clean", "smudge", "process"):
+                overrides += ["-c", f"{key}.{endpoint}="]
+            overrides += ["-c", f"{key}.required=false"]
         return overrides
 
     def command(
@@ -2313,6 +2322,12 @@ class ReviewLoop:
             size = self._git_blob_size(worktree, path)
             sniff = self._git_blob_prefix(worktree, path, min(size, BINARY_SNIFF_BYTES))
             is_binary = b"\x00" in sniff
+            if not is_binary:
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+                try:
+                    decoder.decode(sniff, final=len(sniff) == size)
+                except UnicodeDecodeError:
+                    is_binary = True
             text = ""
             if not is_binary and total + size > MAX_ATTACHED_TEXT_BYTES:
                 raise LoopError(

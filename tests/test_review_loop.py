@@ -1080,22 +1080,84 @@ class PatchSafetyTests(unittest.TestCase):
         self.loop.command(["git", "add", "app.py"], cwd=self.worktree)
         self.assertFalse(marker.exists())
 
+    def test_git_wrapper_neutralizes_filters_without_resolving_worktree_cat(
+        self,
+    ) -> None:
+        marker = pathlib.Path(self.temporary.name) / "worktree-cat-fired"
+        local_cat = self.worktree / "cat"
+        local_cat.write_text(
+            f"#!/bin/sh\ntouch '{marker}'\nexit 77\n", encoding="utf-8"
+        )
+        local_cat.chmod(0o755)
+        self.git(self.primary, "config", "filter.marker.clean", "cat")
+        (self.worktree / ".gitattributes").write_text(
+            "app.py filter=marker\n", encoding="utf-8"
+        )
+        self.git(self.worktree, "add", ".gitattributes")
+        self.git(self.worktree, "commit", "-m", "attributes")
+        (self.worktree / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
+        self.loop.base_env["PATH"] = f".{os.pathsep}{os.environ['PATH']}"
+
+        self.loop.command(["git", "add", "app.py"], cwd=self.worktree)
+
+        self.assertFalse(marker.exists())
+        indexed = subprocess.run(
+            ["git", "show", ":app.py"],
+            cwd=self.worktree,
+            check=True,
+            capture_output=True,
+        ).stdout
+        self.assertEqual(b"VALUE = 9\n", indexed)
+
+    def test_content_filter_overrides_sort_and_deduplicate_dotted_drivers(self) -> None:
+        listing = (
+            "filter.z.driver.clean clean\n"
+            "filter.a.smudge smudge\n"
+            "filter.z.driver.process process\n"
+            "filter.a.clean clean\n"
+            "filter.z.driver.smudge smudge\n"
+        )
+        result = loopr.CommandResult(("git", "config"), 0, listing, "")
+        with mock.patch.object(self.loop.runner, "run", return_value=result):
+            overrides = self.loop._content_filter_overrides(self.worktree)
+        self.assertEqual(
+            [
+                "-c",
+                "filter.a.clean=",
+                "-c",
+                "filter.a.smudge=",
+                "-c",
+                "filter.a.process=",
+                "-c",
+                "filter.a.required=false",
+                "-c",
+                "filter.z.driver.clean=",
+                "-c",
+                "filter.z.driver.smudge=",
+                "-c",
+                "filter.z.driver.process=",
+                "-c",
+                "filter.z.driver.required=false",
+            ],
+            overrides,
+        )
+
     def test_git_wrapper_ignores_a_configured_filter_process_driver(self) -> None:
         # filter.<name>.process takes priority over clean/smudge when defined;
         # neutralizing it must not merely fail closed but must let the
         # checkout proceed (content is passed through unfiltered).
         marker = pathlib.Path(self.temporary.name) / "process-fired"
+        (self.worktree / ".gitattributes").write_text(
+            "app.py filter=marker\n", encoding="utf-8"
+        )
+        self.git(self.worktree, "add", ".gitattributes")
+        self.git(self.worktree, "commit", "-m", "attributes")
         self.git(
             self.primary,
             "config",
             "filter.marker.process",
             f"touch '{marker}'; exit 1",
         )
-        (self.worktree / ".gitattributes").write_text(
-            "app.py filter=marker\n", encoding="utf-8"
-        )
-        self.git(self.worktree, "add", ".gitattributes")
-        self.git(self.worktree, "commit", "-m", "attributes")
         (self.worktree / "app.py").unlink()
         marker.unlink(missing_ok=True)
         self.loop.command(["git", "checkout", "--", "app.py"], cwd=self.worktree)
@@ -1248,34 +1310,54 @@ class PatchSafetyTests(unittest.TestCase):
         self.assertIn("+VALUE = 2", patch)
         self.assertNotIn("+VALUE = 99", patch)
 
-    def test_bundle_classifies_an_oversized_binary_blob_without_reading_it_whole(
+    def test_bundle_classifies_an_oversized_invalid_utf8_blob_without_reading_it_whole(
         self,
     ) -> None:
         self.git(self.primary, "checkout", "feature")
-        large_binary = b"\x00" + (b"\xff" * 4096)
+        large_binary = b"\xff" + (b"A" * loopr.MAX_ATTACHED_TEXT_BYTES)
+        (self.primary / ".gitattributes").write_text(
+            "large.bin binary\n", encoding="utf-8"
+        )
         (self.primary / "large.bin").write_bytes(large_binary)
-        self.git(self.primary, "add", "large.bin")
+        self.git(self.primary, "add", ".gitattributes", "large.bin")
         self.git(self.primary, "commit", "-m", "add oversized binary fixture")
         self.git(self.primary, "push", "origin", "feature")
         sha = self.git(self.primary, "rev-parse", "HEAD")
         raw = dict(self.pr.raw)
         raw["headRefOid"] = sha
-        raw["changedFiles"] = 1
-        raw["files"] = [{"path": "large.bin", "status": "added"}]
+        raw["changedFiles"] = 2
+        raw["files"] = [
+            {"path": ".gitattributes", "status": "added"},
+            {"path": "large.bin", "status": "added"},
+        ]
         pr = loopr.PullRequest.from_json("acme/project", raw)
         worktree = self.loop.prepare_worktree(pr)
         iteration = self.loop.artifacts_dir / "oversized-binary-bundle"
         iteration.mkdir()
+
+        original_blob = self.loop._git_blob
+
+        def read_small_blob(worktree_arg: pathlib.Path, path: str) -> bytes:
+            if path == "large.bin":
+                self.fail("the oversized blob was read in full")
+            return original_blob(worktree_arg, path)
+
         with (
-            mock.patch.object(loopr, "MAX_COMMAND_OUTPUT_BYTES", 128),
-            mock.patch.object(self.loop, "_git_blob") as full_read,
             mock.patch.object(
-                self.loop, "_gh", return_value="diff --git a/large.bin b/large.bin\n"
+                self.loop, "_git_blob", side_effect=read_small_blob
+            ) as full_read,
+            mock.patch.object(
+                self.loop,
+                "_gh",
+                return_value="diff --git a/large.bin b/large.bin\n",
             ),
             mock.patch.object(self.loop, "snapshot", return_value=pr),
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
-        full_read.assert_not_called()
+        self.assertNotIn(
+            "large.bin",
+            [call.args[1] for call in full_read.call_args_list],
+        )
         manifest = json.loads(
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
@@ -1286,6 +1368,41 @@ class PatchSafetyTests(unittest.TestCase):
             f"binary {len(large_binary)} bytes",
             (iteration / "changed-files.txt").read_text(),
         )
+
+    def test_bundle_does_not_treat_a_split_utf8_codepoint_as_binary(self) -> None:
+        self.git(self.primary, "checkout", "feature")
+        content = (
+            b"A" * (loopr.BINARY_SNIFF_BYTES - 1)
+            + "é".encode("utf-8")
+            + b"\n"
+        )
+        (self.primary / "split.txt").write_bytes(content)
+        self.git(self.primary, "add", "split.txt")
+        self.git(self.primary, "commit", "-m", "add split utf8 fixture")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": "split.txt", "status": "added"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "split-utf8-bundle"
+        iteration.mkdir()
+        with (
+            mock.patch.object(
+                self.loop, "_gh", return_value="diff --git a/split.txt b/split.txt\n"
+            ),
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        entry = next(item for item in manifest if item["path"] == "split.txt")
+        self.assertEqual("text", entry["kind"])
+        attachment = iteration / entry["attachment"]
+        self.assertEqual(content.decode("utf-8"), attachment.read_text())
 
     def test_bundle_marks_a_deleted_file_from_change_type_without_reading_it(
         self,
