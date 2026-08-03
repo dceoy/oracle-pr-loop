@@ -1116,6 +1116,10 @@ class PatchSafetyTests(unittest.TestCase):
             "filter.z.driver.process process\n"
             "filter.a.clean clean\n"
             "filter.z.driver.smudge smudge\n"
+            "filter.foo=bar.clean clean\n"
+            "filter.foo=bar.clean duplicate\n"
+            "filter.foo=bar.process process\n"
+            "filter.foo=bar.smudge smudge\n"
         )
         result = loopr.CommandResult(("git", "config"), 0, listing, "")
         with mock.patch.object(self.loop.runner, "run", return_value=result):
@@ -1130,6 +1134,14 @@ class PatchSafetyTests(unittest.TestCase):
                 "filter.a.process=",
                 "-c",
                 "filter.a.required=false",
+                "--config-env",
+                "filter.foo=bar.clean=LOOPR_GIT_CONFIG_EMPTY",
+                "--config-env",
+                "filter.foo=bar.smudge=LOOPR_GIT_CONFIG_EMPTY",
+                "--config-env",
+                "filter.foo=bar.process=LOOPR_GIT_CONFIG_EMPTY",
+                "--config-env",
+                "filter.foo=bar.required=LOOPR_GIT_CONFIG_FALSE",
                 "-c",
                 "filter.z.driver.clean=",
                 "-c",
@@ -1141,6 +1153,38 @@ class PatchSafetyTests(unittest.TestCase):
             ],
             overrides,
         )
+
+    def test_git_wrapper_ignores_a_clean_filter_with_equals_in_driver_name(
+        self,
+    ) -> None:
+        marker = pathlib.Path(self.temporary.name) / "equals-clean-fired"
+        original = b"VALUE = 2\n"
+        self.git(
+            self.primary,
+            "config",
+            "filter.foo=bar.clean",
+            f"touch '{marker}'; cat",
+        )
+        self.git(self.primary, "config", "filter.foo=bar.required", "true")
+        (self.worktree / ".gitattributes").write_text(
+            "app.py filter=foo=bar\n", encoding="utf-8"
+        )
+        self.git(self.worktree, "add", ".gitattributes")
+        self.git(self.worktree, "commit", "-m", "attributes")
+        (self.worktree / "app.py").write_bytes(original)
+        self.git(self.worktree, "add", "app.py")
+        marker.unlink(missing_ok=True)
+        result = self.loop.command(["git", "add", "app.py"], cwd=self.worktree)
+
+        self.assertEqual(0, result.returncode)
+        self.assertFalse(marker.exists())
+        indexed = subprocess.run(
+            ["git", "show", ":app.py"],
+            cwd=self.worktree,
+            check=True,
+            capture_output=True,
+        ).stdout
+        self.assertEqual(original, indexed)
 
     def test_git_wrapper_ignores_a_configured_filter_process_driver(self) -> None:
         # filter.<name>.process takes priority over clean/smudge when defined;

@@ -1495,8 +1495,22 @@ class ReviewLoop:
         for driver in sorted(drivers):
             key = f"filter.{driver}"
             for endpoint in ("clean", "smudge", "process"):
-                overrides += ["-c", f"{key}.{endpoint}="]
-            overrides += ["-c", f"{key}.required=false"]
+                config_key = f"{key}.{endpoint}"
+                if "=" in config_key:
+                    overrides += [
+                        "--config-env",
+                        f"{config_key}=LOOPR_GIT_CONFIG_EMPTY",
+                    ]
+                else:
+                    overrides += ["-c", f"{config_key}="]
+            required_key = f"{key}.required"
+            if "=" in required_key:
+                overrides += [
+                    "--config-env",
+                    f"{required_key}=LOOPR_GIT_CONFIG_FALSE",
+                ]
+            else:
+                overrides += ["-c", f"{required_key}=false"]
         return overrides
 
     def command(
@@ -1513,7 +1527,11 @@ class ReviewLoop:
         allow_stdout_truncation: bool = False,
     ) -> CommandResult:
         argv = list(args)
+        child_env: dict[str, str] | None = None
         if argv and argv[0] == "git":
+            child_env = dict(env or self.base_env)
+            child_env["LOOPR_GIT_CONFIG_EMPTY"] = ""
+            child_env["LOOPR_GIT_CONFIG_FALSE"] = "false"
             # Every git invocation here targets either the primary checkout or a
             # disposable per-PR worktree; a repository-configured core.hooksPath
             # or core.fsmonitor hook (including one Codex-controlled content can
@@ -1543,7 +1561,7 @@ class ReviewLoop:
         return self.runner.run(
             argv,
             cwd=cwd or self.repo_dir,
-            env=env or self.base_env,
+            env=child_env if child_env is not None else (env or self.base_env),
             timeout=timeout,
             input_text=input_text,
             check=check,
