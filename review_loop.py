@@ -2203,14 +2203,22 @@ class ReviewLoop:
                 EXIT_PRECONDITION, "pull request exceeds the 100-file context limit"
             )
         try:
-            patch = self._gh(
-                ["pr", "diff", self.pr_url, "--patch"],
+            patch = self.command(
+                [
+                    "git",
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    f"{pr.base_sha}...{pr.head_sha}",
+                ],
+                cwd=self.repo_dir,
                 max_output_bytes=MAX_PATCH_BYTES,
-            )
+            ).stdout
         except CommandError as exc:
             raise LoopError(
                 EXIT_PRECONDITION, f"cannot collect bounded PR patch: {exc}"
             ) from exc
+        assert isinstance(patch, str)
         if len(patch.encode()) > MAX_PATCH_BYTES:
             raise LoopError(
                 EXIT_PRECONDITION, "pull request patch exceeds the 2 MiB limit"
@@ -2834,7 +2842,7 @@ class ReviewLoop:
                         self.push_url,
                         f"{commit}:refs/heads/{pr.head_ref}",
                     ],
-                    cwd=worktree,
+                    cwd=self.repo_dir,
                     timeout=180,
                 )
             except CommandError as exc:

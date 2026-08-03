@@ -994,6 +994,31 @@ class PatchSafetyTests(unittest.TestCase):
         self.assertEqual(pushed, remote_sha)
         self.assertTrue((iteration / "resulting.patch").read_text().strip())
 
+    def test_push_does_not_run_a_relative_receive_pack_in_the_worktree(self) -> None:
+        # A receive-pack configured before the worktree controls are captured is
+        # trusted configuration, but a relative program name must not resolve
+        # against Codex-controlled disposable-worktree content during the push.
+        self.git(self.primary, "config", "remote.origin.receivepack", "./receive-pack")
+        worktree = self.loop.prepare_worktree(self.pr)
+        marker = pathlib.Path(self.temporary.name) / "receive-pack-fired"
+        helper = worktree / "receive-pack"
+        helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
+        helper.chmod(0o755)
+        (worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        iteration = self.loop.artifacts_dir / "relative-receive-pack"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                worktree,
+                1,
+                iteration,
+                self.loop._outside_state(worktree),
+                self.loop._nested_git_entries(worktree),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        self.assertFalse(marker.exists())
+
     def test_git_wrapper_ignores_a_tracked_core_fsmonitor_hook(self) -> None:
         # core.hooksPath does not cover core.fsmonitor: it is a distinct
         # hook command that git/status invokes on its own, and it can be
@@ -1181,6 +1206,47 @@ class PatchSafetyTests(unittest.TestCase):
         )
         self.assertIn(iteration / "diff.patch", bundle.attachments)
         self.assertIn("binary 3 bytes", (iteration / "changed-files.txt").read_text())
+
+    def test_bundle_uses_captured_shas_after_a_force_push_back(self) -> None:
+        # The remote moves from captured A to B and back to A while context is
+        # collected. A mutable PR diff could be substituted with B; the local
+        # immutable A range must be used instead.
+        base = self.pr.base_sha
+        other = pathlib.Path(self.temporary.name) / "other"
+        self.git(
+            pathlib.Path(self.temporary.name), "clone", str(self.remote), str(other)
+        )
+        self.git(other, "config", "user.name", "Other")
+        self.git(other, "config", "user.email", "other@example.test")
+        self.git(other, "checkout", "-B", "feature", base)
+        (other / "app.py").write_text("VALUE = 99\n", encoding="utf-8")
+        self.git(other, "commit", "-am", "replacement B")
+        replacement = self.git(other, "rev-parse", "HEAD")
+        self.git(other, "push", "--force", "origin", "HEAD:refs/heads/feature")
+        self.git(
+            self.primary,
+            "push",
+            "--force",
+            "origin",
+            f"{self.pr.head_sha}:refs/heads/feature",
+        )
+
+        iteration = self.loop.artifacts_dir / "force-push-back-bundle"
+        iteration.mkdir()
+        replacement_patch = self.git(
+            other, "diff", "--binary", "--full-index", f"{base}...{replacement}"
+        )
+        with (
+            mock.patch.object(
+                self.loop, "_gh", return_value=replacement_patch
+            ) as gh_call,
+            mock.patch.object(self.loop, "snapshot", return_value=self.pr),
+        ):
+            self.loop.collect_bundle(self.pr, self.worktree, iteration)
+        patch = (iteration / "diff.patch").read_text(encoding="utf-8")
+        gh_call.assert_not_called()
+        self.assertIn("+VALUE = 2", patch)
+        self.assertNotIn("+VALUE = 99", patch)
 
     def test_bundle_classifies_an_oversized_binary_blob_without_reading_it_whole(
         self,
