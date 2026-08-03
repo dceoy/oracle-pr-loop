@@ -160,6 +160,186 @@ class CommandResult:
     stderr: str
 
 
+if os.name == "nt":
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", ctypes.c_uint32),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", ctypes.c_uint32),
+            ("Affinity", ctypes.c_void_p),
+            ("PriorityClass", ctypes.c_uint32),
+            ("SchedulingClass", ctypes.c_uint32),
+        ]
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", _IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    class _THREADENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ThreadID", ctypes.c_uint32),
+            ("th32OwnerProcessID", ctypes.c_uint32),
+            ("tpBasePri", ctypes.c_long),
+            ("tpDeltaPri", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32),
+        ]
+
+    class _WindowsJobObject:
+        """A kill-on-close Job Object that contains one Windows process tree.
+
+        The leader is created suspended and assigned to this job before its
+        first instruction runs, so a descendant it spawns inherits job
+        membership from the start. Without this, `taskkill /T` after
+        `process.wait()` targets a PID that may no longer identify the
+        process tree, letting a descendant outlive the leader.
+        """
+
+        CREATE_SUSPENDED = 0x00000004
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+        _TH32CS_SNAPTHREAD = 0x00000004
+        _THREAD_SUSPEND_RESUME = 0x0002
+
+        def __init__(self) -> None:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+            kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+            kernel32.SetInformationJobObject.restype = ctypes.c_int
+            kernel32.SetInformationJobObject.argtypes = (
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+            )
+            kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+            kernel32.AssignProcessToJobObject.argtypes = (
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            )
+            kernel32.TerminateJobObject.restype = ctypes.c_int
+            kernel32.TerminateJobObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+            kernel32.CloseHandle.restype = ctypes.c_int
+            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+            kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+            kernel32.CreateToolhelp32Snapshot.argtypes = (
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+            )
+            kernel32.Thread32First.restype = ctypes.c_int
+            kernel32.Thread32First.argtypes = (
+                ctypes.c_void_p,
+                ctypes.POINTER(_THREADENTRY32),
+            )
+            kernel32.Thread32Next.restype = ctypes.c_int
+            kernel32.Thread32Next.argtypes = (
+                ctypes.c_void_p,
+                ctypes.POINTER(_THREADENTRY32),
+            )
+            kernel32.OpenThread.restype = ctypes.c_void_p
+            kernel32.OpenThread.argtypes = (
+                ctypes.c_uint32,
+                ctypes.c_int,
+                ctypes.c_uint32,
+            )
+            kernel32.ResumeThread.restype = ctypes.c_uint32
+            kernel32.ResumeThread.argtypes = (ctypes.c_void_p,)
+            self._kernel32 = kernel32
+            handle = kernel32.CreateJobObjectW(None, None)
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self._handle: int | None = handle
+            info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = (
+                self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            )
+            if not kernel32.SetInformationJobObject(
+                handle,
+                self._JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            ):
+                error = ctypes.get_last_error()
+                kernel32.CloseHandle(handle)
+                self._handle = None
+                raise ctypes.WinError(error)
+
+        def assign_and_resume(self, process: subprocess.Popen) -> None:
+            """Assign the still-suspended `process` to this job and start it."""
+
+            kernel32 = self._kernel32
+            if not kernel32.AssignProcessToJobObject(
+                self._handle, int(process._handle)  # noqa: SLF001
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            thread_handle = self._open_only_thread(process.pid)
+            try:
+                if kernel32.ResumeThread(thread_handle) == 0xFFFFFFFF:
+                    raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                kernel32.CloseHandle(thread_handle)
+
+        def _open_only_thread(self, pid: int) -> int:
+            # A process created with CREATE_SUSPENDED has exactly one
+            # thread until it is resumed; Popen does not expose the thread
+            # handle _winapi.CreateProcess returned (it closes it
+            # immediately), so the suspended thread is found by scanning
+            # system threads for this still-open pid.
+            kernel32 = self._kernel32
+            snapshot = kernel32.CreateToolhelp32Snapshot(self._TH32CS_SNAPTHREAD, 0)
+            if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                entry = _THREADENTRY32()
+                entry.dwSize = ctypes.sizeof(_THREADENTRY32)
+                found: int | None = None
+                more = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+                while more:
+                    if entry.th32OwnerProcessID == pid:
+                        found = entry.th32ThreadID
+                        break
+                    more = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            finally:
+                kernel32.CloseHandle(snapshot)
+            if found is None:
+                raise OSError(f"no thread found for suspended process {pid}")
+            handle = kernel32.OpenThread(self._THREAD_SUSPEND_RESUME, False, found)
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            return handle
+
+        def terminate(self) -> None:
+            with contextlib.suppress(OSError):
+                self._kernel32.TerminateJobObject(self._handle, 1)
+
+        def close(self) -> None:
+            if self._handle is not None:
+                with contextlib.suppress(OSError):
+                    self._kernel32.CloseHandle(self._handle)
+                self._handle = None
+
+
 class CommandRunner:
     """Run argument-vector commands with bounded capture and secret redaction."""
 
@@ -286,153 +466,188 @@ class CommandRunner:
         overflow: list[str] = []
         stream_errors: list[str] = []
         kill_lock = threading.Lock()
-        try:
-            process = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                env=dict(env),
-                stdin=subprocess.PIPE
-                if input_bytes is not None
-                else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            raise CommandError(
-                f"cannot run command {safe_command}: {self.redact(str(exc))}"
-            ) from exc
-
-        def terminate() -> None:
-            # Do not return early when the leader has already exited: a
-            # detached grandchild can keep the rest of the process group
-            # alive after process.wait() returns, and it must not survive
-            # into the caller's post-command steps (staging, commit, push).
-            with kill_lock:
-                if os.name == "posix":
-                    with contextlib.suppress(OSError):
-                        os.killpg(process.pid, signal.SIGKILL)
-                else:
-                    # taskkill reaches descendants but is best-effort (it can
-                    # be missing or denied); process.kill() unconditionally
-                    # guarantees the leader itself dies so callers relying on
-                    # a bounded process.wait() after this never block forever.
-                    with contextlib.suppress(OSError, subprocess.SubprocessError):
-                        subprocess.run(
-                            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            check=False,
-                            timeout=10,
-                        )
-                    with contextlib.suppress(OSError):
-                        process.kill()
-
-        def drain(name: str, stream: Any, limit: int) -> None:
+        job: _WindowsJobObject | None = None
+        if os.name == "nt":
             try:
-                while True:
-                    chunk = stream.read(64 * 1024)
-                    if not chunk:
-                        return
-                    remaining = limit - len(buffers[name])
-                    if remaining > 0:
-                        buffers[name].extend(chunk[:remaining])
-                    if len(chunk) > remaining:
-                        overflow.append(name)
-                        terminate()
+                job = _WindowsJobObject()
             except OSError as exc:
-                stream_errors.append(self.redact(str(exc)))
-                terminate()
-            finally:
-                stream.close()
-
-        def feed() -> None:
-            assert process.stdin is not None
-            try:
-                process.stdin.write(input_bytes or b"")
-                process.stdin.flush()
-            except (BrokenPipeError, OSError):
-                pass
-            finally:
-                process.stdin.close()
-
-        assert process.stdout is not None and process.stderr is not None
-        threads = [
-            threading.Thread(
-                target=drain,
-                args=("stdout", process.stdout, max_output_bytes),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=drain, args=("stderr", process.stderr, stderr_limit), daemon=True
-            ),
-        ]
-        if input_bytes is not None:
-            threads.append(threading.Thread(target=feed, daemon=True))
-        for thread in threads:
-            thread.start()
-        timed_out = False
+                raise CommandError(
+                    f"cannot create Windows job object for {safe_command}: "
+                    f"{self.redact(str(exc))}"
+                ) from exc
         try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            try:
+                process = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env=dict(env),
+                    stdin=subprocess.PIPE
+                    if input_bytes is not None
+                    else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    shell=False,
+                    start_new_session=True,
+                    creationflags=job.CREATE_SUSPENDED if job is not None else 0,
+                )
+            except OSError as exc:
+                raise CommandError(
+                    f"cannot run command {safe_command}: {self.redact(str(exc))}"
+                ) from exc
+            if job is not None:
+                # The leader is still suspended (CREATE_SUSPENDED above) and
+                # has not run its first instruction, so assigning it to the
+                # job here closes the window in which it could spawn a
+                # descendant outside the job before containment exists.
+                try:
+                    job.assign_and_resume(process)
+                except OSError as exc:
+                    process.kill()
+                    process.wait()
+                    raise CommandError(
+                        f"cannot initialize Windows job object for "
+                        f"{safe_command}: {self.redact(str(exc))}"
+                    ) from exc
+
+            def terminate() -> None:
+                # Do not return early when the leader has already exited: a
+                # detached grandchild can keep the rest of the process group
+                # alive after process.wait() returns, and it must not survive
+                # into the caller's post-command steps (staging, commit, push).
+                with kill_lock:
+                    if os.name == "posix":
+                        with contextlib.suppress(OSError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        # The job object (assigned before the leader's first
+                        # instruction ran) contains the whole tree, so
+                        # terminating it reaches descendants that a PID-based
+                        # taskkill issued after process.wait() could no longer
+                        # reliably target. process.kill() is kept as an
+                        # unconditional guarantee that the leader itself dies.
+                        # `job` is always set on this branch (os.name == "nt"
+                        # implies it was created above); this check merely
+                        # avoids an AttributeError under python -O, where
+                        # `assert` statements are stripped.
+                        if job is not None:
+                            job.terminate()
+                        with contextlib.suppress(OSError):
+                            process.kill()
+
+            def drain(name: str, stream: Any, limit: int) -> None:
+                try:
+                    while True:
+                        chunk = stream.read(64 * 1024)
+                        if not chunk:
+                            return
+                        remaining = limit - len(buffers[name])
+                        if remaining > 0:
+                            buffers[name].extend(chunk[:remaining])
+                        if len(chunk) > remaining:
+                            overflow.append(name)
+                            terminate()
+                except OSError as exc:
+                    stream_errors.append(self.redact(str(exc)))
+                    terminate()
+                finally:
+                    stream.close()
+
+            def feed() -> None:
+                assert process.stdin is not None
+                try:
+                    process.stdin.write(input_bytes or b"")
+                    process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+                finally:
+                    process.stdin.close()
+
+            assert process.stdout is not None and process.stderr is not None
+            threads = [
+                threading.Thread(
+                    target=drain,
+                    args=("stdout", process.stdout, max_output_bytes),
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=drain,
+                    args=("stderr", process.stderr, stderr_limit),
+                    daemon=True,
+                ),
+            ]
+            if input_bytes is not None:
+                threads.append(threading.Thread(target=feed, daemon=True))
+            for thread in threads:
+                thread.start()
+            timed_out = False
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                terminate()
+                process.wait()
+            except BaseException:
+                terminate()
+                process.wait()
+                for thread in threads:
+                    thread.join(timeout=5)
+                raise
+            # The leader has exited (or was just force-killed above after a
+            # timeout), but a detached descendant can still be running in the
+            # same process group. Sweep it now, before draining streams, so
+            # nothing outlives this call on any exit path including success,
+            # and so a descendant holding the stdout/stderr pipes open does
+            # not stall the joins below.
             terminate()
-            process.wait()
-        except BaseException:
-            terminate()
-            process.wait()
             for thread in threads:
                 thread.join(timeout=5)
-            raise
-        # The leader has exited (or was just force-killed above after a
-        # timeout), but a detached descendant can still be running in the
-        # same process group. Sweep it now, before draining streams, so
-        # nothing outlives this call on any exit path including success,
-        # and so a descendant holding the stdout/stderr pipes open does not
-        # stall the joins below.
-        terminate()
-        for thread in threads:
-            thread.join(timeout=5)
-        if any(thread.is_alive() for thread in threads):
-            terminate()
-            raise CommandError(f"command streams did not close cleanly: {safe_command}")
-        if stream_errors:
-            raise CommandError(
-                f"command stream capture failed: {safe_command}: {stream_errors[0]}"
-            )
-        if timed_out:
-            raise CommandError(f"command timed out after {timeout}s: {safe_command}")
-        if overflow and not (allow_stdout_truncation and "stderr" not in overflow):
-            label = "diagnostics" if "stderr" in overflow else "output"
-            limit = stderr_limit if label == "diagnostics" else max_output_bytes
-            raise CommandError(
-                f"command {label} exceeded {limit} bytes: {safe_command}"
-            )
+            if any(thread.is_alive() for thread in threads):
+                terminate()
+                raise CommandError(
+                    f"command streams did not close cleanly: {safe_command}"
+                )
+            if stream_errors:
+                raise CommandError(
+                    f"command stream capture failed: {safe_command}: "
+                    f"{stream_errors[0]}"
+                )
+            if timed_out:
+                raise CommandError(
+                    f"command timed out after {timeout}s: {safe_command}"
+                )
+            if overflow and not (allow_stdout_truncation and "stderr" not in overflow):
+                label = "diagnostics" if "stderr" in overflow else "output"
+                limit = stderr_limit if label == "diagnostics" else max_output_bytes
+                raise CommandError(
+                    f"command {label} exceeded {limit} bytes: {safe_command}"
+                )
 
-        stdout_bytes = bytes(buffers["stdout"])
-        stderr_bytes = bytes(buffers["stderr"])
+            stdout_bytes = bytes(buffers["stdout"])
+            stderr_bytes = bytes(buffers["stderr"])
 
-        stderr = self.redact(stderr_bytes.decode("utf-8", "replace"))
-        if binary:
-            stdout: str | bytes = stdout_bytes
-        else:
-            stdout = self.redact(stdout_bytes.decode("utf-8", "replace"))
-        result = CommandResult(argv, process.returncode, stdout, stderr)
-        if check and process.returncode != 0:
-            detail = stderr.strip() or (
-                stdout.strip() if isinstance(stdout, str) else ""
-            )
-            if len(detail) > 2000:
-                detail = detail[:2000] + "..."
-            suffix = f": {detail}" if detail else ""
-            raise CommandError(
-                f"command failed ({process.returncode}): {safe_command}{suffix}",
-                returncode=process.returncode,
-                stdout=stdout if isinstance(stdout, str) else "",
-                stderr=stderr,
-            )
-        return result
+            stderr = self.redact(stderr_bytes.decode("utf-8", "replace"))
+            if binary:
+                stdout: str | bytes = stdout_bytes
+            else:
+                stdout = self.redact(stdout_bytes.decode("utf-8", "replace"))
+            result = CommandResult(argv, process.returncode, stdout, stderr)
+            if check and process.returncode != 0:
+                detail = stderr.strip() or (
+                    stdout.strip() if isinstance(stdout, str) else ""
+                )
+                if len(detail) > 2000:
+                    detail = detail[:2000] + "..."
+                suffix = f": {detail}" if detail else ""
+                raise CommandError(
+                    f"command failed ({process.returncode}): {safe_command}{suffix}",
+                    returncode=process.returncode,
+                    stdout=stdout if isinstance(stdout, str) else "",
+                    stderr=stderr,
+                )
+            return result
+        finally:
+            if job is not None:
+                job.close()
 
 
 def run_command(
@@ -731,25 +946,30 @@ class PrLock:
 
     def __exit__(self, *_: object) -> None:
         if self.fd is not None:
+            fd = self.fd
+            self.fd = None
+            # Close the descriptor before unlinking: on Windows an open
+            # os.open() handle does not grant delete-sharing, so unlinking
+            # the pathname while still holding it raises PermissionError and
+            # leaves the lock behind.
             try:
-                # Only remove the file if it still identifies as the one we
-                # created: the arbiter lock keeps __enter__ recoveries from
-                # racing, but this guards __exit__ against unlinking a lock
-                # that a later contender validly replaced at this pathname.
-                owned = os.fstat(self.fd)
-                try:
-                    current = self.path.lstat()
-                except FileNotFoundError:
-                    current = None
-                if current is not None and (current.st_dev, current.st_ino) == (
-                    owned.st_dev,
-                    owned.st_ino,
-                ):
-                    with contextlib.suppress(FileNotFoundError):
-                        self.path.unlink()
+                owned = os.fstat(fd)
             finally:
-                os.close(self.fd)
-                self.fd = None
+                os.close(fd)
+            # Only remove the file if it still identifies as the one we
+            # created: the arbiter lock keeps __enter__ recoveries from
+            # racing, but this guards __exit__ against unlinking a lock
+            # that a later contender validly replaced at this pathname.
+            try:
+                current = self.path.lstat()
+            except FileNotFoundError:
+                current = None
+            if current is not None and (current.st_dev, current.st_ino) == (
+                owned.st_dev,
+                owned.st_ino,
+            ):
+                with contextlib.suppress(FileNotFoundError):
+                    self.path.unlink()
 
 
 def _json_object(text: str, description: str) -> dict[str, Any]:

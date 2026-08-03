@@ -278,6 +278,69 @@ class InputAndIsolationTests(unittest.TestCase):
         winner.__exit__(None, None, None)
         self.assertFalse(winner.path.exists())
 
+    def test_lock_release_closes_the_descriptor_before_unlinking(self) -> None:
+        # On Windows an open os.open() handle does not grant delete-sharing,
+        # so unlink() must not be attempted while the descriptor is still
+        # open. Assert the fd is already closed (via EBADF) by the time
+        # unlink() runs, without patching the global os.close.
+        lock = loopr.PrLock("acme/project", 9)
+        lock.__enter__()
+        fd = lock.fd
+        original_unlink = pathlib.Path.unlink
+        unlink_called = False
+
+        def recording_unlink(
+            target: pathlib.Path, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal unlink_called
+            unlink_called = True
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+            original_unlink(target, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "unlink", recording_unlink):
+            lock.__exit__(None, None, None)
+        self.assertTrue(unlink_called)
+        self.assertFalse(lock.path.exists())
+
+    def test_windows_job_object_contains_a_detached_grandchild(self) -> None:
+        if os.name != "nt":
+            self.skipTest(
+                "Windows Job Object containment is exercised via real "
+                "kernel32 calls and cannot be validated off Windows"
+            )
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "grandchild-survived"
+            grandchild_script = root / "grandchild.py"
+            grandchild_script.write_text(
+                "import sys, time\n"
+                "time.sleep(1)\n"
+                "open(sys.argv[1], 'w').close()\n",
+                encoding="utf-8",
+            )
+            leader_script = root / "leader.py"
+            leader_script.write_text(
+                "import subprocess, sys\n"
+                "subprocess.Popen(\n"
+                "    [sys.executable, sys.argv[1], sys.argv[2]],\n"
+                "    stdout=subprocess.DEVNULL,\n"
+                "    stderr=subprocess.DEVNULL,\n"
+                "    stdin=subprocess.DEVNULL,\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            result = runner.run(
+                ["python3", str(leader_script), str(grandchild_script), str(marker)],
+                cwd=root,
+                env=runner.base_env(),
+            )
+            self.assertEqual(0, result.returncode)
+            self.assertFalse(marker.exists())
+            time.sleep(1.5)
+            self.assertFalse(marker.exists())
+
     def test_pid_liveness_on_windows_never_probes_with_os_kill(self) -> None:
         with (
             mock.patch.object(loopr.os, "name", "nt"),
