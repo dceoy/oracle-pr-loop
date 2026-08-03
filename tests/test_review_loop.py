@@ -5,10 +5,12 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
+from typing import Any
 from unittest import mock
 
 import review_loop as loopr
@@ -299,12 +301,11 @@ class InputAndIsolationTests(unittest.TestCase):
         lock = loopr.PrLock("acme/project", 9)
         lock.__enter__()
         fd = lock.fd
+        assert fd is not None
         original_unlink = pathlib.Path.unlink
         unlink_called = False
 
-        def recording_unlink(
-            target: pathlib.Path, *args: object, **kwargs: object
-        ) -> None:
+        def recording_unlink(target: pathlib.Path, *args: Any, **kwargs: Any) -> None:
             nonlocal unlink_called
             unlink_called = True
             with self.assertRaises(OSError):
@@ -328,9 +329,7 @@ class InputAndIsolationTests(unittest.TestCase):
             marker = root / "grandchild-survived"
             grandchild_script = root / "grandchild.py"
             grandchild_script.write_text(
-                "import sys, time\n"
-                "time.sleep(1)\n"
-                "open(sys.argv[1], 'w').close()\n",
+                "import sys, time\ntime.sleep(1)\nopen(sys.argv[1], 'w').close()\n",
                 encoding="utf-8",
             )
             leader_script = root / "leader.py"
@@ -433,9 +432,7 @@ class InputAndIsolationTests(unittest.TestCase):
             marker = root / "grandchild-survived"
             grandchild_script = root / "grandchild.py"
             grandchild_script.write_text(
-                "import sys, time\n"
-                "time.sleep(1)\n"
-                "open(sys.argv[1], 'w').close()\n",
+                "import sys, time\ntime.sleep(1)\nopen(sys.argv[1], 'w').close()\n",
                 encoding="utf-8",
             )
             leader_script = root / "leader.py"
@@ -472,9 +469,7 @@ class InputAndIsolationTests(unittest.TestCase):
             marker = root / "grandchild-survived"
             grandchild_script = root / "grandchild.py"
             grandchild_script.write_text(
-                "import sys, time\n"
-                "time.sleep(1)\n"
-                "open(sys.argv[1], 'w').close()\n",
+                "import sys, time\ntime.sleep(1)\nopen(sys.argv[1], 'w').close()\n",
                 encoding="utf-8",
             )
             leader_script = root / "leader.py"
@@ -500,43 +495,125 @@ class InputAndIsolationTests(unittest.TestCase):
             time.sleep(1.5)
             self.assertFalse(marker.exists())
 
-    def test_linux_pid_matches_rejects_a_live_pid_with_a_different_start_time(
+    def test_command_wrapper_kills_a_fast_double_forked_detached_grandchild(
         self,
     ) -> None:
-        if not pathlib.Path("/proc").is_dir():
-            self.skipTest("start-time identity check requires /proc (Linux only)")
-        fields = loopr._linux_proc_stat_fields(os.getpid())
-        assert fields is not None
-        real_start_time = fields[19]
-        self.assertTrue(loopr._linux_pid_matches(os.getpid(), real_start_time))
-        self.assertFalse(
-            loopr._linux_pid_matches(os.getpid(), real_start_time + b"9")
-        )
-
-    def test_verify_no_posix_descendants_does_not_kill_a_pid_recycled_by_a_bystander(
-        self,
-    ) -> None:
-        if not pathlib.Path("/proc").is_dir():
-            self.skipTest("descendant verification requires /proc (Linux only)")
-        bystander = subprocess.Popen(
-            ["sleep", "5"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        try:
-            fields = loopr._linux_proc_stat_fields(bystander.pid)
-            assert fields is not None
-            # A pid the OS has recycled since it was first observed as a
-            # descendant would carry a different start time; a mismatched
-            # one here stands in for that without needing to force a real
-            # pid reuse, which the OS does not offer a deterministic way to
-            # do in a test.
-            stale_start_time = fields[19] + b"9"
-            loopr._verify_no_posix_descendants(
-                {bystander.pid: stale_start_time}, "test-command"
+        if not sys.platform.startswith("linux"):
+            self.skipTest("kernel subreaper containment is Linux-only")
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "grandchild-survived"
+            leader_script = root / "leader.py"
+            leader_script.write_text(
+                "import os, sys, time\n"
+                "first = os.fork()\n"
+                "if first:\n"
+                "    os._exit(0)\n"
+                "os.setsid()\n"
+                "second = os.fork()\n"
+                "if second:\n"
+                "    os._exit(0)\n"
+                "time.sleep(1)\n"
+                "open(sys.argv[1], 'w').close()\n",
+                encoding="utf-8",
             )
-            self.assertIsNone(bystander.poll())
+            result = runner.run(
+                [sys.executable, str(leader_script), str(marker)],
+                cwd=root,
+                env=runner.base_env(),
+                timeout=10,
+            )
+            self.assertEqual(0, result.returncode)
+            self.assertFalse(marker.exists())
+            time.sleep(1.5)
+            self.assertFalse(marker.exists())
+
+    def test_linux_supervisor_fails_before_exec_when_subreaper_setup_fails(
+        self,
+    ) -> None:
+        if not sys.platform.startswith("linux"):
+            self.skipTest("kernel subreaper containment is Linux-only")
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "payload-ran"
+            payload = "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('ran')"
+            with (
+                mock.patch.object(
+                    loopr,
+                    "_linux_enable_subreaper",
+                    side_effect=OSError("forced subreaper failure"),
+                ),
+                self.assertRaises(loopr.CommandError),
+            ):
+                runner.run(
+                    [sys.executable, "-c", payload, str(marker)],
+                    cwd=root,
+                    env=runner.base_env(),
+                )
+            self.assertFalse(marker.exists())
+
+    def test_linux_supervisor_fails_before_exec_when_pidfds_are_unavailable(
+        self,
+    ) -> None:
+        if not sys.platform.startswith("linux"):
+            self.skipTest("stable pidfd containment is Linux-only")
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "payload-ran"
+            payload = "import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('ran')"
+            with (
+                mock.patch.object(
+                    loopr,
+                    "_linux_pidfd_open",
+                    side_effect=OSError("forced pidfd failure"),
+                ),
+                self.assertRaises(loopr.CommandError),
+            ):
+                runner.run(
+                    [sys.executable, "-c", payload, str(marker)],
+                    cwd=root,
+                    env=runner.base_env(),
+                )
+            self.assertFalse(marker.exists())
+
+    def test_linux_kill_uses_a_stable_pidfd_handle(self) -> None:
+        with (
+            mock.patch.object(
+                loopr.os, "pidfd_open", create=True, return_value=41
+            ) as pidfd_open,
+            mock.patch.object(
+                loopr.signal, "pidfd_send_signal", create=True
+            ) as send_signal,
+            mock.patch.object(loopr.os, "close") as close,
+        ):
+            self.assertTrue(loopr._linux_kill_pid(1234))
+        pidfd_open.assert_called_once_with(1234, 0)
+        send_signal.assert_called_once_with(41, loopr.signal.SIGKILL, None, 0)
+        close.assert_called_once_with(41)
+
+    def test_linux_status_payload_is_hard_bounded(self) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            loopr._linux_send_status(
+                write_fd,
+                {"type": "error", "message": "x" * (loopr.LINUX_STATUS_MAX_BYTES * 4)},
+            )
+            os.close(write_fd)
+            write_fd = -1
+            raw = os.read(read_fd, loopr.LINUX_STATUS_MAX_BYTES + 1)
         finally:
-            bystander.kill()
-            bystander.wait()
+            if write_fd >= 0:
+                os.close(write_fd)
+            os.close(read_fd)
+        self.assertLessEqual(len(raw), loopr.LINUX_STATUS_MAX_BYTES)
+        parsed = json.loads(raw)
+        self.assertEqual("error", parsed["type"])
+        self.assertLessEqual(
+            len(parsed["message"].encode("utf-8")), loopr.LINUX_STATUS_ERROR_BYTES + 3
+        )
 
     def test_run_codex_receives_the_sanitized_environment(self) -> None:
         source = {
@@ -906,7 +983,16 @@ class PatchSafetyTests(unittest.TestCase):
         self.git(unset, "init", "-q")
         homeless = pathlib.Path(self.temporary.name) / "empty-home"
         homeless.mkdir()
-        runner = loopr.CommandRunner({"PATH": os.environ["PATH"], "HOME": str(homeless)})
+        runner = loopr.CommandRunner(
+            {
+                "PATH": os.environ["PATH"],
+                "HOME": str(homeless),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+                "GIT_CONFIG_VALUE_0": "true",
+            }
+        )
         instance = loopr.ReviewLoop(args_for(unset), runner)
         instance.repo_dir = unset
         with self.assertRaises(loopr.CommandError):
@@ -920,7 +1006,9 @@ class PatchSafetyTests(unittest.TestCase):
 
     def test_pushability_precheck_detects_a_diverged_remote_head(self) -> None:
         other = pathlib.Path(self.temporary.name) / "other"
-        self.git(pathlib.Path(self.temporary.name), "clone", str(self.remote), str(other))
+        self.git(
+            pathlib.Path(self.temporary.name), "clone", str(self.remote), str(other)
+        )
         self.git(other, "config", "user.name", "Other")
         self.git(other, "config", "user.email", "other@example.test")
         self.git(other, "checkout", "feature")
@@ -932,7 +1020,9 @@ class PatchSafetyTests(unittest.TestCase):
             self.loop._check_pushable(self.pr)
         self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
 
-    def test_pushability_precheck_cannot_predict_a_branch_policy_rejection(self) -> None:
+    def test_pushability_precheck_cannot_predict_a_branch_policy_rejection(
+        self,
+    ) -> None:
         # Documents a known limitation: --dry-run never reaches the
         # server's hook/branch-protection phase, even for a push that
         # would land a genuinely new commit, so this precheck cannot
@@ -1025,9 +1115,7 @@ class PatchSafetyTests(unittest.TestCase):
         # pointed at a path the disposable worktree controls.
         marker = pathlib.Path(self.temporary.name) / "fsmonitor-fired"
         hook = self.worktree / "fsmonitor-hook.sh"
-        hook.write_text(
-            f"#!/bin/sh\ntouch '{marker}'\necho /\n", encoding="utf-8"
-        )
+        hook.write_text(f"#!/bin/sh\ntouch '{marker}'\necho /\n", encoding="utf-8")
         hook.chmod(0o755)
         self.git(self.worktree, "config", "core.fsmonitor", str(hook))
         self.loop.command(["git", "status"], cwd=self.worktree)
@@ -1354,11 +1442,11 @@ class PatchSafetyTests(unittest.TestCase):
         self.assertIn("+VALUE = 2", patch)
         self.assertNotIn("+VALUE = 99", patch)
 
-    def test_bundle_classifies_an_oversized_invalid_utf8_blob_without_reading_it_whole(
+    def test_bundle_classifies_an_oversized_blob_with_late_invalid_utf8_as_binary_without_full_buffering(
         self,
     ) -> None:
         self.git(self.primary, "checkout", "feature")
-        large_binary = b"\xff" + (b"A" * loopr.MAX_ATTACHED_TEXT_BYTES)
+        large_binary = (b"A" * loopr.MAX_ATTACHED_TEXT_BYTES) + b"\xff"
         (self.primary / ".gitattributes").write_text(
             "large.bin binary\n", encoding="utf-8"
         )
@@ -1379,17 +1467,26 @@ class PatchSafetyTests(unittest.TestCase):
         iteration = self.loop.artifacts_dir / "oversized-binary-bundle"
         iteration.mkdir()
 
-        original_blob = self.loop._git_blob
+        original_stream = self.loop._stream_git_blob
+        chunk_sizes: list[int] = []
 
-        def read_small_blob(worktree_arg: pathlib.Path, path: str) -> bytes:
-            if path == "large.bin":
-                self.fail("the oversized blob was read in full")
-            return original_blob(worktree_arg, path)
+        def observe_stream(
+            worktree_arg: pathlib.Path,
+            path: str,
+            on_chunk: object,
+        ) -> None:
+            assert callable(on_chunk)
+
+            def observe(chunk: bytes) -> None:
+                chunk_sizes.append(len(chunk))
+                on_chunk(chunk)
+
+            original_stream(worktree_arg, path, observe)
 
         with (
             mock.patch.object(
-                self.loop, "_git_blob", side_effect=read_small_blob
-            ) as full_read,
+                self.loop, "_stream_git_blob", side_effect=observe_stream
+            ),
             mock.patch.object(
                 self.loop,
                 "_gh",
@@ -1398,10 +1495,8 @@ class PatchSafetyTests(unittest.TestCase):
             mock.patch.object(self.loop, "snapshot", return_value=pr),
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
-        self.assertNotIn(
-            "large.bin",
-            [call.args[1] for call in full_read.call_args_list],
-        )
+        self.assertGreater(len(chunk_sizes), 1)
+        self.assertLessEqual(max(chunk_sizes), loopr.COMMAND_STREAM_CHUNK_BYTES)
         manifest = json.loads(
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
@@ -1413,13 +1508,64 @@ class PatchSafetyTests(unittest.TestCase):
             (iteration / "changed-files.txt").read_text(),
         )
 
+    def test_bundle_rejects_oversized_valid_utf8_after_streaming_classification(
+        self,
+    ) -> None:
+        self.git(self.primary, "checkout", "feature")
+        large_text = b"A" * (loopr.MAX_ATTACHED_TEXT_BYTES + 1)
+        (self.primary / ".gitattributes").write_text(
+            "large.txt binary\n", encoding="utf-8"
+        )
+        (self.primary / "large.txt").write_bytes(large_text)
+        self.git(self.primary, "add", ".gitattributes", "large.txt")
+        self.git(self.primary, "commit", "-m", "add oversized text fixture")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 2
+        raw["files"] = [
+            {"path": ".gitattributes", "status": "added"},
+            {"path": "large.txt", "status": "added"},
+        ]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "oversized-text-bundle"
+        iteration.mkdir()
+        original_stream = self.loop._stream_git_blob
+        chunk_sizes: list[int] = []
+
+        def observe_stream(
+            worktree_arg: pathlib.Path,
+            path: str,
+            on_chunk: object,
+        ) -> None:
+            assert callable(on_chunk)
+
+            def observe(chunk: bytes) -> None:
+                chunk_sizes.append(len(chunk))
+                on_chunk(chunk)
+
+            original_stream(worktree_arg, path, observe)
+
+        with (
+            mock.patch.object(
+                self.loop, "_stream_git_blob", side_effect=observe_stream
+            ),
+            mock.patch.object(
+                self.loop, "_gh", return_value="diff --git a/large.txt b/large.txt\n"
+            ),
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        self.assertGreater(len(chunk_sizes), 1)
+        self.assertLessEqual(max(chunk_sizes), loopr.COMMAND_STREAM_CHUNK_BYTES)
+
     def test_bundle_does_not_treat_a_split_utf8_codepoint_as_binary(self) -> None:
         self.git(self.primary, "checkout", "feature")
-        content = (
-            b"A" * (loopr.BINARY_SNIFF_BYTES - 1)
-            + "é".encode("utf-8")
-            + b"\n"
-        )
+        content = b"A" * (loopr.COMMAND_STREAM_CHUNK_BYTES - 1) + "é".encode() + b"\n"
         (self.primary / "split.txt").write_bytes(content)
         self.git(self.primary, "add", "split.txt")
         self.git(self.primary, "commit", "-m", "add split utf8 fixture")

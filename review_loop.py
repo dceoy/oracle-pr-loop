@@ -14,11 +14,13 @@ import contextlib
 import ctypes
 import dataclasses
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
 import pathlib
 import re
+import select
 import shutil
 import signal
 import stat
@@ -29,8 +31,8 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Any, NoReturn, cast
 
 EXIT_OK = 0
 EXIT_PRECONDITION = 2
@@ -44,8 +46,10 @@ MAX_CHANGED_FILES = 100
 MAX_PATCH_BYTES = 2 * 1024 * 1024
 MAX_ATTACHED_TEXT_BYTES = 20 * 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 24 * 1024 * 1024
-BINARY_SNIFF_BYTES = 8000
 COMMAND_TIMEOUT = 120
+COMMAND_STREAM_CHUNK_BYTES = 64 * 1024
+LINUX_STATUS_MAX_BYTES = 4096
+LINUX_STATUS_ERROR_BYTES = 2048
 ORACLE_TIMEOUT = 60 * 60
 CODEX_TIMEOUT = 45 * 60
 POLL_TIMEOUT = 90
@@ -291,7 +295,7 @@ if os.name == "nt":
 
             kernel32 = self._kernel32
             if not kernel32.AssignProcessToJobObject(
-                self._handle, int(process._handle)  # noqa: SLF001
+                self._handle, int(process._handle)
             ):
                 raise ctypes.WinError(ctypes.get_last_error())
             thread_handle = self._open_only_thread(process.pid)
@@ -341,146 +345,456 @@ if os.name == "nt":
                 self._handle = None
 
 
-def _linux_proc_stat_fields(pid: int) -> list[bytes] | None:
-    """Return the /proc/<pid>/stat fields after `comm`, or None if unreadable.
+def _linux_enable_subreaper() -> None:
+    """Enable child subreaper adoption for the current Linux supervisor."""
 
-    Read 4096 bytes: `comm` itself is kernel-truncated to `TASK_COMM_LEN`
-    (16 bytes) so it cannot inflate this, but the cumulative counters later
-    in the line (utime, stime, cutime, cstime, ...) are unbounded-width
-    decimal numbers, and field 19 (starttime, index 19 here since `comm`
-    and `pid` are stripped) must reliably be within the read for identity
-    checks to be meaningful.
-    """
     try:
-        with open(f"/proc/{pid}/stat", "rb") as handle:
-            raw = handle.read(4096)
-    except OSError:
-        return None
-    end = raw.rfind(b")")
-    if end == -1:
-        return None
-    fields = raw[end + 1 :].split()
-    if len(fields) < 20:
-        return None
-    return fields
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = libc.prctl
+    except (AttributeError, OSError) as exc:
+        raise OSError(errno.ENOSYS, "prctl is unavailable") from exc
+    prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    prctl.restype = ctypes.c_int
+    if prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno() or errno.EIO
+        raise OSError(error, os.strerror(error))
 
 
-def _linux_descendant_pids(root_pid: int) -> dict[int, bytes]:
-    """Return live descendants of `root_pid` on Linux, mapped to /proc start time.
+def _linux_pidfd_open(pid: int) -> int:
+    opener = getattr(os, "pidfd_open", None)
+    if not callable(opener):
+        raise OSError(errno.ENOSYS, "pidfd_open is unavailable")
+    return cast(int, opener(pid, 0))
 
-    A process-group sweep (`killpg`) misses a descendant that calls
-    `os.setsid()` (or is started with `start_new_session=True`): that
-    descendant leaves the leader's process group but its `ppid` in
-    /proc/<pid>/stat is unaffected, so the parent-child tree still finds it.
-    This does not find a descendant that double-forks after its immediate
-    parent has already exited, since it is reparented away from this tree
-    (to init or the nearest subreaper) before it can be observed here.
 
-    Each descendant's start time (field 22, `/proc/<pid>/stat` field index
-    19 after `comm` is stripped) is returned alongside its pid because the
-    kernel never reuses that value for a different process at the same pid:
-    a caller that keeps this pid around after the process exits can compare
-    against it later to tell the original descendant apart from an
-    unrelated process that has since reused the pid.
-    """
-    stats: dict[int, list[bytes]] = {}
+def _linux_pidfd_send_signal(pidfd: int, sig: int) -> None:
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if not callable(sender):
+        raise OSError(errno.ENOSYS, "pidfd_send_signal is unavailable")
+    sender(pidfd, sig, None, 0)
+
+
+def _linux_require_pidfd_support(pid: int) -> None:
+    handle = _linux_pidfd_open(pid)
     try:
-        names = os.listdir("/proc")
-    except OSError:
-        return {}
-    for name in names:
-        if not name.isdigit():
-            continue
-        fields = _linux_proc_stat_fields(int(name))
-        if fields is None:
-            continue
-        stats[int(name)] = fields
-    children: dict[int, list[int]] = {}
-    for pid, fields in stats.items():
+        _linux_pidfd_send_signal(handle, 0)
+    finally:
+        os.close(handle)
+
+
+def _linux_kill_pid(pid: int) -> bool:
+    try:
+        handle = _linux_pidfd_open(pid)
+    except ProcessLookupError:
+        return False
+    try:
         try:
-            ppid = int(fields[1])
-        except ValueError:
+            _linux_pidfd_send_signal(handle, signal.SIGKILL)
+        except ProcessLookupError:
+            return False
+        return True
+    finally:
+        os.close(handle)
+
+
+def _linux_proc_children(pid: int, *, required: bool = False) -> set[int]:
+    """Return the kernel-reported direct children of a process."""
+
+    path = f"/proc/{pid}/task/{pid}/children"
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        if required:
+            raise
+        return set()
+    children: set[int] = set()
+    for token in raw.split():
+        if not token.isdigit():
+            raise OSError(errno.EPROTO, f"invalid child pid in {path}")
+        children.add(int(token))
+    return children
+
+
+def _linux_require_proc_child_enumeration(pid: int) -> None:
+    """Fail closed unless the supervisor can enumerate its children."""
+
+    if not os.path.isdir("/proc"):
+        raise OSError(errno.ENOSYS, "/proc child enumeration is unavailable")
+    _linux_proc_children(pid, required=True)
+    _linux_require_pidfd_support(pid)
+
+
+def _linux_reap_available() -> bool:
+    """Reap every currently waitable child and report whether one was found."""
+
+    reaped = False
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return reaped
+        except InterruptedError:
             continue
-        children.setdefault(ppid, []).append(pid)
-    descendants: dict[int, bytes] = {}
-    frontier = [root_pid]
-    while frontier:
-        pid = frontier.pop()
-        for child in children.get(pid, ()):
-            if child not in descendants:
-                descendants[child] = stats[child][19]
-                frontier.append(child)
-    return descendants
+        if pid == 0:
+            return reaped
+        reaped = True
 
 
-def _linux_pid_matches(pid: int, start_time: bytes) -> bool:
-    """True if `pid` is still running/sleeping/stopped with the given start time.
+def _linux_cleanup_children(
+    payload: subprocess.Popen,
+    supervisor_pid: int,
+    safe_command: str,
+    *,
+    terminate_payload: bool,
+) -> int:
+    """Kill and reap the payload and every child adopted by the supervisor."""
 
-    A zombie ('Z' state) has already exited and cannot run code, modify
-    files, or hold any resource beyond its exit status; it is only waiting
-    for its parent to reap it. In a container without an init that reaps
-    orphans, a killed and reparented descendant can sit as a zombie
-    indefinitely, so `os.kill(pid, 0)` (which still succeeds against a
-    zombie) cannot be used as a "did this survive" check -- it would treat
-    every already-dead descendant as still alive forever. Reading the state
-    field directly distinguishes the two. Comparing `start_time` against the
-    value captured when this pid was first observed additionally rejects an
-    unrelated process that the OS has since started under the same,
-    recycled pid: without this, a descendant that already exited and whose
-    pid was reused could be mistaken for the original and killed.
-    """
-    fields = _linux_proc_stat_fields(pid)
-    if fields is None:
+    if terminate_payload and payload.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
+            _linux_kill_pid(payload.pid)
+    try:
+        returncode = payload.wait()
+    except OSError as exc:
+        raise CommandError(
+            f"Linux supervisor could not reap the payload: {safe_command}"
+        ) from exc
+
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            children = _linux_proc_children(supervisor_pid, required=True)
+        except OSError as exc:
+            raise CommandError(
+                f"Linux supervisor child enumeration failed during cleanup: "
+                f"{safe_command}"
+            ) from exc
+        for pid in children:
+            try:
+                _linux_kill_pid(pid)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                raise CommandError(
+                    f"Linux supervisor could not terminate a child: {safe_command}"
+                ) from exc
+        reaped = _linux_reap_available()
+        try:
+            remaining = _linux_proc_children(supervisor_pid, required=True)
+        except OSError as exc:
+            raise CommandError(
+                f"Linux supervisor child enumeration failed during cleanup: "
+                f"{safe_command}"
+            ) from exc
+        if not remaining and not reaped and not _linux_reap_available():
+            return returncode
+        if time.monotonic() >= deadline:
+            raise CommandError(
+                f"Linux supervisor could not prove that all children were reaped: "
+                f"{safe_command}"
+            )
+        time.sleep(0.01)
+
+
+def _linux_send_status(status_fd: int, message: Mapping[str, object]) -> None:
+    bounded = dict(message)
+    detail = bounded.get("message")
+    if isinstance(detail, str):
+        encoded = detail.encode("utf-8", "replace")
+        if len(encoded) > LINUX_STATUS_ERROR_BYTES:
+            bounded["message"] = (
+                encoded[:LINUX_STATUS_ERROR_BYTES].decode("utf-8", "ignore") + "..."
+            )
+    raw = json.dumps(bounded, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(raw) > LINUX_STATUS_MAX_BYTES:
+        raw = (
+            json.dumps(
+                {
+                    "type": str(bounded.get("type", "error")),
+                    "message": "status truncated",
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+    if len(raw) > LINUX_STATUS_MAX_BYTES:
+        return
+    try:
+        view = memoryview(raw)
+        while view:
+            view = view[os.write(status_fd, view) :]
+    except OSError:
+        # The parent may have been interrupted after asking for termination.
+        # Cleanup still runs; there is no recipient for a later diagnostic.
+        return
+
+
+def _linux_stop_requested(command_fd: int) -> bool:
+    ready, _, _ = select.select([command_fd], [], [], 0.05)
+    if not ready:
         return False
-    if fields[0] in (b"Z", b"X"):
-        return False
-    return fields[19] == start_time
+    data = os.read(command_fd, 4096)
+    return not data or bool(data)
 
 
-def _verify_no_posix_descendants(pids: Mapping[int, bytes], safe_command: str) -> None:
-    """Fail the command if any previously observed descendant is still alive.
+def _linux_supervisor_main(
+    argv: tuple[str, ...],
+    cwd: pathlib.Path,
+    env: Mapping[str, str],
+    input_fd: int | None,
+    stdout_fd: int,
+    stderr_fd: int,
+    command_fd: int,
+    status_fd: int,
+    safe_command: str,
+) -> NoReturn:
+    """Run one payload as the sole child of a Linux subreaper."""
 
-    `pids` must be gathered by polling the live process tree under the
-    leader *before* it exited (see `monitor_descendants` in `CommandRunner
-    .run`), not derived afterwards: as soon as the leader exits, the kernel
-    immediately reparents any still-living descendant to init (or the
-    nearest subreaper), which erases the parent link a post-exit /proc walk
-    would need. Checking each previously observed pid directly with a
-    liveness probe sidesteps that, and also still catches a descendant that
-    called setsid() (or was started with start_new_session=True) to leave
-    the leader's process group, which killpg() alone cannot reach. Each pid
-    maps to the start time it had when first observed, so a pid the OS has
-    since recycled for an unrelated process is detected and skipped instead
-    of being killed.
+    payload: subprocess.Popen | None = None
+    exit_code = 1
+    try:
+        _linux_enable_subreaper()
+        _linux_require_proc_child_enumeration(os.getpid())
+        payload = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=dict(env),
+            stdin=input_fd if input_fd is not None else subprocess.DEVNULL,
+            stdout=stdout_fd,
+            stderr=stderr_fd,
+            shell=False,
+            close_fds=True,
+            start_new_session=True,
+        )
+        for fd in (input_fd, stdout_fd, stderr_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        terminate_payload = False
+        while payload.poll() is None:
+            if _linux_stop_requested(command_fd):
+                terminate_payload = True
+                break
+        returncode = _linux_cleanup_children(
+            payload,
+            os.getpid(),
+            safe_command,
+            terminate_payload=terminate_payload,
+        )
+        _linux_send_status(
+            status_fd,
+            {"type": "result", "returncode": returncode, "contained": True},
+        )
+        exit_code = 0
+    except BaseException as exc:  # noqa: BLE001 - cleanup must cover interrupts
+        if payload is not None:
+            try:
+                _linux_cleanup_children(
+                    payload,
+                    os.getpid(),
+                    safe_command,
+                    terminate_payload=True,
+                )
+            except BaseException as cleanup_exc:  # noqa: BLE001 - fail closed
+                exc = RuntimeError(f"{exc}; cleanup failed: {cleanup_exc}")
+        _linux_send_status(
+            status_fd,
+            {"type": "error", "message": str(exc)},
+        )
+    finally:
+        for fd in (input_fd, stdout_fd, stderr_fd, command_fd, status_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        os._exit(exit_code)
 
-    This is a verify-or-abort backstop for every pid it was told about: a
-    survivor is given a direct SIGKILL and a few bounded retries, and if one
-    is still alive after that, the caller must not proceed to validation,
-    staging, or push, so this raises instead of returning. It cannot verify
-    a descendant it was never told about: `monitor_descendants` samples the
-    tree on a fixed interval, so a descendant both created and orphaned
-    between two samples is invisible here and this returns normally without
-    having contained it (see README Limitations). `pids` is only ever
-    non-empty when the leader ran on Linux with /proc available (see `run`);
-    elsewhere this is a no-op, and containment remains the best-effort
-    process-group kill only, which does not catch a descendant that leaves
-    that group at all.
-    """
-    remaining = dict(pids)
-    for _ in range(5):
-        alive = {
-            pid: start
-            for pid, start in remaining.items()
-            if _linux_pid_matches(pid, start)
-        }
-        if not alive:
-            return
-        for pid in alive:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
-        remaining = alive
-        time.sleep(0.1)
-    raise CommandError(f"a descendant process survived termination: {safe_command}")
+
+class _LinuxSupervisorProcess:
+    """Small Popen-like parent handle for one forked Linux supervisor."""
+
+    def __init__(
+        self,
+        argv: tuple[str, ...],
+        pid: int,
+        stdin: Any,
+        stdout: Any,
+        stderr: Any,
+        command_fd: int,
+        status_fd: int,
+    ) -> None:
+        self.args = argv
+        self.pid = pid
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+        self._command_fd = command_fd
+        self._status_fd = status_fd
+        self._command_lock = threading.Lock()
+        self._termination_requested = False
+        self._command_error = False
+        self.returncode: int | None = None
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is not None:
+            return self.returncode
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        while True:
+            try:
+                pid, status = os.waitpid(self.pid, os.WNOHANG if deadline else 0)
+            except InterruptedError:
+                continue
+            if pid == self.pid:
+                self.returncode = os.waitstatus_to_exitcode(status)
+                return self.returncode
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    assert timeout is not None
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                time.sleep(min(0.01, remaining))
+
+    def request_termination(self) -> None:
+        with self._command_lock:
+            if self._termination_requested or self.returncode is not None:
+                return
+            self._termination_requested = True
+            try:
+                os.write(self._command_fd, b"\x01")
+            except OSError:
+                self._command_error = True
+
+    def result(self, safe_command: str, redactor: Callable[[str], str]) -> int:
+        raw = bytearray()
+        try:
+            while True:
+                chunk = os.read(self._status_fd, 64 * 1024)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if len(raw) > 1024 * 1024:
+                    raise CommandError(
+                        f"Linux supervisor status exceeded its bound: {safe_command}"
+                    )
+        except OSError as exc:
+            raise CommandError(
+                f"Linux supervisor status could not be read: {safe_command}"
+            ) from exc
+        messages: list[dict[str, object]] = []
+        for line in raw.splitlines():
+            try:
+                message = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CommandError(
+                    f"Linux supervisor returned invalid status: {safe_command}"
+                ) from exc
+            if not isinstance(message, dict):
+                raise CommandError(
+                    f"Linux supervisor returned invalid status: {safe_command}"
+                )
+            messages.append(message)
+        result_messages = [item for item in messages if item.get("type") == "result"]
+        error_messages = [item for item in messages if item.get("type") == "error"]
+        if error_messages:
+            detail = str(error_messages[-1].get("message") or "unknown failure")
+            raise CommandError(
+                f"Linux supervisor failed: {redactor(detail)}: {safe_command}"
+            )
+        if len(result_messages) != 1 or not result_messages[0].get("contained"):
+            raise CommandError(
+                f"Linux supervisor did not prove containment: {safe_command}"
+            )
+        value = result_messages[0].get("returncode")
+        if not isinstance(value, int):
+            raise CommandError(
+                f"Linux supervisor returned an invalid payload status: {safe_command}"
+            )
+        return value
+
+    def close(self) -> None:
+        for stream in (self.stdin, self.stdout, self.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
+        for fd in (self._command_fd, self._status_fd):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _linux_spawn_supervisor(
+    argv: tuple[str, ...],
+    *,
+    cwd: pathlib.Path,
+    env: Mapping[str, str],
+    input_bytes: bytes | None,
+    safe_command: str,
+) -> _LinuxSupervisorProcess:
+    """Fork a supervisor and wire only payload stdio to the caller."""
+
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    status_read, status_write = os.pipe()
+    command_read, command_write = os.pipe()
+    input_read: int | None = None
+    input_write: int | None = None
+    if input_bytes is not None:
+        input_read, input_write = os.pipe()
+    try:
+        pid = os.fork()
+    except OSError:
+        for fd in (
+            stdout_read,
+            stdout_write,
+            stderr_read,
+            stderr_write,
+            status_read,
+            status_write,
+            command_read,
+            command_write,
+            input_read,
+            input_write,
+        ):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        raise
+    if pid == 0:
+        for fd in (stdout_read, stderr_read, status_read, command_write, input_write):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        _linux_supervisor_main(
+            argv,
+            cwd,
+            env,
+            input_read,
+            stdout_write,
+            stderr_write,
+            command_read,
+            status_write,
+            safe_command,
+        )
+    for fd in (stdout_write, stderr_write, status_write, command_read, input_read):
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    stdin = (
+        os.fdopen(input_write, "wb", buffering=0) if input_write is not None else None
+    )
+    return _LinuxSupervisorProcess(
+        argv,
+        pid,
+        stdin,
+        os.fdopen(stdout_read, "rb", buffering=0),
+        os.fdopen(stderr_read, "rb", buffering=0),
+        command_write,
+        status_read,
+    )
 
 
 class CommandRunner:
@@ -596,6 +910,7 @@ class CommandRunner:
         binary: bool = False,
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
         allow_stdout_truncation: bool = False,
+        stdout_callback: Callable[[bytes], None] | None = None,
     ) -> CommandResult:
         argv = tuple(str(arg) for arg in args)
         if not argv or any("\x00" in arg for arg in argv):
@@ -611,10 +926,8 @@ class CommandRunner:
         overflow: list[str] = []
         stream_errors: list[str] = []
         kill_lock = threading.Lock()
-        posix_descendants: dict[int, bytes] = {}
-        stop_monitor = threading.Event()
-        monitor_thread: threading.Thread | None = None
-        job: _WindowsJobObject | None = None
+        job: Any | None = None
+        linux_supervisor: _LinuxSupervisorProcess | None = None
         if os.name == "nt":
             try:
                 job = _WindowsJobObject()
@@ -624,24 +937,40 @@ class CommandRunner:
                     f"{self.redact(str(exc))}"
                 ) from exc
         try:
-            try:
-                process = subprocess.Popen(
-                    argv,
-                    cwd=cwd,
-                    env=dict(env),
-                    stdin=subprocess.PIPE
-                    if input_bytes is not None
-                    else subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    shell=False,
-                    start_new_session=True,
-                    creationflags=job.CREATE_SUSPENDED if job is not None else 0,
-                )
-            except OSError as exc:
-                raise CommandError(
-                    f"cannot run command {safe_command}: {self.redact(str(exc))}"
-                ) from exc
+            if sys.platform.startswith("linux"):
+                try:
+                    linux_supervisor = _linux_spawn_supervisor(
+                        argv,
+                        cwd=cwd,
+                        env=env,
+                        input_bytes=input_bytes,
+                        safe_command=safe_command,
+                    )
+                    process = linux_supervisor
+                except OSError as exc:
+                    raise CommandError(
+                        f"cannot initialize Linux supervisor for {safe_command}: "
+                        f"{self.redact(str(exc))}"
+                    ) from exc
+            else:
+                try:
+                    process = subprocess.Popen(
+                        argv,
+                        cwd=cwd,
+                        env=dict(env),
+                        stdin=subprocess.PIPE
+                        if input_bytes is not None
+                        else subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        shell=False,
+                        start_new_session=True,
+                        creationflags=job.CREATE_SUSPENDED if job is not None else 0,
+                    )
+                except OSError as exc:
+                    raise CommandError(
+                        f"cannot run command {safe_command}: {self.redact(str(exc))}"
+                    ) from exc
             if job is not None:
                 # The leader is still suspended (CREATE_SUSPENDED above) and
                 # has not run its first instruction, so assigning it to the
@@ -650,6 +979,7 @@ class CommandRunner:
                 try:
                     job.assign_and_resume(process)
                 except OSError as exc:
+                    assert isinstance(process, subprocess.Popen)
                     process.kill()
                     process.wait()
                     raise CommandError(
@@ -657,59 +987,17 @@ class CommandRunner:
                         f"{safe_command}: {self.redact(str(exc))}"
                     ) from exc
 
-            def monitor_descendants() -> None:
-                # Snapshot the live process tree under the leader repeatedly
-                # while it is still running. This must happen before the
-                # leader exits: once it does, the kernel immediately
-                # reparents any still-living descendant to init (or the
-                # nearest subreaper), which erases the parent link this walk
-                # depends on. Capturing pids continuously beforehand lets the
-                # post-exit check use direct liveness probes by pid instead,
-                # which do not depend on the process-tree shape and therefore
-                # still catch a descendant that called setsid() (or was
-                # started with start_new_session=True) to leave the leader's
-                # process group -- that escape is not visible to killpg().
-                while True:
-                    current = _linux_descendant_pids(process.pid)
-                    with kill_lock:
-                        posix_descendants.update(current)
-                    if stop_monitor.wait(0.1):
-                        current = _linux_descendant_pids(process.pid)
-                        with kill_lock:
-                            posix_descendants.update(current)
-                        return
-
-            if os.name == "posix" and os.path.isdir("/proc"):
-                monitor_thread = threading.Thread(
-                    target=monitor_descendants, daemon=True
-                )
-                monitor_thread.start()
-
             def terminate() -> None:
                 # Do not return early when the leader has already exited: a
                 # detached grandchild can keep the rest of the process group
                 # alive after process.wait() returns, and it must not survive
                 # into the caller's post-command steps (staging, commit, push).
                 with kill_lock:
-                    if os.name == "posix":
+                    if linux_supervisor is not None:
+                        linux_supervisor.request_termination()
+                    elif os.name == "posix":
                         with contextlib.suppress(OSError):
                             os.killpg(process.pid, signal.SIGKILL)
-                        # killpg() only reaches the leader's own process
-                        # group; also kill every descendant observed by
-                        # monitor_descendants(), which is not limited to that
-                        # group. posix_descendants accumulates for the whole
-                        # command lifetime (up to CODEX_TIMEOUT), so a pid
-                        # already dead and possibly recycled by the OS for
-                        # an unrelated process must be filtered out here
-                        # (by its /proc start time, not just its liveness)
-                        # rather than blind-killed.
-                        for pid, start_time in posix_descendants.items():
-                            if not _linux_pid_matches(pid, start_time):
-                                continue
-                            with contextlib.suppress(
-                                ProcessLookupError, PermissionError
-                            ):
-                                os.kill(pid, signal.SIGKILL)
                     else:
                         # The job object (assigned before the leader's first
                         # instruction ran) contains the whole tree, so
@@ -729,16 +1017,19 @@ class CommandRunner:
             def drain(name: str, stream: Any, limit: int) -> None:
                 try:
                     while True:
-                        chunk = stream.read(64 * 1024)
+                        chunk = stream.read(COMMAND_STREAM_CHUNK_BYTES)
                         if not chunk:
                             return
+                        if name == "stdout" and stdout_callback is not None:
+                            stdout_callback(chunk)
+                            continue
                         remaining = limit - len(buffers[name])
                         if remaining > 0:
                             buffers[name].extend(chunk[:remaining])
                         if len(chunk) > remaining:
                             overflow.append(name)
                             terminate()
-                except OSError as exc:
+                except BaseException as exc:  # noqa: BLE001 - terminate on callback failure
                     stream_errors.append(self.redact(str(exc)))
                     terminate()
                 finally:
@@ -781,25 +1072,12 @@ class CommandRunner:
             except BaseException:
                 terminate()
                 process.wait()
-                if monitor_thread is not None:
-                    stop_monitor.set()
-                    monitor_thread.join(timeout=5)
                 for thread in threads:
                     thread.join(timeout=5)
                 raise
-            if monitor_thread is not None:
-                # Stop and join the monitor before its final post-exit
-                # snapshot (taken as it returns) so that snapshot, and every
-                # pid gathered while the leader was alive, is available to
-                # the checks below.
-                stop_monitor.set()
-                monitor_thread.join(timeout=5)
-            # The leader has exited (or was just force-killed above after a
-            # timeout), but a detached descendant can still be running in the
-            # same process group. Sweep it now, before draining streams, so
-            # nothing outlives this call on any exit path including success,
-            # and so a descendant holding the stdout/stderr pipes open does
-            # not stall the joins below.
+            # Linux supervisors finish containment before their status is
+            # reported. Other platforms still need the final process-group
+            # sweep after the leader exits.
             terminate()
             for thread in threads:
                 thread.join(timeout=5)
@@ -808,12 +1086,14 @@ class CommandRunner:
                 raise CommandError(
                     f"command streams did not close cleanly: {safe_command}"
                 )
-            if os.name == "posix":
-                _verify_no_posix_descendants(posix_descendants, safe_command)
+            payload_returncode: int | None = process.returncode
+            if linux_supervisor is not None:
+                payload_returncode = linux_supervisor.result(safe_command, self.redact)
+            if payload_returncode is None:
+                raise CommandError(f"command returned without a status: {safe_command}")
             if stream_errors:
                 raise CommandError(
-                    f"command stream capture failed: {safe_command}: "
-                    f"{stream_errors[0]}"
+                    f"command stream capture failed: {safe_command}: {stream_errors[0]}"
                 )
             if timed_out:
                 raise CommandError(
@@ -834,8 +1114,8 @@ class CommandRunner:
                 stdout: str | bytes = stdout_bytes
             else:
                 stdout = self.redact(stdout_bytes.decode("utf-8", "replace"))
-            result = CommandResult(argv, process.returncode, stdout, stderr)
-            if check and process.returncode != 0:
+            result = CommandResult(argv, payload_returncode, stdout, stderr)
+            if check and payload_returncode != 0:
                 detail = stderr.strip() or (
                     stdout.strip() if isinstance(stdout, str) else ""
                 )
@@ -843,13 +1123,15 @@ class CommandRunner:
                     detail = detail[:2000] + "..."
                 suffix = f": {detail}" if detail else ""
                 raise CommandError(
-                    f"command failed ({process.returncode}): {safe_command}{suffix}",
-                    returncode=process.returncode,
+                    f"command failed ({payload_returncode}): {safe_command}{suffix}",
+                    returncode=payload_returncode,
                     stdout=stdout if isinstance(stdout, str) else "",
                     stderr=stderr,
                 )
             return result
         finally:
+            if linux_supervisor is not None:
+                linux_supervisor.close()
             if job is not None:
                 job.close()
 
@@ -952,9 +1234,9 @@ class PrLock:
     """Portable process lock using atomic file creation and stale-PID recovery."""
 
     def __init__(self, repo: str, number: int):
-        self.digest = hashlib.sha256(
-            f"{repo.lower()}#{number}".encode()
-        ).hexdigest()[:24]
+        self.digest = hashlib.sha256(f"{repo.lower()}#{number}".encode()).hexdigest()[
+            :24
+        ]
         owner = (
             str(os.getuid())
             if hasattr(os, "getuid")
@@ -1069,7 +1351,9 @@ class PrLock:
         # it can affect the target process. Use OpenProcess directly instead.
         error_invalid_parameter = 87
         process_query_limited_information = 0x1000
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL(  # type: ignore[reportAttributeAccessIssue]
+            "kernel32", use_last_error=True
+        )
         kernel32.OpenProcess.restype = ctypes.c_void_p
         kernel32.OpenProcess.argtypes = (
             ctypes.c_ulong,
@@ -1081,7 +1365,7 @@ class PrLock:
         if handle:
             kernel32.CloseHandle(handle)
             return True
-        return ctypes.get_last_error() != error_invalid_parameter
+        return ctypes.get_last_error() != error_invalid_parameter  # type: ignore[reportAttributeAccessIssue]
 
     def __enter__(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1525,6 +1809,7 @@ class ReviewLoop:
         binary: bool = False,
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
         allow_stdout_truncation: bool = False,
+        stdout_callback: Callable[[bytes], None] | None = None,
     ) -> CommandResult:
         argv = list(args)
         child_env: dict[str, str] | None = None
@@ -1568,6 +1853,7 @@ class ReviewLoop:
             binary=binary,
             max_output_bytes=max_output_bytes,
             allow_stdout_truncation=allow_stdout_truncation,
+            stdout_callback=stdout_callback,
         )
 
     def _bootstrap(self) -> None:
@@ -2169,39 +2455,24 @@ class ReviewLoop:
             )
         return int(text)
 
-    def _git_blob_prefix(self, worktree: pathlib.Path, path: str, limit: int) -> bytes:
-        if limit <= 0:
-            return b""
+    def _stream_git_blob(
+        self,
+        worktree: pathlib.Path,
+        path: str,
+        on_chunk: Callable[[bytes], None],
+    ) -> None:
         try:
-            result = self.command(
-                ["git", "cat-file", "blob", f"HEAD:{path}"],
-                cwd=worktree,
-                binary=True,
-                max_output_bytes=limit,
-                check=False,
-                allow_stdout_truncation=True,
-            )
-        except CommandError as exc:
-            raise LoopError(
-                EXIT_PRECONDITION, f"cannot inspect changed file {path}: {exc}"
-            ) from exc
-        assert isinstance(result.stdout, bytes)
-        return result.stdout
-
-    def _git_blob(self, worktree: pathlib.Path, path: str) -> bytes:
-        try:
-            result = self.command(
+            self.command(
                 ["git", "cat-file", "blob", f"HEAD:{path}"],
                 cwd=worktree,
                 binary=True,
                 max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
+                stdout_callback=on_chunk,
             )
         except CommandError as exc:
             raise LoopError(
-                EXIT_PRECONDITION, f"cannot read changed file {path}: {exc}"
+                EXIT_PRECONDITION, f"cannot stream changed file {path}: {exc}"
             ) from exc
-        assert isinstance(result.stdout, bytes)
-        return result.stdout
 
     @staticmethod
     def _bounded_text_file(
@@ -2338,27 +2609,54 @@ class ReviewLoop:
                     EXIT_PRECONDITION, f"changed path {path} is not a blob or gitlink"
                 )
             size = self._git_blob_size(worktree, path)
-            sniff = self._git_blob_prefix(worktree, path, min(size, BINARY_SNIFF_BYTES))
-            is_binary = b"\x00" in sniff
-            if not is_binary:
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
-                try:
-                    decoder.decode(sniff, final=len(sniff) == size)
-                except UnicodeDecodeError:
-                    is_binary = True
+            retain_content = size <= MAX_ATTACHED_TEXT_BYTES - total
+            retained = bytearray() if retain_content else None
+            byte_count = 0
+            contains_nul = False
+            valid_utf8 = True
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+
+            def inspect_blob_chunk(
+                chunk: bytes,
+                retained_buffer: bytearray | None = retained,
+                blob_decoder: codecs.IncrementalDecoder = decoder,
+            ) -> None:
+                nonlocal byte_count, contains_nul, valid_utf8
+                byte_count += len(chunk)
+                contains_nul = contains_nul or b"\x00" in chunk
+                if retained_buffer is not None:
+                    retained_buffer.extend(chunk)
+                if valid_utf8:
+                    try:
+                        blob_decoder.decode(chunk, final=False)
+                    except UnicodeDecodeError:
+                        valid_utf8 = False
+
+            self._stream_git_blob(worktree, path, inspect_blob_chunk)
+            if byte_count != size:
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    f"streamed blob size changed for {path}: expected {size} bytes, "
+                    f"received {byte_count}",
+                )
+            try:
+                decoder.decode(b"", final=True)
+            except UnicodeDecodeError:
+                valid_utf8 = False
+            is_binary = contains_nul or not valid_utf8
             text = ""
-            if not is_binary and total + size > MAX_ATTACHED_TEXT_BYTES:
+            if not is_binary and not retain_content:
                 raise LoopError(
                     EXIT_PRECONDITION, "attached text exceeds the 20 MiB context limit"
                 )
             if not is_binary:
-                blob = self._git_blob(worktree, path)
+                assert retained is not None
                 try:
-                    text = blob.decode("utf-8")
-                    is_binary = "\x00" in text
+                    text = bytes(retained).decode("utf-8")
                 except UnicodeDecodeError:
-                    text = ""
-                    is_binary = True
+                    raise LoopError(
+                        EXIT_PRECONDITION, f"streamed blob became invalid UTF-8: {path}"
+                    ) from None
             if is_binary:
                 manifest.append(
                     {

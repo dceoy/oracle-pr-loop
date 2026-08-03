@@ -84,15 +84,15 @@ credential values are redacted before retained output is written.
 
 ## Exit codes
 
-| Code | Meaning |
-| ---: | --- |
-| `0` | GitHub confirms `APPROVED` for the exact reviewed head SHA. |
-| `2` | Invalid input, dependency/context limit, or failed precondition. |
-| `3` | Oracle failed or returned malformed, ambiguous, or stale output. |
-| `4` | GitHub review/write/verification failed, including policy blockage. |
-| `5` | Codex failed or its patch failed safety validation. |
-| `6` | The remote PR head changed during a protected operation. |
-| `7` | Maximum iterations were reached or implementation stalled. |
+| Code | Meaning                                                             |
+| ---: | ------------------------------------------------------------------- |
+|  `0` | GitHub confirms `APPROVED` for the exact reviewed head SHA.         |
+|  `2` | Invalid input, dependency/context limit, or failed precondition.    |
+|  `3` | Oracle failed or returned malformed, ambiguous, or stale output.    |
+|  `4` | GitHub review/write/verification failed, including policy blockage. |
+|  `5` | Codex failed or its patch failed safety validation.                 |
+|  `6` | The remote PR head changed during a protected operation.            |
+|  `7` | Maximum iterations were reached or implementation stalled.          |
 
 All error paths fail closed. There is no automatic merge, issue-comment
 fallback, retry/repair of model JSON, inline comment posting, CI remediation,
@@ -144,22 +144,16 @@ fork support, daemon mode, or human-thread resolution.
   phase, even for a push that would land a genuinely new commit, so it
   cannot predict whether the real push after Oracle/Codex will be accepted.
   A policy rejection there surfaces as a failure at that push, not here.
-- Subprocess containment (killing a detached descendant of a command the
-  orchestrator runs, including Codex) samples the live process tree via
-  `/proc` on a fixed interval while the command's leader process is
-  running, and kills every pid whose `/proc` start time still matches what
-  was observed then, so it also reaches a descendant that leaves the
-  leader's process group. A descendant that appears and is reparented away
-  from the leader's tree entirely between two samples (for example, a fast
-  double-fork) is never observed and is not covered by this. The start-time
-  check rejects a pid the OS has since recycled for an unrelated process,
-  but that check and the `SIGKILL` that follows it are two separate
-  syscalls, not one atomic operation, so a pid recycled in the instant
-  between them is not caught; a `pidfd`-based reference would close that
-  remaining window but is not implemented. This sampling-based containment
-  is only available on Linux. On other POSIX platforms (macOS, BSD)
-  containment falls back to a plain process-group kill, which cannot reach
-  a descendant that calls `setsid()` (or is started with
+- On Linux, every subprocess runs under a dedicated supervisor that enables
+  `PR_SET_CHILD_SUBREAPER` before the payload starts. The supervisor is the
+  payload's sole parent, adopts descendants that double-fork or call
+  `setsid()`, and kills and reaps the complete child tree before reporting a
+  result on success, failure, timeout, overflow, or interruption. Descendants
+  are terminated through stable Linux pidfds rather than reused numeric PIDs.
+  Missing `prctl`, `/proc` child enumeration, or pidfd support, and any cleanup
+  uncertainty, fail closed before the caller can use the result. On other POSIX platforms
+  (macOS, BSD) containment falls back to a plain process-group kill, which
+  cannot reach a descendant that calls `setsid()` (or is started with
   `start_new_session=True`) to leave that group at all.
 - The reviewer-permission precheck validates only the reviewer account's
   repository collaborator level, not the reviewer token's own permission
