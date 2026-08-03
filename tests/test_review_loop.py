@@ -201,6 +201,19 @@ class InputAndIsolationTests(unittest.TestCase):
         self.assertEqual("review-secret", review_env["GH_TOKEN"])
         self.assertEqual("failure [REDACTED]", runner.redact("failure review-secret"))
 
+    def test_gh_env_never_allowlists_an_enterprise_host_or_token(self) -> None:
+        runner = loopr.CommandRunner(
+            {
+                "PATH": "/bin",
+                "GH_HOST": "github.example.com",
+                "GH_ENTERPRISE_TOKEN": "enterprise-secret",
+            }
+        )
+        self.assertNotIn("GH_HOST", runner.gh_env())
+        self.assertNotIn("GH_ENTERPRISE_TOKEN", runner.gh_env())
+        self.assertNotIn("GH_HOST", runner.reviewer_env("review-secret"))
+        self.assertNotIn("GH_ENTERPRISE_TOKEN", runner.reviewer_env("review-secret"))
+
     def test_same_pr_lock_rejects_second_process_and_releases(self) -> None:
         first = loopr.PrLock("acme/project", 7)
         second = loopr.PrLock("acme/project", 7)
@@ -434,6 +447,47 @@ class InputAndIsolationTests(unittest.TestCase):
                 "    stderr=subprocess.DEVNULL,\n"
                 "    stdin=subprocess.DEVNULL,\n"
                 ")\n",
+                encoding="utf-8",
+            )
+            result = runner.run(
+                ["python3", str(leader_script), str(grandchild_script), str(marker)],
+                cwd=root,
+                env=runner.base_env(),
+            )
+            self.assertEqual(0, result.returncode)
+            self.assertFalse(marker.exists())
+            time.sleep(1.5)
+            self.assertFalse(marker.exists())
+
+    def test_command_wrapper_kills_a_grandchild_that_leaves_the_process_group(
+        self,
+    ) -> None:
+        if os.name != "posix":
+            self.skipTest("process-tree containment is exercised via /proc on POSIX")
+        if not pathlib.Path("/proc").is_dir():
+            self.skipTest("descendant verification requires /proc (Linux only)")
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "grandchild-survived"
+            grandchild_script = root / "grandchild.py"
+            grandchild_script.write_text(
+                "import sys, time\n"
+                "time.sleep(1)\n"
+                "open(sys.argv[1], 'w').close()\n",
+                encoding="utf-8",
+            )
+            leader_script = root / "leader.py"
+            leader_script.write_text(
+                "import subprocess, sys, time\n"
+                "subprocess.Popen(\n"
+                "    [sys.executable, sys.argv[1], sys.argv[2]],\n"
+                "    stdout=subprocess.DEVNULL,\n"
+                "    stderr=subprocess.DEVNULL,\n"
+                "    stdin=subprocess.DEVNULL,\n"
+                "    start_new_session=True,\n"
+                ")\n"
+                "time.sleep(0.3)\n",
                 encoding="utf-8",
             )
             result = runner.run(
@@ -1292,6 +1346,8 @@ class PatchSafetyTests(unittest.TestCase):
         self.assertEqual(
             [
                 "api",
+                "--hostname",
+                "github.com",
                 "repos/acme/project/pulls/7/reviews",
                 "--method",
                 "POST",

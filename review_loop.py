@@ -340,6 +340,117 @@ if os.name == "nt":
                 self._handle = None
 
 
+def _linux_descendant_pids(root_pid: int) -> set[int]:
+    """Return live descendants of `root_pid` on Linux, via /proc parent links.
+
+    A process-group sweep (`killpg`) misses a descendant that calls
+    `os.setsid()` (or is started with `start_new_session=True`): that
+    descendant leaves the leader's process group but its `ppid` in
+    /proc/<pid>/stat is unaffected, so the parent-child tree still finds it.
+    This does not find a descendant that double-forks after its immediate
+    parent has already exited, since it is reparented away from this tree
+    (to init or the nearest subreaper) before it can be observed here.
+    """
+    children: dict[int, list[int]] = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return set()
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                raw = handle.read(4096)
+        except OSError:
+            continue
+        end = raw.rfind(b")")
+        if end == -1:
+            continue
+        fields = raw[end + 1 :].split()
+        if len(fields) < 2:
+            continue
+        try:
+            ppid = int(fields[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(int(name))
+    descendants: set[int] = set()
+    frontier = [root_pid]
+    while frontier:
+        pid = frontier.pop()
+        for child in children.get(pid, ()):
+            if child not in descendants:
+                descendants.add(child)
+                frontier.append(child)
+    return descendants
+
+
+def _linux_pid_is_active(pid: int) -> bool:
+    """True if `pid` is a running/sleeping/stopped process, not gone or a zombie.
+
+    A zombie ('Z' state) has already exited and cannot run code, modify
+    files, or hold any resource beyond its exit status; it is only waiting
+    for its parent to reap it. In a container without an init that reaps
+    orphans, a killed and reparented descendant can sit as a zombie
+    indefinitely, so `os.kill(pid, 0)` (which still succeeds against a
+    zombie) cannot be used as a "did this survive" check -- it would treat
+    every already-dead descendant as still alive forever. Reading the state
+    field directly distinguishes the two.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read(256)
+    except OSError:
+        return False
+    end = raw.rfind(b")")
+    if end == -1:
+        return False
+    fields = raw[end + 1 :].split()
+    if not fields:
+        return False
+    return fields[0] not in (b"Z", b"X")
+
+
+def _verify_no_posix_descendants(pids: Iterable[int], safe_command: str) -> None:
+    """Fail the command if any previously observed descendant is still alive.
+
+    `pids` must be gathered by polling the live process tree under the
+    leader *before* it exited (see `monitor_descendants` in `CommandRunner
+    .run`), not derived afterwards: as soon as the leader exits, the kernel
+    immediately reparents any still-living descendant to init (or the
+    nearest subreaper), which erases the parent link a post-exit /proc walk
+    would need. Checking each previously observed pid directly with a
+    liveness probe sidesteps that, and also still catches a descendant that
+    called setsid() (or was started with start_new_session=True) to leave
+    the leader's process group, which killpg() alone cannot reach.
+
+    This is a verify-or-abort backstop for every pid it was told about: a
+    survivor is given a direct SIGKILL and a few bounded retries, and if one
+    is still alive after that, the caller must not proceed to validation,
+    staging, or push, so this raises instead of returning. It cannot verify
+    a descendant it was never told about: `monitor_descendants` samples the
+    tree on a fixed interval, so a descendant both created and orphaned
+    between two samples is invisible here and this returns normally without
+    having contained it (see README Limitations). `pids` is only ever
+    non-empty when the leader ran on Linux with /proc available (see `run`);
+    elsewhere this is a no-op, and containment remains the best-effort
+    process-group kill only, which does not catch a descendant that leaves
+    that group at all.
+    """
+    remaining = set(pids)
+    for _ in range(5):
+        alive = {pid for pid in remaining if _linux_pid_is_active(pid)}
+        if not alive:
+            return
+        for pid in alive:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        remaining = alive
+        time.sleep(0.1)
+    raise CommandError(f"a descendant process survived termination: {safe_command}")
+
+
 class CommandRunner:
     """Run argument-vector commands with bounded capture and secret redaction."""
 
@@ -370,13 +481,15 @@ class CommandRunner:
         return env
 
     def gh_env(self) -> dict[str, str]:
+        # Only github.com pull requests are supported (see _validate_snapshot),
+        # so an ambient GH_HOST or GH_ENTERPRISE_TOKEN can only misdirect these
+        # calls to an unintended host/identity; neither is allowlisted here,
+        # and every relative-path `gh api` call pins --hostname github.com.
         return self._allowlisted_env(
             {
                 "GH_TOKEN",
                 "GITHUB_TOKEN",
-                "GH_HOST",
                 "GH_CONFIG_DIR",
-                "GH_ENTERPRISE_TOKEN",
                 "HTTP_PROXY",
                 "HTTPS_PROXY",
                 "ALL_PROXY",
@@ -466,6 +579,9 @@ class CommandRunner:
         overflow: list[str] = []
         stream_errors: list[str] = []
         kill_lock = threading.Lock()
+        posix_descendants: set[int] = set()
+        stop_monitor = threading.Event()
+        monitor_thread: threading.Thread | None = None
         job: _WindowsJobObject | None = None
         if os.name == "nt":
             try:
@@ -509,6 +625,34 @@ class CommandRunner:
                         f"{safe_command}: {self.redact(str(exc))}"
                     ) from exc
 
+            def monitor_descendants() -> None:
+                # Snapshot the live process tree under the leader repeatedly
+                # while it is still running. This must happen before the
+                # leader exits: once it does, the kernel immediately
+                # reparents any still-living descendant to init (or the
+                # nearest subreaper), which erases the parent link this walk
+                # depends on. Capturing pids continuously beforehand lets the
+                # post-exit check use direct liveness probes by pid instead,
+                # which do not depend on the process-tree shape and therefore
+                # still catch a descendant that called setsid() (or was
+                # started with start_new_session=True) to leave the leader's
+                # process group -- that escape is not visible to killpg().
+                while True:
+                    current = _linux_descendant_pids(process.pid)
+                    with kill_lock:
+                        posix_descendants.update(current)
+                    if stop_monitor.wait(0.1):
+                        current = _linux_descendant_pids(process.pid)
+                        with kill_lock:
+                            posix_descendants.update(current)
+                        return
+
+            if os.name == "posix" and os.path.isdir("/proc"):
+                monitor_thread = threading.Thread(
+                    target=monitor_descendants, daemon=True
+                )
+                monitor_thread.start()
+
             def terminate() -> None:
                 # Do not return early when the leader has already exited: a
                 # detached grandchild can keep the rest of the process group
@@ -518,6 +662,20 @@ class CommandRunner:
                     if os.name == "posix":
                         with contextlib.suppress(OSError):
                             os.killpg(process.pid, signal.SIGKILL)
+                        # killpg() only reaches the leader's own process
+                        # group; also kill every descendant observed by
+                        # monitor_descendants(), which is not limited to that
+                        # group. posix_descendants accumulates for the whole
+                        # command lifetime (up to CODEX_TIMEOUT), so a pid
+                        # already dead and possibly recycled by the OS must
+                        # be filtered out here rather than blind-killed.
+                        for pid in posix_descendants:
+                            if not _linux_pid_is_active(pid):
+                                continue
+                            with contextlib.suppress(
+                                ProcessLookupError, PermissionError
+                            ):
+                                os.kill(pid, signal.SIGKILL)
                     else:
                         # The job object (assigned before the leader's first
                         # instruction ran) contains the whole tree, so
@@ -589,9 +747,19 @@ class CommandRunner:
             except BaseException:
                 terminate()
                 process.wait()
+                if monitor_thread is not None:
+                    stop_monitor.set()
+                    monitor_thread.join(timeout=5)
                 for thread in threads:
                     thread.join(timeout=5)
                 raise
+            if monitor_thread is not None:
+                # Stop and join the monitor before its final post-exit
+                # snapshot (taken as it returns) so that snapshot, and every
+                # pid gathered while the leader was alive, is available to
+                # the checks below.
+                stop_monitor.set()
+                monitor_thread.join(timeout=5)
             # The leader has exited (or was just force-killed above after a
             # timeout), but a detached descendant can still be running in the
             # same process group. Sweep it now, before draining streams, so
@@ -606,6 +774,8 @@ class CommandRunner:
                 raise CommandError(
                     f"command streams did not close cleanly: {safe_command}"
                 )
+            if os.name == "posix":
+                _verify_no_posix_descendants(posix_descendants, safe_command)
             if stream_errors:
                 raise CommandError(
                     f"command stream capture failed: {safe_command}: "
@@ -890,7 +1060,11 @@ class PrLock:
             raise LoopError(
                 EXIT_PRECONDITION, "PR lock directory has an unexpected owner"
             )
-        if directory_stat.st_mode & 0o077:
+        # st_mode permission bits are POSIX semantics; Windows directory access
+        # is governed by ACLs, and st_mode there exposes synthetic bits that do
+        # not reflect the ACL applied by mkdir(mode=0o700), so this check would
+        # spuriously reject a correctly restricted Windows lock directory.
+        if hasattr(os, "getuid") and directory_stat.st_mode & 0o077:
             raise LoopError(
                 EXIT_PRECONDITION, "PR lock directory permissions are too broad"
             )
@@ -1553,11 +1727,14 @@ class ReviewLoop:
         pr = self.snapshot()
         try:
             reviewer = self._gh(
-                ["api", "user", "--jq", ".login"], reviewer=True
+                ["api", "--hostname", "github.com", "user", "--jq", ".login"],
+                reviewer=True,
             ).strip()
             permission = self._gh(
                 [
                     "api",
+                    "--hostname",
+                    "github.com",
                     f"repos/{self.repo}/collaborators/{reviewer}/permission",
                     "--jq",
                     ".permission",
@@ -2212,6 +2389,8 @@ class ReviewLoop:
             raw = self._gh(
                 [
                     "api",
+                    "--hostname",
+                    "github.com",
                     f"repos/{pr.repo}/pulls/{pr.number}/reviews",
                     "--method",
                     "POST",

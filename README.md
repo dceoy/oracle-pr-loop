@@ -24,8 +24,13 @@ instructions and test commands before using it on code you do not trust.
   `GH_REVIEW_TOKEN`; it must be different from the PR author
 
 Only same-repository, non-draft, open GitHub.com PRs are supported. The local
-user must be able to push the PR head branch, and the reviewer token must have at
-least repository read permission.
+user must be able to push the PR head branch. The reviewer account must have at
+least repository read collaborator access, and the reviewer token itself must
+be authorized to create pull request reviews: for a fine-grained personal
+access token, grant repository permission "Pull requests: Read and write";
+classic tokens need the `repo` scope. A token scoped to read-only access
+passes the collaborator-permission precheck but is rejected by GitHub with a
+403 the first time it tries to post a review.
 
 ## One-time Oracle browser login
 
@@ -139,6 +144,24 @@ fork support, daemon mode, or human-thread resolution.
   phase, even for a push that would land a genuinely new commit, so it
   cannot predict whether the real push after Oracle/Codex will be accepted.
   A policy rejection there surfaces as a failure at that push, not here.
+- Subprocess containment (killing a detached descendant of a command the
+  orchestrator runs, including Codex) samples the live process tree via
+  `/proc` on a fixed interval while the command's leader process is
+  running, and kills every pid ever observed that way, so it also reaches
+  a descendant that leaves the leader's process group. A descendant that
+  appears and is reparented away from the leader's tree entirely between
+  two samples (for example, a fast double-fork) is never observed and is
+  not covered by this. This sampling-based containment is only available
+  on Linux. On other POSIX platforms (macOS, BSD) containment falls back to
+  a plain process-group kill, which cannot reach a descendant that calls
+  `setsid()` (or is started with `start_new_session=True`) to leave that
+  group at all.
+- The reviewer-permission precheck validates only the reviewer account's
+  repository collaborator level, not the reviewer token's own permission
+  grant. GitHub does not expose a reliable pre-flight introspection endpoint
+  for a fine-grained token's repository permissions, so an under-scoped token
+  passes this precheck and fails only when `post_review()` first calls the
+  reviews API; that failure surfaces as exit code `4`.
 
 The single-file implementation is longer than the original 250–400-line sizing
 target because the issue's mandatory safety boundaries require explicit bounded
