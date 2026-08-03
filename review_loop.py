@@ -340,8 +340,32 @@ if os.name == "nt":
                 self._handle = None
 
 
-def _linux_descendant_pids(root_pid: int) -> set[int]:
-    """Return live descendants of `root_pid` on Linux, via /proc parent links.
+def _linux_proc_stat_fields(pid: int) -> list[bytes] | None:
+    """Return the /proc/<pid>/stat fields after `comm`, or None if unreadable.
+
+    Read 4096 bytes: `comm` itself is kernel-truncated to `TASK_COMM_LEN`
+    (16 bytes) so it cannot inflate this, but the cumulative counters later
+    in the line (utime, stime, cutime, cstime, ...) are unbounded-width
+    decimal numbers, and field 19 (starttime, index 19 here since `comm`
+    and `pid` are stripped) must reliably be within the read for identity
+    checks to be meaningful.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read(4096)
+    except OSError:
+        return None
+    end = raw.rfind(b")")
+    if end == -1:
+        return None
+    fields = raw[end + 1 :].split()
+    if len(fields) < 20:
+        return None
+    return fields
+
+
+def _linux_descendant_pids(root_pid: int) -> dict[int, bytes]:
+    """Return live descendants of `root_pid` on Linux, mapped to /proc start time.
 
     A process-group sweep (`killpg`) misses a descendant that calls
     `os.setsid()` (or is started with `start_new_session=True`): that
@@ -350,44 +374,46 @@ def _linux_descendant_pids(root_pid: int) -> set[int]:
     This does not find a descendant that double-forks after its immediate
     parent has already exited, since it is reparented away from this tree
     (to init or the nearest subreaper) before it can be observed here.
+
+    Each descendant's start time (field 22, `/proc/<pid>/stat` field index
+    19 after `comm` is stripped) is returned alongside its pid because the
+    kernel never reuses that value for a different process at the same pid:
+    a caller that keeps this pid around after the process exits can compare
+    against it later to tell the original descendant apart from an
+    unrelated process that has since reused the pid.
     """
-    children: dict[int, list[int]] = {}
+    stats: dict[int, list[bytes]] = {}
     try:
         names = os.listdir("/proc")
     except OSError:
-        return set()
+        return {}
     for name in names:
         if not name.isdigit():
             continue
-        try:
-            with open(f"/proc/{name}/stat", "rb") as handle:
-                raw = handle.read(4096)
-        except OSError:
+        fields = _linux_proc_stat_fields(int(name))
+        if fields is None:
             continue
-        end = raw.rfind(b")")
-        if end == -1:
-            continue
-        fields = raw[end + 1 :].split()
-        if len(fields) < 2:
-            continue
+        stats[int(name)] = fields
+    children: dict[int, list[int]] = {}
+    for pid, fields in stats.items():
         try:
             ppid = int(fields[1])
         except ValueError:
             continue
-        children.setdefault(ppid, []).append(int(name))
-    descendants: set[int] = set()
+        children.setdefault(ppid, []).append(pid)
+    descendants: dict[int, bytes] = {}
     frontier = [root_pid]
     while frontier:
         pid = frontier.pop()
         for child in children.get(pid, ()):
             if child not in descendants:
-                descendants.add(child)
+                descendants[child] = stats[child][19]
                 frontier.append(child)
     return descendants
 
 
-def _linux_pid_is_active(pid: int) -> bool:
-    """True if `pid` is a running/sleeping/stopped process, not gone or a zombie.
+def _linux_pid_matches(pid: int, start_time: bytes) -> bool:
+    """True if `pid` is still running/sleeping/stopped with the given start time.
 
     A zombie ('Z' state) has already exited and cannot run code, modify
     files, or hold any resource beyond its exit status; it is only waiting
@@ -396,23 +422,21 @@ def _linux_pid_is_active(pid: int) -> bool:
     indefinitely, so `os.kill(pid, 0)` (which still succeeds against a
     zombie) cannot be used as a "did this survive" check -- it would treat
     every already-dead descendant as still alive forever. Reading the state
-    field directly distinguishes the two.
+    field directly distinguishes the two. Comparing `start_time` against the
+    value captured when this pid was first observed additionally rejects an
+    unrelated process that the OS has since started under the same,
+    recycled pid: without this, a descendant that already exited and whose
+    pid was reused could be mistaken for the original and killed.
     """
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as handle:
-            raw = handle.read(256)
-    except OSError:
+    fields = _linux_proc_stat_fields(pid)
+    if fields is None:
         return False
-    end = raw.rfind(b")")
-    if end == -1:
+    if fields[0] in (b"Z", b"X"):
         return False
-    fields = raw[end + 1 :].split()
-    if not fields:
-        return False
-    return fields[0] not in (b"Z", b"X")
+    return fields[19] == start_time
 
 
-def _verify_no_posix_descendants(pids: Iterable[int], safe_command: str) -> None:
+def _verify_no_posix_descendants(pids: Mapping[int, bytes], safe_command: str) -> None:
     """Fail the command if any previously observed descendant is still alive.
 
     `pids` must be gathered by polling the live process tree under the
@@ -423,7 +447,10 @@ def _verify_no_posix_descendants(pids: Iterable[int], safe_command: str) -> None
     would need. Checking each previously observed pid directly with a
     liveness probe sidesteps that, and also still catches a descendant that
     called setsid() (or was started with start_new_session=True) to leave
-    the leader's process group, which killpg() alone cannot reach.
+    the leader's process group, which killpg() alone cannot reach. Each pid
+    maps to the start time it had when first observed, so a pid the OS has
+    since recycled for an unrelated process is detected and skipped instead
+    of being killed.
 
     This is a verify-or-abort backstop for every pid it was told about: a
     survivor is given a direct SIGKILL and a few bounded retries, and if one
@@ -438,9 +465,9 @@ def _verify_no_posix_descendants(pids: Iterable[int], safe_command: str) -> None
     process-group kill only, which does not catch a descendant that leaves
     that group at all.
     """
-    remaining = set(pids)
+    remaining = dict(pids)
     for _ in range(5):
-        alive = {pid for pid in remaining if _linux_pid_is_active(pid)}
+        alive = {pid: start for pid, start in remaining.items() if _linux_pid_matches(pid, start)}
         if not alive:
             return
         for pid in alive:
@@ -579,7 +606,7 @@ class CommandRunner:
         overflow: list[str] = []
         stream_errors: list[str] = []
         kill_lock = threading.Lock()
-        posix_descendants: set[int] = set()
+        posix_descendants: dict[int, bytes] = {}
         stop_monitor = threading.Event()
         monitor_thread: threading.Thread | None = None
         job: _WindowsJobObject | None = None
@@ -667,10 +694,12 @@ class CommandRunner:
                         # monitor_descendants(), which is not limited to that
                         # group. posix_descendants accumulates for the whole
                         # command lifetime (up to CODEX_TIMEOUT), so a pid
-                        # already dead and possibly recycled by the OS must
-                        # be filtered out here rather than blind-killed.
-                        for pid in posix_descendants:
-                            if not _linux_pid_is_active(pid):
+                        # already dead and possibly recycled by the OS for
+                        # an unrelated process must be filtered out here
+                        # (by its /proc start time, not just its liveness)
+                        # rather than blind-killed.
+                        for pid, start_time in posix_descendants.items():
+                            if not _linux_pid_matches(pid, start_time):
                                 continue
                             with contextlib.suppress(
                                 ProcessLookupError, PermissionError
@@ -1431,9 +1460,18 @@ class ReviewLoop:
         if argv and argv[0] == "git":
             # Every git invocation here targets either the primary checkout or a
             # disposable per-PR worktree; a repository-configured core.hooksPath
-            # (including one Codex-controlled content can point at) must never
-            # execute with this orchestrator's environment or credentials.
-            argv = ["git", "-c", f"core.hooksPath={os.devnull}", *argv[1:]]
+            # or core.fsmonitor hook (including one Codex-controlled content can
+            # point at) must never execute with this orchestrator's environment
+            # or credentials. core.fsmonitor is a separate hook command from
+            # core.hooksPath and is not covered by it.
+            argv = [
+                "git",
+                "-c",
+                f"core.hooksPath={os.devnull}",
+                "-c",
+                "core.fsmonitor=false",
+                *argv[1:],
+            ]
         return self.runner.run(
             argv,
             cwd=cwd or self.repo_dir,

@@ -500,6 +500,44 @@ class InputAndIsolationTests(unittest.TestCase):
             time.sleep(1.5)
             self.assertFalse(marker.exists())
 
+    def test_linux_pid_matches_rejects_a_live_pid_with_a_different_start_time(
+        self,
+    ) -> None:
+        if not pathlib.Path("/proc").is_dir():
+            self.skipTest("start-time identity check requires /proc (Linux only)")
+        fields = loopr._linux_proc_stat_fields(os.getpid())
+        assert fields is not None
+        real_start_time = fields[19]
+        self.assertTrue(loopr._linux_pid_matches(os.getpid(), real_start_time))
+        self.assertFalse(
+            loopr._linux_pid_matches(os.getpid(), real_start_time + b"9")
+        )
+
+    def test_verify_no_posix_descendants_does_not_kill_a_pid_recycled_by_a_bystander(
+        self,
+    ) -> None:
+        if not pathlib.Path("/proc").is_dir():
+            self.skipTest("descendant verification requires /proc (Linux only)")
+        bystander = subprocess.Popen(
+            ["sleep", "5"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        try:
+            fields = loopr._linux_proc_stat_fields(bystander.pid)
+            assert fields is not None
+            # A pid the OS has recycled since it was first observed as a
+            # descendant would carry a different start time; a mismatched
+            # one here stands in for that without needing to force a real
+            # pid reuse, which the OS does not offer a deterministic way to
+            # do in a test.
+            stale_start_time = fields[19] + b"9"
+            loopr._verify_no_posix_descendants(
+                {bystander.pid: stale_start_time}, "test-command"
+            )
+            self.assertIsNone(bystander.poll())
+        finally:
+            bystander.kill()
+            bystander.wait()
+
     def test_run_codex_receives_the_sanitized_environment(self) -> None:
         source = {
             "PATH": os.environ["PATH"],
@@ -955,6 +993,20 @@ class PatchSafetyTests(unittest.TestCase):
         ).split()[0]
         self.assertEqual(pushed, remote_sha)
         self.assertTrue((iteration / "resulting.patch").read_text().strip())
+
+    def test_git_wrapper_ignores_a_tracked_core_fsmonitor_hook(self) -> None:
+        # core.hooksPath does not cover core.fsmonitor: it is a distinct
+        # hook command that git/status invokes on its own, and it can be
+        # pointed at a path the disposable worktree controls.
+        marker = pathlib.Path(self.temporary.name) / "fsmonitor-fired"
+        hook = self.worktree / "fsmonitor-hook.sh"
+        hook.write_text(
+            f"#!/bin/sh\ntouch '{marker}'\necho /\n", encoding="utf-8"
+        )
+        hook.chmod(0o755)
+        self.git(self.worktree, "config", "core.fsmonitor", str(hook))
+        self.loop.command(["git", "status"], cwd=self.worktree)
+        self.assertFalse(marker.exists())
 
     def _install_post_index_change_hook(self) -> pathlib.Path:
         git_dir = pathlib.Path(self.git(self.primary, "rev-parse", "--git-common-dir"))
