@@ -210,6 +210,45 @@ class InputAndIsolationTests(unittest.TestCase):
             self.assertTrue(second.path.exists())
         self.assertFalse(second.path.exists())
 
+    def test_pid_liveness_on_windows_never_probes_with_os_kill(self) -> None:
+        with (
+            mock.patch.object(loopr.os, "name", "nt"),
+            mock.patch.object(
+                loopr.PrLock, "_pid_alive_windows", return_value=True
+            ) as windows_probe,
+            mock.patch.object(loopr.os, "kill") as kill_call,
+        ):
+            self.assertTrue(loopr.PrLock._pid_alive(4321))
+        windows_probe.assert_called_once_with(4321)
+        kill_call.assert_not_called()
+
+    def test_command_wrapper_can_truncate_bounded_stdout_without_raising(self) -> None:
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+        with tempfile.TemporaryDirectory() as temporary:
+            result = runner.run(
+                ["python3", "-c", "print('x' * 10000)"],
+                cwd=pathlib.Path(temporary),
+                env=runner.base_env(),
+                max_output_bytes=128,
+                check=False,
+                allow_stdout_truncation=True,
+            )
+            self.assertEqual(128, len(result.stdout))
+            with self.assertRaises(loopr.CommandError) as bounded:
+                runner.run(
+                    [
+                        "python3",
+                        "-c",
+                        "import sys; sys.stderr.write('e' * 10000)",
+                    ],
+                    cwd=pathlib.Path(temporary),
+                    env=runner.base_env(),
+                    max_output_bytes=128,
+                    check=False,
+                    allow_stdout_truncation=True,
+                )
+            self.assertIn("exceeded", str(bounded.exception))
+
     def test_command_wrapper_bounds_and_redacts_diagnostics(self) -> None:
         runner = loopr.CommandRunner(
             {"PATH": os.environ["PATH"], "TEST_TOKEN": "hidden-value"}
@@ -741,6 +780,45 @@ class PatchSafetyTests(unittest.TestCase):
         self.assertIn(iteration / "diff.patch", bundle.attachments)
         self.assertIn("binary 3 bytes", (iteration / "changed-files.txt").read_text())
 
+    def test_bundle_classifies_an_oversized_binary_blob_without_reading_it_whole(
+        self,
+    ) -> None:
+        self.git(self.primary, "checkout", "feature")
+        large_binary = b"\x00" + (b"\xff" * 4096)
+        (self.primary / "large.bin").write_bytes(large_binary)
+        self.git(self.primary, "add", "large.bin")
+        self.git(self.primary, "commit", "-m", "add oversized binary fixture")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": "large.bin", "status": "added"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "oversized-binary-bundle"
+        iteration.mkdir()
+        with (
+            mock.patch.object(loopr, "MAX_COMMAND_OUTPUT_BYTES", 128),
+            mock.patch.object(self.loop, "_git_blob") as full_read,
+            mock.patch.object(
+                self.loop, "_gh", return_value="diff --git a/large.bin b/large.bin\n"
+            ),
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        full_read.assert_not_called()
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        self.assertEqual("binary", by_path["large.bin"]["kind"])
+        self.assertIsNone(by_path["large.bin"]["attachment"])
+        self.assertIn(
+            f"binary {len(large_binary)} bytes",
+            (iteration / "changed-files.txt").read_text(),
+        )
+
     def test_bundle_marks_a_deleted_file_from_change_type_without_reading_it(
         self,
     ) -> None:
@@ -980,6 +1058,50 @@ class PatchSafetyTests(unittest.TestCase):
                 set(),
             )
         self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+
+    def test_post_review_anchors_the_submission_to_the_reviewed_commit(self) -> None:
+        review = loopr.parse_oracle_review(
+            json.dumps(approval(self.pr.head_sha)), self.pr.head_sha
+        )
+        iteration = self.loop.artifacts_dir / "post-review"
+        iteration.mkdir()
+        response = json.dumps({"commit_id": self.pr.head_sha, "id": 1})
+        with (
+            mock.patch.object(self.loop, "snapshot", return_value=self.pr),
+            mock.patch.object(self.loop, "_gh", return_value=response) as gh_call,
+        ):
+            self.loop.post_review(self.pr, review, 1, iteration)
+        args, kwargs = gh_call.call_args
+        self.assertEqual(
+            [
+                "api",
+                "repos/acme/project/pulls/7/reviews",
+                "--method",
+                "POST",
+                "--input",
+                "-",
+            ],
+            args[0],
+        )
+        self.assertTrue(kwargs["reviewer"])
+        payload = json.loads(kwargs["input_text"])
+        self.assertEqual(self.pr.head_sha, payload["commit_id"])
+        self.assertEqual("APPROVE", payload["event"])
+
+    def test_post_review_rejects_a_response_anchored_to_the_wrong_commit(self) -> None:
+        review = loopr.parse_oracle_review(
+            json.dumps(approval(self.pr.head_sha)), self.pr.head_sha
+        )
+        iteration = self.loop.artifacts_dir / "post-review-race"
+        iteration.mkdir()
+        response = json.dumps({"commit_id": "f" * 40, "id": 2})
+        with (
+            mock.patch.object(self.loop, "snapshot", return_value=self.pr),
+            mock.patch.object(self.loop, "_gh", return_value=response),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.post_review(self.pr, review, 1, iteration)
+        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
 
 
 if __name__ == "__main__":

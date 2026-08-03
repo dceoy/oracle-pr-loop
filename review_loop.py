@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import dataclasses
 import datetime as dt
 import hashlib
@@ -42,6 +43,7 @@ MAX_CHANGED_FILES = 100
 MAX_PATCH_BYTES = 2 * 1024 * 1024
 MAX_ATTACHED_TEXT_BYTES = 20 * 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 24 * 1024 * 1024
+BINARY_SNIFF_BYTES = 8000
 COMMAND_TIMEOUT = 120
 ORACLE_TIMEOUT = 60 * 60
 CODEX_TIMEOUT = 45 * 60
@@ -266,6 +268,7 @@ class CommandRunner:
         check: bool = True,
         binary: bool = False,
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+        allow_stdout_truncation: bool = False,
     ) -> CommandResult:
         argv = tuple(str(arg) for arg in args)
         if not argv or any("\x00" in arg for arg in argv):
@@ -376,7 +379,7 @@ class CommandRunner:
             )
         if timed_out:
             raise CommandError(f"command timed out after {timeout}s: {safe_command}")
-        if overflow:
+        if overflow and not (allow_stdout_truncation and "stderr" not in overflow):
             label = "diagnostics" if "stderr" in overflow else "output"
             limit = stderr_limit if label == "diagnostics" else max_output_bytes
             raise CommandError(
@@ -520,6 +523,8 @@ class PrLock:
     def _pid_alive(pid: int) -> bool:
         if pid <= 0:
             return False
+        if os.name == "nt":
+            return PrLock._pid_alive_windows(pid)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -527,6 +532,26 @@ class PrLock:
         except PermissionError:
             return True
         return True
+
+    @staticmethod
+    def _pid_alive_windows(pid: int) -> bool:
+        # os.kill(pid, 0) is not a side-effect-free liveness probe on Windows;
+        # it can affect the target process. Use OpenProcess directly instead.
+        error_invalid_parameter = 87
+        process_query_limited_information = 0x1000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = (
+            ctypes.c_ulong,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        )
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return ctypes.get_last_error() != error_invalid_parameter
 
     def __enter__(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -876,6 +901,7 @@ class ReviewLoop:
         check: bool = True,
         binary: bool = False,
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+        allow_stdout_truncation: bool = False,
     ) -> CommandResult:
         argv = list(args)
         if argv and argv[0] == "git":
@@ -893,6 +919,7 @@ class ReviewLoop:
             check=check,
             binary=binary,
             max_output_bytes=max_output_bytes,
+            allow_stdout_truncation=allow_stdout_truncation,
         )
 
     def _bootstrap(self) -> None:
@@ -968,6 +995,7 @@ class ReviewLoop:
         *,
         reviewer: bool = False,
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+        input_text: str | None = None,
     ) -> str:
         env = (
             self.runner.reviewer_env(self.review_token)
@@ -975,7 +1003,10 @@ class ReviewLoop:
             else self.runner.gh_env()
         )
         result = self.command(
-            ["gh", *args], env=env, max_output_bytes=max_output_bytes
+            ["gh", *args],
+            env=env,
+            max_output_bytes=max_output_bytes,
+            input_text=input_text,
         ).stdout
         assert isinstance(result, str)
         return result
@@ -1456,6 +1487,42 @@ class ReviewLoop:
             )
         return fields[1]
 
+    def _git_blob_size(self, worktree: pathlib.Path, path: str) -> int:
+        try:
+            result = self.command(
+                ["git", "cat-file", "-s", f"HEAD:{path}"], cwd=worktree
+            ).stdout
+        except CommandError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, f"cannot size changed file {path}: {exc}"
+            ) from exc
+        assert isinstance(result, str)
+        text = result.strip()
+        if not text.isdigit():
+            raise LoopError(
+                EXIT_PRECONDITION, f"unexpected blob size for changed file {path}"
+            )
+        return int(text)
+
+    def _git_blob_prefix(self, worktree: pathlib.Path, path: str, limit: int) -> bytes:
+        if limit <= 0:
+            return b""
+        try:
+            result = self.command(
+                ["git", "cat-file", "blob", f"HEAD:{path}"],
+                cwd=worktree,
+                binary=True,
+                max_output_bytes=limit,
+                check=False,
+                allow_stdout_truncation=True,
+            )
+        except CommandError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, f"cannot inspect changed file {path}: {exc}"
+            ) from exc
+        assert isinstance(result.stdout, bytes)
+        return result.stdout
+
     def _git_blob(self, worktree: pathlib.Path, path: str) -> bytes:
         try:
             result = self.command(
@@ -1597,14 +1664,22 @@ class ReviewLoop:
                 raise LoopError(
                     EXIT_PRECONDITION, f"changed path {path} is not a blob or gitlink"
                 )
-            blob = self._git_blob(worktree, path)
-            size = len(blob)
-            try:
-                text = blob.decode("utf-8")
-                is_binary = "\x00" in text
-            except UnicodeDecodeError:
-                text = ""
-                is_binary = True
+            size = self._git_blob_size(worktree, path)
+            sniff = self._git_blob_prefix(worktree, path, min(size, BINARY_SNIFF_BYTES))
+            is_binary = b"\x00" in sniff
+            text = ""
+            if not is_binary and total + size > MAX_ATTACHED_TEXT_BYTES:
+                raise LoopError(
+                    EXIT_PRECONDITION, "attached text exceeds the 20 MiB context limit"
+                )
+            if not is_binary:
+                blob = self._git_blob(worktree, path)
+                try:
+                    text = blob.decode("utf-8")
+                    is_binary = "\x00" in text
+                except UnicodeDecodeError:
+                    text = ""
+                    is_binary = True
             if is_binary:
                 manifest.append(
                     {
@@ -1764,14 +1839,32 @@ class ReviewLoop:
             )
         path = iteration_dir / "review.md"
         self.writer.text(path, body)
-        flag = "--approve" if review.verdict == "APPROVE" else "--request-changes"
+        event = "APPROVE" if review.verdict == "APPROVE" else "REQUEST_CHANGES"
+        # `gh pr review` has no commit-SHA option, so a head that moves between
+        # _ensure_current_snapshot() and submission could otherwise attach this
+        # review to code Oracle never saw. Anchor it explicitly via the REST API.
+        payload = json.dumps({"commit_id": pr.head_sha, "body": body, "event": event})
         try:
-            self._gh(
-                ["pr", "review", self.pr_url, flag, "--body-file", str(path)],
+            raw = self._gh(
+                [
+                    "api",
+                    f"repos/{pr.repo}/pulls/{pr.number}/reviews",
+                    "--method",
+                    "POST",
+                    "--input",
+                    "-",
+                ],
                 reviewer=True,
+                input_text=payload,
             )
         except CommandError as exc:
             raise LoopError(EXIT_GITHUB, str(exc)) from exc
+        posted = _json_object(raw, "posted review")
+        if posted.get("commit_id") != pr.head_sha:
+            raise LoopError(
+                EXIT_RACE,
+                "GitHub anchored the submitted review to an unexpected commit",
+            )
 
     def verify_approval(self, expected_head_sha: str, expected_base_sha: str) -> None:
         try:
