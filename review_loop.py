@@ -49,6 +49,8 @@ ORACLE_TIMEOUT = 60 * 60
 CODEX_TIMEOUT = 45 * 60
 POLL_TIMEOUT = 90
 POLL_INTERVAL = 2
+LOCK_ARBITER_TIMEOUT = 30
+LOCK_ARBITER_INTERVAL = 0.2
 
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
@@ -303,13 +305,28 @@ class CommandRunner:
             ) from exc
 
         def terminate() -> None:
+            # Do not return early when the leader has already exited: a
+            # detached grandchild can keep the rest of the process group
+            # alive after process.wait() returns, and it must not survive
+            # into the caller's post-command steps (staging, commit, push).
             with kill_lock:
-                if process.poll() is not None:
-                    return
-                with contextlib.suppress(OSError):
-                    if os.name == "posix":
+                if os.name == "posix":
+                    with contextlib.suppress(OSError):
                         os.killpg(process.pid, signal.SIGKILL)
-                    else:
+                else:
+                    # taskkill reaches descendants but is best-effort (it can
+                    # be missing or denied); process.kill() unconditionally
+                    # guarantees the leader itself dies so callers relying on
+                    # a bounded process.wait() after this never block forever.
+                    with contextlib.suppress(OSError, subprocess.SubprocessError):
+                        subprocess.run(
+                            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                            timeout=10,
+                        )
+                    with contextlib.suppress(OSError):
                         process.kill()
 
         def drain(name: str, stream: Any, limit: int) -> None:
@@ -368,6 +385,13 @@ class CommandRunner:
             for thread in threads:
                 thread.join(timeout=5)
             raise
+        # The leader has exited (or was just force-killed above after a
+        # timeout), but a detached descendant can still be running in the
+        # same process group. Sweep it now, before draining streams, so
+        # nothing outlives this call on any exit path including success,
+        # and so a descendant holding the stdout/stderr pipes open does not
+        # stall the joins below.
+        terminate()
         for thread in threads:
             thread.join(timeout=5)
         if any(thread.is_alive() for thread in threads):
@@ -509,15 +533,102 @@ class PrLock:
     """Portable process lock using atomic file creation and stale-PID recovery."""
 
     def __init__(self, repo: str, number: int):
-        digest = hashlib.sha256(f"{repo.lower()}#{number}".encode()).hexdigest()[:24]
+        self.digest = hashlib.sha256(
+            f"{repo.lower()}#{number}".encode()
+        ).hexdigest()[:24]
         owner = (
             str(os.getuid())
             if hasattr(os, "getuid")
             else os.environ.get("USERNAME", "user")
         )
         self.directory = pathlib.Path(tempfile.gettempdir()) / f"loopr-locks-{owner}"
-        self.path = self.directory / f"{digest}.lock"
+        self.path = self.directory / f"{self.digest}.lock"
         self.fd: int | None = None
+
+    @contextlib.contextmanager
+    def _serialized_recovery(self):
+        """Serialize stale-lock detection and replacement across contenders.
+
+        Without an OS-level lock here, two contenders can both observe the
+        same dead PID and race to unlink/recreate this PR's lock file: one
+        can unlink the stale file and acquire a fresh lock before the other
+        reaches its own unlink, which then deletes the fresh lock by
+        pathname and leaves two holders active for the same PR.
+
+        The arbiter file itself is intentionally never unlinked. Deleting
+        and recreating it would reintroduce the same by-pathname race one
+        level up (a flock held on an unlinked inode no longer excludes a
+        contender that opens a freshly created file at the same path). One
+        small file per repo#PR persisting in the lock directory is a cheap
+        trade for that.
+        """
+        arbiter = self.directory / f"{self.digest}.arbiter"
+        try:
+            fd = os.open(
+                arbiter,
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, f"cannot open PR lock arbiter: {exc}"
+            ) from exc
+        try:
+            arbiter_stat = os.fstat(fd)
+            if not stat.S_ISREG(arbiter_stat.st_mode):
+                raise LoopError(
+                    EXIT_PRECONDITION, "PR lock arbiter is not a regular file"
+                )
+            if hasattr(os, "getuid") and arbiter_stat.st_uid != os.getuid():
+                raise LoopError(
+                    EXIT_PRECONDITION, "PR lock arbiter has an unexpected owner"
+                )
+            os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            # Bounded, non-blocking retries: a held lock must fail closed
+            # with a LoopError within LOCK_ARBITER_TIMEOUT rather than block
+            # this call forever (POSIX flock) or surface a bare OSError from
+            # msvcrt's own internal retry-then-raise behavior (Windows).
+            deadline = time.monotonic() + LOCK_ARBITER_TIMEOUT
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (BlockingIOError, PermissionError):
+                    # BlockingIOError: fcntl.flock's LOCK_NB contention
+                    # errno (POSIX). PermissionError: msvcrt.locking's
+                    # lock-violation errno (Windows). Any other OSError is a
+                    # real failure (e.g. EBADF) and must not be retried away
+                    # as if it were ordinary contention.
+                    if time.monotonic() >= deadline:
+                        raise LoopError(
+                            EXIT_PRECONDITION,
+                            "PR lock arbiter is contended by another review loop",
+                        )
+                    time.sleep(LOCK_ARBITER_INTERVAL)
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    with contextlib.suppress(OSError):
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    with contextlib.suppress(OSError):
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -568,58 +679,77 @@ class PrLock:
             raise LoopError(
                 EXIT_PRECONDITION, "PR lock directory permissions are too broad"
             )
-        for _ in range(2):
-            try:
-                self.fd = os.open(
-                    self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
+        with self._serialized_recovery():
+            for _ in range(2):
                 try:
-                    os.write(self.fd, f"{os.getpid()}\n".encode())
-                    os.fsync(self.fd)
-                    return self
-                except Exception:
-                    os.close(self.fd)
-                    self.fd = None
-                    with contextlib.suppress(FileNotFoundError):
+                    self.fd = os.open(
+                        self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                    )
+                    try:
+                        os.write(self.fd, f"{os.getpid()}\n".encode())
+                        os.fsync(self.fd)
+                        return self
+                    except Exception:
+                        os.close(self.fd)
+                        self.fd = None
+                        with contextlib.suppress(FileNotFoundError):
+                            self.path.unlink()
+                        raise
+                except FileExistsError:
+                    try:
+                        existing = self.path.lstat()
+                    except FileNotFoundError:
+                        continue
+                    if not stat.S_ISREG(existing.st_mode) or self.path.is_symlink():
+                        raise LoopError(
+                            EXIT_PRECONDITION, "PR lock is not a regular file"
+                        )
+                    if hasattr(os, "getuid") and existing.st_uid != os.getuid():
+                        raise LoopError(
+                            EXIT_PRECONDITION, "PR lock has an unexpected owner"
+                        )
+                    try:
+                        text = self.path.read_text(encoding="ascii").strip()
+                        pid = int(text)
+                    except (OSError, ValueError):
+                        raise LoopError(
+                            EXIT_PRECONDITION, "PR lock exists and is unreadable"
+                        )
+                    if self._pid_alive(pid):
+                        raise LoopError(
+                            EXIT_PRECONDITION,
+                            f"another review loop holds the lock for this PR "
+                            f"(pid {pid})",
+                        )
+                    try:
                         self.path.unlink()
-                    raise
-            except FileExistsError:
-                try:
-                    existing = self.path.lstat()
-                except FileNotFoundError:
-                    continue
-                if not stat.S_ISREG(existing.st_mode) or self.path.is_symlink():
-                    raise LoopError(EXIT_PRECONDITION, "PR lock is not a regular file")
-                if hasattr(os, "getuid") and existing.st_uid != os.getuid():
-                    raise LoopError(
-                        EXIT_PRECONDITION, "PR lock has an unexpected owner"
-                    )
-                try:
-                    text = self.path.read_text(encoding="ascii").strip()
-                    pid = int(text)
-                except (OSError, ValueError):
-                    raise LoopError(
-                        EXIT_PRECONDITION, "PR lock exists and is unreadable"
-                    )
-                if self._pid_alive(pid):
-                    raise LoopError(
-                        EXIT_PRECONDITION,
-                        f"another review loop holds the lock for this PR (pid {pid})",
-                    )
-                try:
-                    self.path.unlink()
-                except OSError as exc:
-                    raise LoopError(
-                        EXIT_PRECONDITION, f"cannot remove stale PR lock: {exc}"
-                    )
+                    except OSError as exc:
+                        raise LoopError(
+                            EXIT_PRECONDITION, f"cannot remove stale PR lock: {exc}"
+                        )
         raise LoopError(EXIT_PRECONDITION, "could not acquire PR lock")
 
     def __exit__(self, *_: object) -> None:
         if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
-        with contextlib.suppress(FileNotFoundError):
-            self.path.unlink()
+            try:
+                # Only remove the file if it still identifies as the one we
+                # created: the arbiter lock keeps __enter__ recoveries from
+                # racing, but this guards __exit__ against unlinking a lock
+                # that a later contender validly replaced at this pathname.
+                owned = os.fstat(self.fd)
+                try:
+                    current = self.path.lstat()
+                except FileNotFoundError:
+                    current = None
+                if current is not None and (current.st_dev, current.st_ino) == (
+                    owned.st_dev,
+                    owned.st_ino,
+                ):
+                    with contextlib.suppress(FileNotFoundError):
+                        self.path.unlink()
+            finally:
+                os.close(self.fd)
+                self.fd = None
 
 
 def _json_object(text: str, description: str) -> dict[str, Any]:
@@ -1223,6 +1353,21 @@ class ReviewLoop:
                 EXIT_PRECONDITION, "reviewer lacks repository review permission"
             )
 
+        self._check_pushable(pr)
+        return pr
+
+    def _check_pushable(self, pr: PullRequest) -> None:
+        """Confirm the head ref is reachable and writable at pr.head_sha.
+
+        This validates push authentication and force-with-lease staleness
+        detection only. A `--dry-run` push never reaches the server's
+        update/hook phase (branch protection, required checks, etc.) even
+        for a push that would land a genuinely new commit, so this cannot
+        predict whether the real push after Oracle/Codex will be accepted
+        by branch policy. That is a known limitation: a policy rejection at
+        the real push is surfaced as a failure there rather than caught
+        here.
+        """
         try:
             remote_sha = self.command(
                 ["git", "ls-remote", self.origin_url, f"refs/heads/{pr.head_ref}"]
@@ -1248,7 +1393,6 @@ class ReviewLoop:
             raise LoopError(
                 EXIT_PRECONDITION, f"head branch is not pushable: {exc}"
             ) from exc
-        return pr
 
     def transition(
         self, state: str, iteration: int | None = None, **details: Any

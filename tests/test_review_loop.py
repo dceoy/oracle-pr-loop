@@ -6,6 +6,8 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -210,6 +212,72 @@ class InputAndIsolationTests(unittest.TestCase):
             self.assertTrue(second.path.exists())
         self.assertFalse(second.path.exists())
 
+    def test_arbiter_contention_fails_closed_within_bounded_timeout(self) -> None:
+        if os.name != "posix":
+            self.skipTest("arbiter contention is exercised via fcntl.flock on POSIX")
+        import fcntl
+
+        holder = loopr.PrLock("acme/project", 4343)
+        holder.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        arbiter_path = holder.directory / f"{holder.digest}.arbiter"
+        holder_fd = os.open(arbiter_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.write(holder_fd, b"\0")
+        fcntl.flock(holder_fd, fcntl.LOCK_EX)
+        try:
+            with (
+                mock.patch.object(loopr, "LOCK_ARBITER_TIMEOUT", 0.3),
+                mock.patch.object(loopr, "LOCK_ARBITER_INTERVAL", 0.05),
+            ):
+                contender = loopr.PrLock("acme/project", 4343)
+                start = time.monotonic()
+                with self.assertRaises(loopr.LoopError) as caught:
+                    contender.__enter__()
+                elapsed = time.monotonic() - start
+            self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+            self.assertLess(elapsed, 2.0)
+        finally:
+            fcntl.flock(holder_fd, fcntl.LOCK_UN)
+            os.close(holder_fd)
+
+    def test_concurrent_stale_lock_recovery_yields_exactly_one_holder(self) -> None:
+        contenders = 6
+        stale_pid = 2**30
+        seed = loopr.PrLock("acme/project", 4242)
+        seed.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        seed.path.write_text(f"{stale_pid}\n", encoding="ascii")
+        locks = [loopr.PrLock("acme/project", 4242) for _ in range(contenders)]
+        barrier = threading.Barrier(contenders)
+        results: list[object] = [None] * contenders
+
+        def attempt(index: int) -> None:
+            barrier.wait()
+            try:
+                locks[index].__enter__()
+                results[index] = "ok"
+            except loopr.LoopError as exc:
+                results[index] = exc
+
+        threads = [
+            threading.Thread(target=attempt, args=(index,))
+            for index in range(contenders)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        successes = [index for index, r in enumerate(results) if r == "ok"]
+        self.assertEqual(1, len(successes))
+        for index, result in enumerate(results):
+            if index not in successes:
+                self.assertIsInstance(result, loopr.LoopError)
+        winner = locks[successes[0]]
+        self.assertEqual(
+            str(os.getpid()), winner.path.read_text(encoding="ascii").strip()
+        )
+        winner.__exit__(None, None, None)
+        self.assertFalse(winner.path.exists())
+
     def test_pid_liveness_on_windows_never_probes_with_os_kill(self) -> None:
         with (
             mock.patch.object(loopr.os, "name", "nt"),
@@ -279,6 +347,41 @@ class InputAndIsolationTests(unittest.TestCase):
                     max_output_bytes=128,
                 )
             self.assertIn("exceeded 128 bytes", str(bounded.exception))
+
+    def test_command_wrapper_kills_a_detached_grandchild_after_success(self) -> None:
+        if os.name != "posix":
+            self.skipTest("process-group reaping is exercised via os.killpg on POSIX")
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            marker = root / "grandchild-survived"
+            grandchild_script = root / "grandchild.py"
+            grandchild_script.write_text(
+                "import sys, time\n"
+                "time.sleep(1)\n"
+                "open(sys.argv[1], 'w').close()\n",
+                encoding="utf-8",
+            )
+            leader_script = root / "leader.py"
+            leader_script.write_text(
+                "import subprocess, sys\n"
+                "subprocess.Popen(\n"
+                "    [sys.executable, sys.argv[1], sys.argv[2]],\n"
+                "    stdout=subprocess.DEVNULL,\n"
+                "    stderr=subprocess.DEVNULL,\n"
+                "    stdin=subprocess.DEVNULL,\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            result = runner.run(
+                ["python3", str(leader_script), str(grandchild_script), str(marker)],
+                cwd=root,
+                env=runner.base_env(),
+            )
+            self.assertEqual(0, result.returncode)
+            self.assertFalse(marker.exists())
+            time.sleep(1.5)
+            self.assertFalse(marker.exists())
 
     def test_run_codex_receives_the_sanitized_environment(self) -> None:
         source = {
@@ -656,6 +759,57 @@ class PatchSafetyTests(unittest.TestCase):
         self.git(unset, "config", "user.name", "Loop Test")
         self.git(unset, "config", "user.email", "loop@example.test")
         instance.command(["git", "var", "GIT_AUTHOR_IDENT"], cwd=unset)
+
+    def test_pushability_precheck_passes_for_a_reachable_writable_head(self) -> None:
+        self.loop._check_pushable(self.pr)
+
+    def test_pushability_precheck_detects_a_diverged_remote_head(self) -> None:
+        other = pathlib.Path(self.temporary.name) / "other"
+        self.git(pathlib.Path(self.temporary.name), "clone", str(self.remote), str(other))
+        self.git(other, "config", "user.name", "Other")
+        self.git(other, "config", "user.email", "other@example.test")
+        self.git(other, "checkout", "feature")
+        (other / "other.txt").write_text("race\n", encoding="utf-8")
+        self.git(other, "add", "other.txt")
+        self.git(other, "commit", "-m", "race")
+        self.git(other, "push", "origin", "feature")
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop._check_pushable(self.pr)
+        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+
+    def test_pushability_precheck_cannot_predict_a_branch_policy_rejection(self) -> None:
+        # Documents a known limitation: --dry-run never reaches the
+        # server's hook/branch-protection phase, even for a push that
+        # would land a genuinely new commit, so this precheck cannot
+        # substitute for handling a policy rejection at the real push.
+        hooks = self.remote / "hooks"
+        hooks.mkdir(exist_ok=True)
+        hook = hooks / "pre-receive"
+        hook.write_text(
+            "#!/bin/sh\n"
+            "while read old new ref; do\n"
+            '  if [ "$old" != "$new" ]; then\n'
+            "    exit 1\n"
+            "  fi\n"
+            "done\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+        self.loop._check_pushable(self.pr)
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        iteration = self.loop.artifacts_dir / "policy-rejection"
+        iteration.mkdir()
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                self.loop._outside_state(self.worktree),
+                self.loop._nested_git_entries(self.worktree),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
 
     def test_patch_validation_commits_with_hooks_disabled_and_pushes_exact_ref(
         self,

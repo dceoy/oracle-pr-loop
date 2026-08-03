@@ -66,8 +66,9 @@ Options:
 - `--artifacts-dir DIR`: repository-relative audit root, default
   `.pr-review-loop`.
 - `--dry-run`: check dependencies, authentication, PR identity, permissions,
-  pushability, and locking without invoking ChatGPT/Codex or changing a remote
-  or worktree.
+  push authentication and lease freshness, and locking without invoking
+  ChatGPT/Codex or changing a remote or worktree; see
+  [Limitations](#limitations) for what the pushability check does not cover.
 
 Each run writes deterministic, permission-restricted audit material below
 `.pr-review-loop/runs/`, including exact PR metadata and patch, a changed-file
@@ -132,6 +133,12 @@ fork support, daemon mode, or human-thread resolution.
   to the operator's account.
 - There is no CI/check-status gate: GitHub approval is verified for the exact
   reviewed head SHA, but a red or absent check suite does not block approval.
+- The pushability precheck only proves push authentication and
+  force-with-lease staleness detection against the current head SHA.
+  `git push --dry-run` never reaches the server's hook/branch-protection
+  phase, even for a push that would land a genuinely new commit, so it
+  cannot predict whether the real push after Oracle/Codex will be accepted.
+  A policy rejection there surfaces as a failure at that push, not here.
 
 The single-file implementation is longer than the original 250–400-line sizing
 target because the issue's mandatory safety boundaries require explicit bounded
