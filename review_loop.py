@@ -467,7 +467,11 @@ def _verify_no_posix_descendants(pids: Mapping[int, bytes], safe_command: str) -
     """
     remaining = dict(pids)
     for _ in range(5):
-        alive = {pid: start for pid, start in remaining.items() if _linux_pid_matches(pid, start)}
+        alive = {
+            pid: start
+            for pid, start in remaining.items()
+            if _linux_pid_matches(pid, start)
+        }
         if not alive:
             return
         for pid in alive:

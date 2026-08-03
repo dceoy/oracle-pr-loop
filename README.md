@@ -147,15 +147,20 @@ fork support, daemon mode, or human-thread resolution.
 - Subprocess containment (killing a detached descendant of a command the
   orchestrator runs, including Codex) samples the live process tree via
   `/proc` on a fixed interval while the command's leader process is
-  running, and kills every pid ever observed that way, so it also reaches
-  a descendant that leaves the leader's process group. A descendant that
-  appears and is reparented away from the leader's tree entirely between
-  two samples (for example, a fast double-fork) is never observed and is
-  not covered by this. This sampling-based containment is only available
-  on Linux. On other POSIX platforms (macOS, BSD) containment falls back to
-  a plain process-group kill, which cannot reach a descendant that calls
-  `setsid()` (or is started with `start_new_session=True`) to leave that
-  group at all.
+  running, and kills every pid whose `/proc` start time still matches what
+  was observed then, so it also reaches a descendant that leaves the
+  leader's process group. A descendant that appears and is reparented away
+  from the leader's tree entirely between two samples (for example, a fast
+  double-fork) is never observed and is not covered by this. The start-time
+  check rejects a pid the OS has since recycled for an unrelated process,
+  but that check and the `SIGKILL` that follows it are two separate
+  syscalls, not one atomic operation, so a pid recycled in the instant
+  between them is not caught; a `pidfd`-based reference would close that
+  remaining window but is not implemented. This sampling-based containment
+  is only available on Linux. On other POSIX platforms (macOS, BSD)
+  containment falls back to a plain process-group kill, which cannot reach
+  a descendant that calls `setsid()` (or is started with
+  `start_new_session=True`) to leave that group at all.
 - The reviewer-permission precheck validates only the reviewer account's
   repository collaborator level, not the reviewer token's own permission
   grant. GitHub does not expose a reliable pre-flight introspection endpoint
