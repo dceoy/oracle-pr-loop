@@ -97,7 +97,9 @@ fork support, daemon mode, or human-thread resolution.
 - `GH_REVIEW_TOKEN` is required, removed from general subprocess environments,
   mapped to `GH_TOKEN` only for individual reviewer `gh` calls, and never stored.
 - Oracle and Codex receive small allowlisted environments without GitHub,
-  cloud, package-registry, SSH-agent, database URL, or arbitrary host variables.
+  cloud, package-registry, SSH-agent, database URL, or arbitrary host
+  variables. The allowlist still passes through the real `HOME` and `PATH`;
+  see [Limitations](#limitations).
 - Oracle uses a fresh one-shot browser conversation for every head SHA, current
   ChatGPT model selection, configured thinking time, and automatic successful
   one-shot archiving.
@@ -105,9 +107,10 @@ fork support, daemon mode, or human-thread resolution.
   blockers; requested changes must contain concrete blockers and an
   implementation prompt.
 - Codex runs with `--sandbox workspace-write --ephemeral`, ignores user config
-  and execution-policy rules (preventing configured MCP/plugin authority), gives
-  shell tools only an explicit `PATH`, has no network authority, and receives
-  fixed guardrails before the untrusted reviewer task.
+  and execution-policy rules (preventing configured MCP/plugin authority), has
+  no network authority, and receives fixed guardrails before the untrusted
+  reviewer task. `workspace-write` confines writes to the worktree; it does not
+  confine reads. See [Limitations](#limitations).
 - The primary checkout is not reset, cleaned, staged, or committed. Codex edits
   only `.pr-review-loop/worktrees/pr-N/`.
 - The orchestrator rejects dirty/conflicting loop worktrees, whitespace errors,
@@ -116,6 +119,19 @@ fork support, daemon mode, or human-thread resolution.
   concurrently updated PR head.
 - Context fails closed above 100 changed files, 2 MiB of patch text, or 20 MiB
   of attached text. Files are never silently truncated.
+
+## Limitations
+
+- Codex's `--sandbox workspace-write` restricts writes to the worktree but
+  does not confine filesystem reads. Codex also inherits the operator's real
+  `HOME` and `PATH`. A prompt-injected task can therefore read files outside
+  the worktree or invoke locally reachable credential helpers; redaction only
+  covers values already present in the orchestrator's own captured
+  environment (`CommandRunner._secrets`), not values discovered this way.
+  Only run this tool against pull requests you would trust with read access
+  to the operator's account.
+- There is no CI/check-status gate: GitHub approval is verified for the exact
+  reviewed head SHA, but a red or absent check suite does not block approval.
 
 The single-file implementation is longer than the original 250–400-line sizing
 target because the issue's mandatory safety boundaries require explicit bounded

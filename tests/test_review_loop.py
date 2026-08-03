@@ -142,6 +142,26 @@ class InputAndIsolationTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(loopr.LoopError):
                 loopr.resolve_pr_target(invalid, "acme/project")
 
+    def test_pr_url_comparison_is_case_insensitive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
+            instance = loopr.ReviewLoop(args_for(root), runner)
+            instance.repo = "acme/project"
+            instance.number = 7
+            instance.pr_url = "https://github.com/acme/project/pull/7"
+            differently_cased = loopr.PullRequest.from_json(
+                "acme/project",
+                make_pr().raw | {"url": "https://github.com/Acme/Project/pull/7"},
+            )
+            instance._validate_snapshot(differently_cased)
+            mismatched = loopr.PullRequest.from_json(
+                "acme/project",
+                make_pr().raw | {"url": "https://github.com/other/project/pull/7"},
+            )
+            with self.assertRaises(loopr.LoopError):
+                instance._validate_snapshot(mismatched)
+
     def test_remote_normalization_rejects_non_github_hosts(self) -> None:
         self.assertEqual(
             "acme/project",
@@ -581,6 +601,23 @@ class PatchSafetyTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_precheck_author_identity_probe_fails_closed_without_configured_identity(
+        self,
+    ) -> None:
+        unset = pathlib.Path(self.temporary.name) / "no-identity"
+        unset.mkdir()
+        self.git(unset, "init", "-q")
+        homeless = pathlib.Path(self.temporary.name) / "empty-home"
+        homeless.mkdir()
+        runner = loopr.CommandRunner({"PATH": os.environ["PATH"], "HOME": str(homeless)})
+        instance = loopr.ReviewLoop(args_for(unset), runner)
+        instance.repo_dir = unset
+        with self.assertRaises(loopr.CommandError):
+            instance.command(["git", "var", "GIT_AUTHOR_IDENT"], cwd=unset)
+        self.git(unset, "config", "user.name", "Loop Test")
+        self.git(unset, "config", "user.email", "loop@example.test")
+        instance.command(["git", "var", "GIT_AUTHOR_IDENT"], cwd=unset)
+
     def test_patch_validation_commits_with_hooks_disabled_and_pushes_exact_ref(
         self,
     ) -> None:
@@ -608,6 +645,41 @@ class PatchSafetyTests(unittest.TestCase):
         ).split()[0]
         self.assertEqual(pushed, remote_sha)
         self.assertTrue((iteration / "resulting.patch").read_text().strip())
+
+    def _install_post_index_change_hook(self) -> pathlib.Path:
+        git_dir = pathlib.Path(self.git(self.primary, "rev-parse", "--git-common-dir"))
+        if not git_dir.is_absolute():
+            git_dir = self.primary / git_dir
+        hooks = git_dir / "hooks"
+        hooks.mkdir(exist_ok=True)
+        marker = pathlib.Path(self.temporary.name) / "post-index-change-fired"
+        hook = hooks / "post-index-change"
+        hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+        hook.chmod(0o755)
+        return marker
+
+    def test_git_add_ignores_an_executable_post_index_change_hook(self) -> None:
+        marker = self._install_post_index_change_hook()
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        iteration = self.loop.artifacts_dir / "iteration"
+        iteration.mkdir()
+        self.loop.validate_commit_push(
+            self.pr,
+            self.worktree,
+            1,
+            iteration,
+            self.loop._outside_state(self.worktree),
+            self.loop._nested_git_entries(self.worktree),
+        )
+        self.assertFalse(marker.exists())
+
+    def test_worktree_reset_on_reuse_ignores_an_executable_post_index_change_hook(
+        self,
+    ) -> None:
+        marker = self._install_post_index_change_hook()
+        reused = self.loop.prepare_worktree(self.pr)
+        self.assertEqual(self.worktree, reused)
+        self.assertFalse(marker.exists())
 
     def test_worktree_reuse_is_exact_and_dirty_state_fails_closed(self) -> None:
         primary_before = self.git(
@@ -668,6 +740,96 @@ class PatchSafetyTests(unittest.TestCase):
         )
         self.assertIn(iteration / "diff.patch", bundle.attachments)
         self.assertIn("binary 3 bytes", (iteration / "changed-files.txt").read_text())
+
+    def test_bundle_marks_a_deleted_file_from_change_type_without_reading_it(
+        self,
+    ) -> None:
+        self.git(self.primary, "checkout", "feature")
+        (self.primary / "doomed.txt").write_text("temporary\n", encoding="utf-8")
+        self.git(self.primary, "add", "doomed.txt")
+        self.git(self.primary, "commit", "-m", "add doomed file")
+        self.git(self.primary, "rm", "doomed.txt")
+        self.git(self.primary, "commit", "-m", "remove doomed file")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": "doomed.txt", "changeType": "DELETED"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "deleted-bundle"
+        iteration.mkdir()
+        with (
+            mock.patch.object(
+                self.loop,
+                "_gh",
+                return_value="diff --git a/doomed.txt b/doomed.txt\n",
+            ),
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        self.assertEqual("deleted", by_path["doomed.txt"]["kind"])
+        self.assertIsNone(by_path["doomed.txt"]["attachment"])
+        self.assertIn(
+            "no current content", (iteration / "changed-files.txt").read_text()
+        )
+
+    def test_bundle_marks_a_submodule_gitlink_without_attaching_content(self) -> None:
+        root = pathlib.Path(self.temporary.name)
+        submodule_remote = root / "submodule.git"
+        self.git(root, "init", "--bare", str(submodule_remote))
+        submodule_seed = root / "submodule-seed"
+        self.git(root, "clone", str(submodule_remote), str(submodule_seed))
+        self.git(submodule_seed, "config", "user.name", "Loop Test")
+        self.git(submodule_seed, "config", "user.email", "loop@example.test")
+        (submodule_seed / "lib.txt").write_text("lib\n", encoding="utf-8")
+        self.git(submodule_seed, "add", "lib.txt")
+        self.git(submodule_seed, "commit", "-m", "seed")
+        self.git(submodule_seed, "push", "-u", "origin", "HEAD:refs/heads/main")
+        self.git(submodule_remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+        self.git(self.primary, "checkout", "feature")
+        self.git(
+            self.primary,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            str(submodule_remote),
+            "vendor/lib",
+        )
+        self.git(self.primary, "commit", "-m", "add vendor submodule")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 2
+        raw["files"] = [
+            {"path": ".gitmodules", "changeType": "ADDED"},
+            {"path": "vendor/lib", "changeType": "ADDED"},
+        ]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "gitlink-bundle"
+        iteration.mkdir()
+        with (
+            mock.patch.object(
+                self.loop, "_gh", return_value="diff --git a/vendor/lib\n"
+            ),
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        self.assertEqual("gitlink", by_path["vendor/lib"]["kind"])
+        self.assertIsNone(by_path["vendor/lib"]["attachment"])
 
     def test_bundle_rejects_more_than_one_hundred_files_before_diff(self) -> None:
         raw = dict(self.pr.raw)

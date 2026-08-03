@@ -877,8 +877,15 @@ class ReviewLoop:
         binary: bool = False,
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
     ) -> CommandResult:
+        argv = list(args)
+        if argv and argv[0] == "git":
+            # Every git invocation here targets either the primary checkout or a
+            # disposable per-PR worktree; a repository-configured core.hooksPath
+            # (including one Codex-controlled content can point at) must never
+            # execute with this orchestrator's environment or credentials.
+            argv = ["git", "-c", f"core.hooksPath={os.devnull}", *argv[1:]]
         return self.runner.run(
-            args,
+            argv,
             cwd=cwd or self.repo_dir,
             env=env or self.base_env,
             timeout=timeout,
@@ -989,7 +996,10 @@ class ReviewLoop:
         return pr
 
     def _validate_snapshot(self, pr: PullRequest) -> None:
-        if pr.number != self.number or pr.url.rstrip("/") != self.pr_url:
+        if (
+            pr.number != self.number
+            or pr.url.rstrip("/").lower() != self.pr_url.lower()
+        ):
             raise LoopError(
                 EXIT_PRECONDITION, "GitHub returned an ambiguous pull request identity"
             )
@@ -1141,6 +1151,7 @@ class ReviewLoop:
             self.command(
                 ["codex", "login", "status"], env=self.runner.codex_env(), timeout=30
             )
+            self.command(["git", "var", "GIT_AUTHOR_IDENT"], timeout=30)
             ignored = self.command(
                 [
                     "git",
@@ -1194,13 +1205,11 @@ class ReviewLoop:
             self.command(
                 [
                     "git",
-                    "-c",
-                    f"core.hooksPath={os.devnull}",
                     "push",
                     "--dry-run",
                     f"--force-with-lease=refs/heads/{pr.head_ref}:{pr.head_sha}",
                     self.push_url,
-                    f"HEAD:refs/heads/{pr.head_ref}",
+                    f"{pr.head_sha}:refs/heads/{pr.head_ref}",
                 ],
                 timeout=60,
             )
@@ -1425,17 +1434,35 @@ class ReviewLoop:
         }
         return current == expected
 
-    def _git_blob(self, worktree: pathlib.Path, path: str, size: int) -> bytes:
-        if size > MAX_ATTACHED_TEXT_BYTES:
+    def _git_object_type(self, worktree: pathlib.Path, path: str) -> str:
+        # A gitlink's target commit usually is not fetched into this repository's
+        # object database, so `git cat-file -t HEAD:<path>` cannot resolve it. The
+        # tree entry's mode alone (reported here as ls-tree's "type" column)
+        # identifies a gitlink without needing the target object to exist.
+        try:
+            result = self.command(
+                ["git", "ls-tree", "-z", "HEAD", "--", path], cwd=worktree
+            ).stdout
+        except CommandError as exc:
             raise LoopError(
-                EXIT_PRECONDITION, f"changed file exceeds context limit: {path}"
+                EXIT_PRECONDITION, f"cannot inspect changed file {path}: {exc}"
+            ) from exc
+        assert isinstance(result, str)
+        entry = result.split("\x00", 1)[0]
+        fields = entry.split(" ", 2)
+        if len(fields) < 2:
+            raise LoopError(
+                EXIT_PRECONDITION, f"changed path {path} is missing from HEAD"
             )
+        return fields[1]
+
+    def _git_blob(self, worktree: pathlib.Path, path: str) -> bytes:
         try:
             result = self.command(
                 ["git", "cat-file", "blob", f"HEAD:{path}"],
                 cwd=worktree,
                 binary=True,
-                max_output_bytes=size + 1,
+                max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
             )
         except CommandError as exc:
             raise LoopError(
@@ -1504,7 +1531,8 @@ class ReviewLoop:
                 raise LoopError(
                     EXIT_PRECONDITION, "GitHub returned duplicate changed file paths"
                 )
-            statuses[path] = str(item.get("status") or "modified")
+            change_type = item.get("changeType") or item.get("status") or "modified"
+            statuses[path] = str(change_type).lower()
             paths.append(path)
 
         context = (
@@ -1551,17 +1579,26 @@ class ReviewLoop:
                 )
                 changed_lines.append(f"{status}\t{path}\t[no current content]")
                 continue
-            try:
-                size_text = self.command(
-                    ["git", "cat-file", "-s", f"HEAD:{path}"], cwd=worktree
-                ).stdout
-                assert isinstance(size_text, str)
-                size = int(size_text.strip())
-            except (CommandError, ValueError) as exc:
+            object_type = self._git_object_type(worktree, path)
+            if object_type == "commit":
+                manifest.append(
+                    {
+                        "path": path,
+                        "status": status,
+                        "attachment": None,
+                        "kind": "gitlink",
+                    }
+                )
+                changed_lines.append(
+                    f"{status}\t{path}\t[gitlink, no attached content]"
+                )
+                continue
+            if object_type != "blob":
                 raise LoopError(
-                    EXIT_PRECONDITION, f"cannot size changed file {path}"
-                ) from exc
-            blob = self._git_blob(worktree, path, size)
+                    EXIT_PRECONDITION, f"changed path {path} is not a blob or gitlink"
+                )
+            blob = self._git_blob(worktree, path)
+            size = len(blob)
             try:
                 text = blob.decode("utf-8")
                 is_binary = "\x00" in text
@@ -2044,8 +2081,6 @@ class ReviewLoop:
                 [
                     "git",
                     "-c",
-                    f"core.hooksPath={os.devnull}",
-                    "-c",
                     "commit.gpgSign=false",
                     "commit",
                     "--no-verify",
@@ -2061,8 +2096,6 @@ class ReviewLoop:
                 self.command(
                     [
                         "git",
-                        "-c",
-                        f"core.hooksPath={os.devnull}",
                         "push",
                         f"--force-with-lease=refs/heads/{pr.head_ref}:{pr.head_sha}",
                         self.push_url,
