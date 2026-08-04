@@ -210,22 +210,21 @@ class InputAndIsolationTests(unittest.TestCase):
             self.assertNotIn(key, env)
 
     def test_reviewer_token_is_scoped_and_redacted(self) -> None:
-        runner = loopr.CommandRunner(
-            {"PATH": "/bin", "GH_REVIEW_TOKEN": "review-secret"}
-        )
+        runner = loopr.CommandRunner({
+            "PATH": "/bin",
+            "GH_REVIEW_TOKEN": "review-secret",
+        })
         self.assertNotIn("GH_REVIEW_TOKEN", runner.base_env())
         review_env = runner.reviewer_env("review-secret")
         self.assertEqual("review-secret", review_env["GH_TOKEN"])
         self.assertEqual("failure [REDACTED]", runner.redact("failure review-secret"))
 
     def test_gh_env_never_allowlists_an_enterprise_host_or_token(self) -> None:
-        runner = loopr.CommandRunner(
-            {
-                "PATH": "/bin",
-                "GH_HOST": "github.example.com",
-                "GH_ENTERPRISE_TOKEN": "enterprise-secret",
-            }
-        )
+        runner = loopr.CommandRunner({
+            "PATH": "/bin",
+            "GH_HOST": "github.example.com",
+            "GH_ENTERPRISE_TOKEN": "enterprise-secret",
+        })
         self.assertNotIn("GH_HOST", runner.gh_env())
         self.assertNotIn("GH_ENTERPRISE_TOKEN", runner.gh_env())
         self.assertNotIn("GH_HOST", runner.reviewer_env("review-secret"))
@@ -402,9 +401,10 @@ class InputAndIsolationTests(unittest.TestCase):
             self.assertIn("exceeded", str(bounded.exception))
 
     def test_command_wrapper_bounds_and_redacts_diagnostics(self) -> None:
-        runner = loopr.CommandRunner(
-            {"PATH": os.environ["PATH"], "TEST_TOKEN": "hidden-value"}
-        )
+        runner = loopr.CommandRunner({
+            "PATH": os.environ["PATH"],
+            "TEST_TOKEN": "hidden-value",
+        })
         with tempfile.TemporaryDirectory() as temporary:
             result = runner.run(
                 ["python3", "-c", "print('ok')"],
@@ -652,9 +652,9 @@ class InputAndIsolationTests(unittest.TestCase):
             ) -> loopr.CommandResult:
                 environment = kwargs["env"]
                 assert isinstance(environment, dict)
-                captured.update(
-                    {str(key): str(value) for key, value in environment.items()}
-                )
+                captured.update({
+                    str(key): str(value) for key, value in environment.items()
+                })
                 final = pathlib.Path(
                     command[command.index("--output-last-message") + 1]
                 )
@@ -688,9 +688,10 @@ class ScriptedLoop(loopr.ReviewLoop):
         race: bool = False,
         author: str = "author",
     ):
-        runner = loopr.CommandRunner(
-            {"PATH": os.environ["PATH"], "GH_REVIEW_TOKEN": "review-token"}
-        )
+        runner = loopr.CommandRunner({
+            "PATH": os.environ["PATH"],
+            "GH_REVIEW_TOKEN": "review-token",
+        })
         super().__init__(args_for(root, maximum=maximum), runner)
         self.scripted_reviews = reviews
         self.review_index = 0
@@ -973,9 +974,10 @@ class PatchSafetyTests(unittest.TestCase):
         base = self.git(self.primary, "rev-parse", "main")
         raw = make_pr(self.sha).raw | {"baseRefOid": base, "headRefOid": self.sha}
         self.pr = loopr.PullRequest.from_json("acme/project", raw)
-        runner = loopr.CommandRunner(
-            {"PATH": os.environ["PATH"], "GH_REVIEW_TOKEN": "review-token"}
-        )
+        runner = loopr.CommandRunner({
+            "PATH": os.environ["PATH"],
+            "GH_REVIEW_TOKEN": "review-token",
+        })
         self.loop = loopr.ReviewLoop(args_for(self.primary), runner)
         self.loop.repo_dir = self.primary
         self.loop.repo = "acme/project"
@@ -1001,16 +1003,14 @@ class PatchSafetyTests(unittest.TestCase):
         self.git(unset, "init", "-q")
         homeless = pathlib.Path(self.temporary.name) / "empty-home"
         homeless.mkdir()
-        runner = loopr.CommandRunner(
-            {
-                "PATH": os.environ["PATH"],
-                "HOME": str(homeless),
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_COUNT": "1",
-                "GIT_CONFIG_KEY_0": "user.useConfigOnly",
-                "GIT_CONFIG_VALUE_0": "true",
-            }
-        )
+        runner = loopr.CommandRunner({
+            "PATH": os.environ["PATH"],
+            "HOME": str(homeless),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+            "GIT_CONFIG_VALUE_0": "true",
+        })
         instance = loopr.ReviewLoop(args_for(unset), runner)
         instance.repo_dir = unset
         with self.assertRaises(loopr.CommandError):
@@ -1332,9 +1332,9 @@ class PatchSafetyTests(unittest.TestCase):
         worktree_tool = self.worktree / "loopr-example-tool"
         worktree_tool.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         worktree_tool.chmod(0o755)
-        runner = loopr.CommandRunner(
-            {"PATH": f".{os.pathsep}{os.pathsep}{trusted_dir}"}
-        )
+        runner = loopr.CommandRunner({
+            "PATH": f".{os.pathsep}{os.pathsep}{trusted_dir}"
+        })
 
         resolved = runner.trusted_executable("loopr-example-tool")
 
@@ -2431,12 +2431,10 @@ class PatchSafetyTests(unittest.TestCase):
         )
         iteration = self.loop.artifacts_dir / "post-review-race"
         iteration.mkdir()
-        responses = iter(
-            [
-                json.dumps({"commit_id": "f" * 40, "id": 2}),
-                json.dumps({"id": 2, "state": "DISMISSED"}),
-            ]
-        )
+        responses = iter([
+            json.dumps({"commit_id": "f" * 40, "id": 2}),
+            json.dumps({"id": 2, "state": "DISMISSED"}),
+        ])
         with (
             mock.patch.object(self.loop, "snapshot", return_value=self.pr),
             mock.patch.object(
@@ -2457,12 +2455,10 @@ class PatchSafetyTests(unittest.TestCase):
             self.pr.repo,
             self.pr.raw | {"baseRefOid": "d" * 40},
         )
-        responses = iter(
-            [
-                json.dumps({"id": 12, "commit_id": self.pr.head_sha}),
-                json.dumps({"id": 12, "state": "DISMISSED"}),
-            ]
-        )
+        responses = iter([
+            json.dumps({"id": 12, "commit_id": self.pr.head_sha}),
+            json.dumps({"id": 12, "state": "DISMISSED"}),
+        ])
         with (
             mock.patch.object(self.loop, "snapshot", side_effect=[self.pr, changed]),
             mock.patch.object(
@@ -2481,20 +2477,16 @@ class PatchSafetyTests(unittest.TestCase):
         )
 
     def test_verify_approval_dismisses_when_base_moves_after_post(self) -> None:
-        responses = iter(
-            [
-                json.dumps(
-                    {
-                        "headRefOid": self.pr.head_sha,
-                        "baseRefOid": "d" * 40,
-                        "reviewDecision": "APPROVED",
-                        "state": "OPEN",
-                        "isDraft": False,
-                    }
-                ),
-                json.dumps({"id": 13, "state": "DISMISSED"}),
-            ]
-        )
+        responses = iter([
+            json.dumps({
+                "headRefOid": self.pr.head_sha,
+                "baseRefOid": "d" * 40,
+                "reviewDecision": "APPROVED",
+                "state": "OPEN",
+                "isDraft": False,
+            }),
+            json.dumps({"id": 13, "state": "DISMISSED"}),
+        ])
         with (
             mock.patch.object(
                 self.loop, "_gh", side_effect=lambda *args, **kwargs: next(responses)

@@ -167,7 +167,6 @@ class CommandResult:
 
 def _linux_enable_subreaper() -> None:
     """Enable child subreaper adoption for the current Linux supervisor."""
-
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         prctl = libc.prctl
@@ -190,7 +189,7 @@ def _linux_pidfd_open(pid: int) -> int:
     opener = getattr(os, "pidfd_open", None)
     if not callable(opener):
         raise OSError(errno.ENOSYS, "pidfd_open is unavailable")
-    return cast(int, opener(pid, 0))
+    return cast("int", opener(pid, 0))
 
 
 def _linux_pidfd_send_signal(pidfd: int, sig: int) -> None:
@@ -225,11 +224,9 @@ def _linux_kill_pid(pid: int) -> bool:
 
 def _linux_proc_children(pid: int, *, required: bool = False) -> set[int]:
     """Return the kernel-reported direct children of a process."""
-
     path = f"/proc/{pid}/task/{pid}/children"
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read()
+        raw = pathlib.Path(path).read_bytes()
     except FileNotFoundError:
         if required:
             raise
@@ -244,8 +241,7 @@ def _linux_proc_children(pid: int, *, required: bool = False) -> set[int]:
 
 def _linux_require_proc_child_enumeration(pid: int) -> None:
     """Fail closed unless the supervisor can enumerate its children."""
-
-    if not os.path.isdir("/proc"):
+    if not pathlib.Path("/proc").is_dir():
         raise OSError(errno.ENOSYS, "/proc child enumeration is unavailable")
     _linux_proc_children(pid, required=True)
     _linux_require_pidfd_support(pid)
@@ -253,7 +249,6 @@ def _linux_require_proc_child_enumeration(pid: int) -> None:
 
 def _linux_reap_available() -> bool:
     """Reap every currently waitable child and report whether one was found."""
-
     reaped = False
     while True:
         try:
@@ -275,7 +270,6 @@ def _linux_cleanup_children(
     terminate_payload: bool,
 ) -> int:
     """Kill and reap the payload and every child adopted by the supervisor."""
-
     if terminate_payload and payload.poll() is None:
         with contextlib.suppress(ProcessLookupError):
             _linux_kill_pid(payload.pid)
@@ -375,7 +369,6 @@ def _linux_supervisor_main(
     safe_command: str,
 ) -> NoReturn:
     """Run one payload as the sole child of a Linux subreaper."""
-
     payload: subprocess.Popen | None = None
     exit_code = 1
     try:
@@ -412,7 +405,7 @@ def _linux_supervisor_main(
             {"type": "result", "returncode": returncode, "contained": True},
         )
         exit_code = 0
-    except BaseException as exc:  # noqa: BLE001 - cleanup must cover interrupts
+    except BaseException as exc:  # ruff: ignore[blind-except] - cleanup must cover interrupts
         if payload is not None:
             try:
                 _linux_cleanup_children(
@@ -421,7 +414,7 @@ def _linux_supervisor_main(
                     safe_command,
                     terminate_payload=True,
                 )
-            except BaseException as cleanup_exc:  # noqa: BLE001 - fail closed
+            except BaseException as cleanup_exc:  # ruff: ignore[blind-except] - fail closed
                 exc = RuntimeError(f"{exc}; cleanup failed: {cleanup_exc}")
         _linux_send_status(
             status_fd,
@@ -555,7 +548,6 @@ def _linux_spawn_supervisor(
     safe_command: str,
 ) -> _LinuxSupervisorProcess:
     """Fork a supervisor and wire only payload stdio to the caller."""
-
     stdout_read, stdout_write = os.pipe()
     stderr_read, stderr_write = os.pipe()
     status_read, status_write = os.pipe()
@@ -641,7 +633,6 @@ class CommandRunner:
         absolute `PATH` entries are searched, and the result is cached
         since `PATH` does not change over the life of the process.
         """
-
         if os.sep in name:
             return name
         cached = self._trusted_executables.get(name)
@@ -650,7 +641,7 @@ class CommandRunner:
         directories = [
             entry
             for entry in self.source_env.get("PATH", "").split(os.pathsep)
-            if os.path.isabs(entry)
+            if pathlib.Path(entry).is_absolute()
         ]
         resolved = (
             shutil.which(name, path=os.pathsep.join(directories))
@@ -672,7 +663,6 @@ class CommandRunner:
 
     def contains_secret(self, value: str | bytes) -> bool:
         """Return whether a value contains any captured credential verbatim."""
-
         if isinstance(value, bytes):
             for secret in self._secrets:
                 try:
@@ -686,7 +676,6 @@ class CommandRunner:
 
     def max_secret_bytes(self) -> int:
         """Return the largest UTF-8 encoded credential length for stream scans."""
-
         lengths: list[int] = []
         for secret in self._secrets:
             try:
@@ -713,17 +702,15 @@ class CommandRunner:
         # so an ambient GH_HOST or GH_ENTERPRISE_TOKEN can only misdirect these
         # calls to an unintended host/identity; neither is allowlisted here,
         # and every relative-path `gh api` call pins --hostname github.com.
-        return self._allowlisted_env(
-            {
-                "GH_TOKEN",
-                "GITHUB_TOKEN",
-                "GH_CONFIG_DIR",
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "NO_PROXY",
-            }
-        )
+        return self._allowlisted_env({
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_CONFIG_DIR",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+        })
 
     def _allowlisted_env(self, extra: Iterable[str] = ()) -> dict[str, str]:
         allowed = {
@@ -763,21 +750,18 @@ class CommandRunner:
         return self._allowlisted_env()
 
     def oracle_env(self) -> dict[str, str]:
-        return self._allowlisted_env(
-            {
-                "CHROME_PATH",
-                "DISPLAY",
-                "WAYLAND_DISPLAY",
-                "XAUTHORITY",
-                "DBUS_SESSION_BUS_ADDRESS",
-                "ORACLE_BROWSER_PROFILE_DIR",
-                "ORACLE_CHATGPT_ACCOUNT_EMAIL",
-            }
-        )
+        return self._allowlisted_env({
+            "CHROME_PATH",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "ORACLE_BROWSER_PROFILE_DIR",
+            "ORACLE_CHATGPT_ACCOUNT_EMAIL",
+        })
 
     def model_env(self) -> dict[str, str]:
         """Backward-compatible alias for the stricter Codex environment."""
-
         return self.codex_env()
 
     def run(
@@ -872,7 +856,7 @@ class CommandRunner:
                         if len(chunk) > remaining:
                             overflow.append(name)
                             terminate()
-                except BaseException as exc:  # noqa: BLE001 - terminate on callback failure
+                except BaseException as exc:  # ruff: ignore[blind-except] - terminate on callback failure
                     stream_errors.append(self.redact(str(exc)))
                     terminate()
                 finally:
@@ -888,7 +872,8 @@ class CommandRunner:
                 finally:
                     process.stdin.close()
 
-            assert process.stdout is not None and process.stderr is not None
+            assert process.stdout is not None
+            assert process.stderr is not None
             threads = [
                 threading.Thread(
                     target=drain,
@@ -993,7 +978,6 @@ def run_command(
     runner: CommandRunner | None = None,
 ) -> CommandResult:
     """Public reusable wrapper used by the orchestrator and external callers."""
-
     active_runner = runner or CommandRunner(env)
     return active_runner.run(
         args,
@@ -1329,7 +1313,6 @@ def _json_object(text: str, description: str) -> dict[str, Any]:
 
 def parse_oracle_review(text: str, expected_sha: str) -> OracleReview:
     """Parse the one allowed JSON object without repair or inference."""
-
     candidate = text.strip()
     fence = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*)\r?\n```", candidate, re.DOTALL)
     if fence:
@@ -1404,7 +1387,6 @@ def parse_oracle_review(text: str, expected_sha: str) -> OracleReview:
 
 def normalize_github_repo(remote: str) -> str:
     """Return owner/name for an unambiguous github.com remote."""
-
     value = remote.strip()
     match = re.fullmatch(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?", value)
     if not match:
@@ -1441,7 +1423,6 @@ def normalize_github_repo(remote: str) -> str:
 
 def canonical_github_remote(remote: str, repo: str) -> str:
     """Construct a GitHub-only transport URL from a validated remote shape."""
-
     parsed = urllib.parse.urlparse(remote.strip())
     if remote.strip().startswith("git@github.com:") or parsed.scheme == "ssh":
         return f"git@github.com:{repo}.git"
@@ -1542,8 +1523,8 @@ class ArtifactWriter:
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
             temporary.write_text(safe, encoding="utf-8")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, path)
+            pathlib.Path(temporary).chmod(0o600)
+            pathlib.Path(temporary).replace(path)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 temporary.unlink()
@@ -1630,7 +1611,6 @@ class ReviewLoop:
     @staticmethod
     def _restrict_private_tree(root: pathlib.Path) -> None:
         """Tighten freshly created Git control files before accepting the tree."""
-
         paths = [root, *root.rglob("*")]
         for path in paths:
             try:
@@ -1645,7 +1625,9 @@ class ReviewLoop:
                     "Git control repository contains an unexpected symlink",
                 )
             try:
-                os.chmod(path, 0o700 if stat.S_ISDIR(metadata.st_mode) else 0o600)
+                pathlib.Path(path).chmod(
+                    0o700 if stat.S_ISDIR(metadata.st_mode) else 0o600
+                )
             except OSError as exc:
                 raise LoopError(
                     EXIT_PRECONDITION,
@@ -1656,7 +1638,6 @@ class ReviewLoop:
         self, control_repo: pathlib.Path | None = None
     ) -> dict[str, str]:
         """Build a Git environment that cannot inherit executable path controls."""
-
         env = dict(self.base_env)
         for key in tuple(env):
             if key.startswith("GIT_") and key not in {
@@ -1760,7 +1741,6 @@ class ReviewLoop:
 
     def _initialize_control_repository(self) -> None:
         """Create or validate the private bare repository used by Git orchestration."""
-
         if self._author_identity is None:
             raise LoopError(EXIT_PRECONDITION, "Git author identity is missing")
         if self._control_repo is not None:
@@ -1805,17 +1785,15 @@ class ReviewLoop:
         initialize = metadata is None or not any(control_repo.iterdir())
         if initialize:
             try:
-                self._control_setup_command(
-                    [
-                        "git",
-                        "-c",
-                        f"core.hooksPath={os.devnull}",
-                        "init",
-                        "--bare",
-                        "--quiet",
-                        str(control_repo),
-                    ]
-                )
+                self._control_setup_command([
+                    "git",
+                    "-c",
+                    f"core.hooksPath={os.devnull}",
+                    "init",
+                    "--bare",
+                    "--quiet",
+                    str(control_repo),
+                ])
             except CommandError as exc:
                 raise LoopError(
                     EXIT_PRECONDITION,
@@ -1837,17 +1815,15 @@ class ReviewLoop:
                     "existing Git control repository config is unsafe",
                 )
             try:
-                bare = self._control_setup_command(
-                    [
-                        "git",
-                        "-c",
-                        f"core.hooksPath={os.devnull}",
-                        "--git-dir",
-                        str(control_repo),
-                        "rev-parse",
-                        "--is-bare-repository",
-                    ]
-                ).stdout
+                bare = self._control_setup_command([
+                    "git",
+                    "-c",
+                    f"core.hooksPath={os.devnull}",
+                    "--git-dir",
+                    str(control_repo),
+                    "rev-parse",
+                    "--is-bare-repository",
+                ]).stdout
                 version = self._control_setup_command(
                     [
                         "git",
@@ -1893,9 +1869,14 @@ class ReviewLoop:
         }
         try:
             for key, value in settings.items():
-                self._control_command(
-                    ["git", "config", "--local", "--replace-all", key, value]
-                )
+                self._control_command([
+                    "git",
+                    "config",
+                    "--local",
+                    "--replace-all",
+                    key,
+                    value,
+                ])
         except CommandError as exc:
             raise LoopError(
                 EXIT_PRECONDITION,
@@ -2061,16 +2042,18 @@ class ReviewLoop:
         try:
             root = self.command(["git", "rev-parse", "--show-toplevel"]).stdout
             origin = self.command(["git", "remote", "get-url", "origin"]).stdout
-            push_origin = self.command(
-                ["git", "remote", "get-url", "--push", "origin"]
-            ).stdout
+            push_origin = self.command([
+                "git",
+                "remote",
+                "get-url",
+                "--push",
+                "origin",
+            ]).stdout
         except CommandError as exc:
             raise LoopError(EXIT_PRECONDITION, str(exc)) from exc
-        assert (
-            isinstance(root, str)
-            and isinstance(origin, str)
-            and isinstance(push_origin, str)
-        )
+        assert isinstance(root, str)
+        assert isinstance(origin, str)
+        assert isinstance(push_origin, str)
         self.repo_dir = pathlib.Path(root.strip()).resolve()
         origin_remote = origin.strip()
         push_remote = push_origin.strip()
@@ -2202,15 +2185,13 @@ class ReviewLoop:
         if configured:
             candidates.append(pathlib.Path(configured).expanduser())
         if sys.platform == "darwin":
-            candidates.extend(
-                [
-                    pathlib.Path(
-                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-                    ),
-                    pathlib.Path.home()
-                    / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                ]
-            )
+            candidates.extend([
+                pathlib.Path(
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                ),
+                pathlib.Path.home()
+                / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            ])
         for name in (
             "google-chrome",
             "google-chrome-stable",
@@ -2379,9 +2360,12 @@ class ReviewLoop:
         here.
         """
         try:
-            remote_sha = self._control_command(
-                ["git", "ls-remote", self.origin_url, f"refs/heads/{pr.head_ref}"]
-            ).stdout
+            remote_sha = self._control_command([
+                "git",
+                "ls-remote",
+                self.origin_url,
+                f"refs/heads/{pr.head_ref}",
+            ]).stdout
             assert isinstance(remote_sha, str)
             observed = remote_sha.split()[0] if remote_sha.split() else ""
             if observed != pr.head_sha:
@@ -2428,7 +2412,8 @@ class ReviewLoop:
                 )
 
     def _iteration_dir(self, iteration: int) -> pathlib.Path:
-        assert self.run_dir and self.writer
+        assert self.run_dir
+        assert self.writer
         path = self.run_dir / f"iteration-{iteration:02d}"
         path.mkdir(mode=0o700)
         self.writer.json(path / "versions.json", self.versions)
@@ -2472,17 +2457,22 @@ class ReviewLoop:
                 ],
                 timeout=180,
             )
-            fetched = self._control_command(
-                ["git", "rev-parse", f"{ref_root}/head"]
-            ).stdout
+            fetched = self._control_command([
+                "git",
+                "rev-parse",
+                f"{ref_root}/head",
+            ]).stdout
             assert isinstance(fetched, str)
             if fetched.strip() != pr.head_sha:
                 raise LoopError(
                     EXIT_RACE, "remote head changed before worktree preparation"
                 )
-            listing = self._control_command(
-                ["git", "worktree", "list", "--porcelain"]
-            ).stdout
+            listing = self._control_command([
+                "git",
+                "worktree",
+                "list",
+                "--porcelain",
+            ]).stdout
             assert isinstance(listing, str)
             registered = self._registered_worktrees(listing)
             target = str(worktree.resolve(strict=False))
@@ -2521,9 +2511,14 @@ class ReviewLoop:
                     )
                 worktree.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 self._control_command(["git", "branch", "-f", branch, pr.head_sha])
-                self._control_command(
-                    ["git", "worktree", "add", "--force", str(worktree), branch]
-                )
+                self._control_command([
+                    "git",
+                    "worktree",
+                    "add",
+                    "--force",
+                    str(worktree),
+                    branch,
+                ])
             head = self.command(["git", "rev-parse", "HEAD"], cwd=worktree).stdout
             status = self.command(
                 ["git", "status", "--porcelain", "--untracked-files=all"], cwd=worktree
@@ -2548,12 +2543,10 @@ class ReviewLoop:
             for line in block.splitlines():
                 key, _, value = line.partition(" ")
                 fields[key] = value
-            entries.append(
-                (
-                    str(pathlib.Path(fields.get("worktree", "")).resolve()),
-                    fields.get("branch", ""),
-                )
-            )
+            entries.append((
+                str(pathlib.Path(fields.get("worktree", "")).resolve()),
+                fields.get("branch", ""),
+            ))
         return entries
 
     @staticmethod
@@ -2945,27 +2938,23 @@ class ReviewLoop:
                     if dest
                     else "[no current content]"
                 )
-                manifest.append(
-                    {
-                        "path": path,
-                        "status": status,
-                        "attachment": None,
-                        "kind": "deleted",
-                        **({"renamedTo": dest} if dest else {}),
-                    }
-                )
+                manifest.append({
+                    "path": path,
+                    "status": status,
+                    "attachment": None,
+                    "kind": "deleted",
+                    **({"renamedTo": dest} if dest else {}),
+                })
                 changed_lines.append(f"{status}\t{path}\t{note}")
                 continue
             object_type = self._git_object_type(worktree, path)
             if object_type == "commit":
-                manifest.append(
-                    {
-                        "path": path,
-                        "status": status,
-                        "attachment": None,
-                        "kind": "gitlink",
-                    }
-                )
+                manifest.append({
+                    "path": path,
+                    "status": status,
+                    "attachment": None,
+                    "kind": "gitlink",
+                })
                 changed_lines.append(
                     f"{status}\t{path}\t[gitlink, no attached content]"
                 )
@@ -3038,14 +3027,12 @@ class ReviewLoop:
                         EXIT_PRECONDITION, f"streamed blob became invalid UTF-8: {path}"
                     ) from None
             if is_binary:
-                manifest.append(
-                    {
-                        "path": path,
-                        "status": status,
-                        "attachment": None,
-                        "kind": "binary",
-                    }
-                )
+                manifest.append({
+                    "path": path,
+                    "status": status,
+                    "attachment": None,
+                    "kind": "binary",
+                })
                 changed_lines.append(f"{status}\t{path}\t[binary {size} bytes]")
                 continue
             safe_name = attachments_dir / f"{index:03d}.txt"
@@ -3056,15 +3043,13 @@ class ReviewLoop:
                 )
             self.writer.text(safe_name, text)
             attached.append(safe_name)
-            manifest.append(
-                {
-                    "path": path,
-                    "status": status,
-                    "attachment": str(safe_name.relative_to(iteration_dir)),
-                    "kind": "text",
-                    "bytes": size,
-                }
-            )
+            manifest.append({
+                "path": path,
+                "status": status,
+                "attachment": str(safe_name.relative_to(iteration_dir)),
+                "kind": "text",
+                "bytes": size,
+            })
             changed_lines.append(f"{status}\t{path}\t[text {size} bytes]")
 
         changed_text = "\n".join(changed_lines) + ("\n" if changed_lines else "")
@@ -3117,7 +3102,7 @@ class ReviewLoop:
         }
         for changed in changed_paths:
             parent = pathlib.PurePosixPath(changed).parent
-            while parent != pathlib.PurePosixPath("."):
+            while parent != pathlib.PurePosixPath():
                 candidate = str(parent / "AGENTS.md")
                 if candidate in tracked:
                     wanted.add(candidate)
@@ -3219,12 +3204,10 @@ class ReviewLoop:
             )
 
     def _dismiss_review(self, review_id: int) -> None:
-        payload = json.dumps(
-            {
-                "message": "Dismissed automatically because the reviewed PR snapshot became stale.",
-                "event": "DISMISS",
-            }
-        )
+        payload = json.dumps({
+            "message": "Dismissed automatically because the reviewed PR snapshot became stale.",
+            "event": "DISMISS",
+        })
         try:
             raw = self._gh(
                 [
@@ -3451,7 +3434,7 @@ class ReviewLoop:
             git_names = [
                 name for name in [*directories, *files] if name.casefold() == ".git"
             ]
-            if relative_root != pathlib.Path("."):
+            if relative_root != pathlib.Path():
                 entries.update(str(relative_root / name) for name in git_names)
             elif any(name != ".git" for name in git_names):
                 entries.update(git_names)
@@ -3759,9 +3742,13 @@ class ReviewLoop:
         deadline = time.monotonic() + POLL_TIMEOUT
         while time.monotonic() < deadline:
             try:
-                raw = self._gh(
-                    ["pr", "view", self.pr_url, "--json", "headRefOid,state,isDraft"]
-                )
+                raw = self._gh([
+                    "pr",
+                    "view",
+                    self.pr_url,
+                    "--json",
+                    "headRefOid,state,isDraft",
+                ])
                 value = _json_object(raw, "head polling")
             except (CommandError, LoopError) as exc:
                 raise LoopError(EXIT_GITHUB, str(exc)) from exc
