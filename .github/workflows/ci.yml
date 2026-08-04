@@ -1,14 +1,32 @@
+---
 name: CI
-
 on:
   push:
+    branches:
+      - main
   pull_request:
-
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  workflow_dispatch:
 permissions:
   contents: read
-
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+    working-directory: .
 jobs:
-  tests:
+  python-lint-and-scan:
+    permissions:
+      contents: read
+    uses: dceoy/gha-for-devops/.github/workflows/python-package-lint-and-scan.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      package-path: .
+      python-version: "3.12"
+  python-test:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -19,19 +37,32 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install static-analysis tools
-        run: python -m pip install --disable-pip-version-check pyright ruff
-
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Check formatting and lint
-        run: |
-          ruff format --check review_loop.py tests/test_review_loop.py
-          ruff check review_loop.py tests/test_review_loop.py
-
-      - name: Type-check
-        run: pyright review_loop.py tests/test_review_loop.py
-
       - name: Compile
         run: python -m compileall -q review_loop.py tests
+  github-codeql-analysis:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: dceoy/gha-for-devops/.github/workflows/github-codeql-analysis.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      language: >
+        ["python"]
+  dependabot-auto-merge:
+    if: >
+      github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+    needs:
+      - python-lint-and-scan
+      - python-test
+    uses: dceoy/gha-for-devops/.github/workflows/dependabot-auto-merge.yml@main  # zizmor: ignore[unpinned-uses]
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+      statuses: read
+    with:
+      unconditional: true
