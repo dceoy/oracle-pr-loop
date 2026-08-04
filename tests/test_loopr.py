@@ -2132,10 +2132,10 @@ class PatchSafetyTests(unittest.TestCase):
         self,
     ) -> None:
         """Bundle fails closed before oracle on known credential in patch."""
-        secret = "collision-secret"
-        self.loop.runner._secrets.add(secret)
+        canary = "collision-canary-value"
+        self.loop.runner._secrets.add(canary)
         self.git(self.primary, "checkout", "feature")
-        (self.primary / "app.py").write_text(f"VALUE = {secret!r}\n", encoding="utf-8")
+        (self.primary / "app.py").write_text(f"VALUE = {canary!r}\n", encoding="utf-8")
         self.git(self.primary, "commit", "-am", "add collision fixture")
         self.git(self.primary, "push", "origin", "feature")
         sha = self.git(self.primary, "rev-parse", "HEAD")
@@ -2152,15 +2152,15 @@ class PatchSafetyTests(unittest.TestCase):
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
         assert caught.value.code == loopr.EXIT_PRECONDITION
-        assert secret not in str(caught.value)
+        assert canary not in str(caught.value)
         assert not (iteration / "diff.patch").exists()
 
     def test_bundle_detects_a_credential_split_across_blob_chunks(self) -> None:
         """Bundle detects a credential split across blob chunks."""
-        secret = "chunk-boundary-secret"
-        self.loop.runner._secrets.add(secret)
+        canary = "chunk-boundary-canary-value"
+        self.loop.runner._secrets.add(canary)
         self.git(self.primary, "checkout", "feature")
-        (self.primary / "app.py").write_text(secret + "\n", encoding="utf-8")
+        (self.primary / "app.py").write_text(canary + "\n", encoding="utf-8")
         self.git(self.primary, "commit", "-am", "add chunk collision fixture")
         self.git(self.primary, "push", "origin", "feature")
         sha = self.git(self.primary, "rev-parse", "HEAD")
@@ -2184,8 +2184,8 @@ class PatchSafetyTests(unittest.TestCase):
         def split_blob(_worktree: pathlib.Path, path: str, on_chunk: object) -> None:
             assert path == "app.py"
             assert callable(on_chunk)
-            on_chunk(secret[:7].encode())
-            on_chunk((secret[7:] + "\n").encode())
+            on_chunk(canary[:7].encode())
+            on_chunk((canary[7:] + "\n").encode())
 
         with (
             mock.patch.object(self.loop, "_control_command", side_effect=fake_control),
@@ -2195,7 +2195,7 @@ class PatchSafetyTests(unittest.TestCase):
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
         assert caught.value.code == loopr.EXIT_PRECONDITION
-        assert secret not in str(caught.value)
+        assert canary not in str(caught.value)
 
     def test_staged_patch_collision_fails_before_commit(self) -> None:
         """Staged patch collision fails before commit."""
