@@ -1430,7 +1430,7 @@ class PatchSafetyTests(unittest.TestCase):
 
         resolved = runner.trusted_executable("loopr-example-tool")
 
-        assert str(trusted_tool) == resolved
+        assert str(trusted_tool.resolve()) == resolved
         result = runner.run([resolved], cwd=self.worktree, env={"PATH": ""})
         assert result.returncode == 0
 
