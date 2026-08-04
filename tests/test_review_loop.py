@@ -1246,6 +1246,113 @@ class PatchSafetyTests(unittest.TestCase):
         ).stdout
         self.assertEqual(b"VALUE = 9\n", indexed)
 
+    def test_command_wrapper_resolves_trusted_git_despite_relative_path_entry(
+        self,
+    ) -> None:
+        # Reproduces the P1 finding directly: PATH=.:$PATH plus a
+        # same-named executable tracked in (or written to) the
+        # PR-controlled worktree must never be selected in place of the
+        # real "git", which is looked up by bare name after `cwd` has
+        # already changed to that worktree.
+        marker = pathlib.Path(self.temporary.name) / "worktree-git-fired"
+        fake_git = self.worktree / "git"
+        fake_git.write_text(
+            f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8"
+        )
+        fake_git.chmod(0o755)
+        self.loop.runner._trusted_executables.pop("git", None)
+        poisoned_path = f".{os.pathsep}{os.environ['PATH']}"
+        self.loop.runner.source_env["PATH"] = poisoned_path
+        self.loop.base_env["PATH"] = poisoned_path
+
+        result = self.loop.command(["git", "status"], cwd=self.worktree)
+
+        self.assertEqual(0, result.returncode)
+        self.assertFalse(marker.exists())
+
+    def test_command_wrapper_shadow_reproduces_without_trusted_resolution(
+        self,
+    ) -> None:
+        # Sanity check for the test above: with resolution reverted to the
+        # old bare-name behavior, the identical PATH=.:$PATH plus
+        # worktree-local "git" setup does let the worktree file run,
+        # proving the assertions above actually exercise the fix rather
+        # than an unrelated side effect.
+        marker = pathlib.Path(self.temporary.name) / "worktree-git-fired-unguarded"
+        fake_git = self.worktree / "git"
+        fake_git.write_text(
+            f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8"
+        )
+        fake_git.chmod(0o755)
+        # This is the env actually handed to the child at exec time (see
+        # command()'s `child_env = dict(env or self.base_env)`); the
+        # resolution-time PATH read by trusted_executable() is irrelevant
+        # here since resolution itself is mocked out below.
+        self.loop.base_env["PATH"] = f".{os.pathsep}{os.environ['PATH']}"
+
+        with mock.patch.object(
+            self.loop.runner, "trusted_executable", side_effect=lambda name: name
+        ):
+            result = self.loop.command(
+                ["git", "status"], cwd=self.worktree, check=False
+            )
+
+        self.assertEqual(1, result.returncode)
+        self.assertTrue(marker.exists())
+
+    def test_command_wrapper_resolves_trusted_codex_despite_relative_path_entry(
+        self,
+    ) -> None:
+        # Same escape as above, but for "codex": run_codex() invokes it by
+        # bare name with `cwd` set to the worktree it is meant to be
+        # sandboxed into.
+        marker = pathlib.Path(self.temporary.name) / "worktree-codex-fired"
+        fake_worktree_codex = self.worktree / "codex"
+        fake_worktree_codex.write_text(
+            f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8"
+        )
+        fake_worktree_codex.chmod(0o755)
+        trusted_dir = pathlib.Path(self.temporary.name) / "trusted-bin"
+        trusted_dir.mkdir()
+        trusted_codex = trusted_dir / "codex"
+        trusted_codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        trusted_codex.chmod(0o755)
+        self.loop.runner._trusted_executables.pop("codex", None)
+        self.loop.runner.source_env["PATH"] = (
+            f".{os.pathsep}{trusted_dir}{os.pathsep}{os.environ['PATH']}"
+        )
+
+        result = self.loop.command(["codex", "--version"], cwd=self.worktree)
+
+        self.assertEqual(0, result.returncode)
+        self.assertFalse(marker.exists())
+
+    def test_trusted_executable_ignores_relative_and_empty_path_entries(self) -> None:
+        trusted_dir = pathlib.Path(self.temporary.name) / "trusted-bin-generic"
+        trusted_dir.mkdir()
+        trusted_tool = trusted_dir / "loopr-example-tool"
+        trusted_tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        trusted_tool.chmod(0o755)
+        worktree_tool = self.worktree / "loopr-example-tool"
+        worktree_tool.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        worktree_tool.chmod(0o755)
+        runner = loopr.CommandRunner(
+            {"PATH": f".{os.pathsep}{os.pathsep}{trusted_dir}"}
+        )
+
+        resolved = runner.trusted_executable("loopr-example-tool")
+
+        self.assertEqual(str(trusted_tool), resolved)
+        result = runner.run([resolved], cwd=self.worktree, env={"PATH": ""})
+        self.assertEqual(0, result.returncode)
+
+    def test_trusted_executable_fails_closed_without_an_absolute_path_entry(
+        self,
+    ) -> None:
+        runner = loopr.CommandRunner({"PATH": f".{os.pathsep}"})
+        with self.assertRaises(loopr.CommandError):
+            runner.trusted_executable("git")
+
     def test_content_filter_overrides_sort_and_deduplicate_dotted_drivers(self) -> None:
         listing = (
             "filter.z.driver.clean clean\n"

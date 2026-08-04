@@ -627,6 +627,43 @@ class CommandRunner:
             for key, value in self.source_env.items()
             if value and len(value) >= 4 and SECRET_KEY_RE.search(key)
         }
+        self._trusted_executables: dict[str, str] = {}
+
+    def trusted_executable(self, name: str) -> str:
+        """Resolve a bare command name to an absolute path.
+
+        Every subprocess this orchestrator starts may run with `cwd` set to
+        a disposable PR/Codex-controlled worktree. A bare name such as
+        "git" or "codex" is looked up by the OS against `PATH` *after* the
+        child has already chdir'd there, so a relative or empty `PATH`
+        entry (e.g. ".") would let a same-named executable tracked in, or
+        written to, that worktree run in place of the trusted tool. Only
+        absolute `PATH` entries are searched, and the result is cached
+        since `PATH` does not change over the life of the process.
+        """
+
+        if os.sep in name:
+            return name
+        cached = self._trusted_executables.get(name)
+        if cached:
+            return cached
+        directories = [
+            entry
+            for entry in self.source_env.get("PATH", "").split(os.pathsep)
+            if os.path.isabs(entry)
+        ]
+        resolved = (
+            shutil.which(name, path=os.pathsep.join(directories))
+            if directories
+            else None
+        )
+        if not resolved:
+            raise CommandError(
+                f"required executable not found on a trusted PATH entry: {name}"
+            )
+        resolved = os.path.abspath(resolved)
+        self._trusted_executables[name] = resolved
+        return resolved
 
     def redact(self, value: str) -> str:
         for secret in sorted(self._secrets, key=len, reverse=True):
@@ -1650,8 +1687,11 @@ class ReviewLoop:
             raise LoopError(
                 EXIT_PRECONDITION, "trusted Git control directory is missing"
             )
+        argv = list(args)
+        if argv:
+            argv[0] = self.runner.trusted_executable(argv[0])
         return self.runner.run(
-            args,
+            argv,
             cwd=self._control_cwd,
             env=self._trusted_git_env(),
             check=check,
@@ -1882,7 +1922,7 @@ class ReviewLoop:
         try:
             listing = self.runner.run(
                 [
-                    "git",
+                    self.runner.trusted_executable("git"),
                     "config",
                     "--get-regexp",
                     r"^filter\..*\.(clean|smudge|process)$",
@@ -1944,7 +1984,15 @@ class ReviewLoop:
     ) -> CommandResult:
         argv = list(args)
         child_env: dict[str, str] | None = None
-        if argv and argv[0] == "git":
+        name = argv[0] if argv else None
+        # Every command here may run with `cwd` set to a disposable
+        # PR/Codex-controlled worktree; resolve the executable to a trusted
+        # absolute path before that `cwd` is in effect, so a same-named
+        # file tracked in (or written to) the worktree can never be
+        # selected in place of the real tool (see trusted_executable()).
+        resolved = self.runner.trusted_executable(name) if name else None
+        if name == "git":
+            assert resolved is not None
             child_env = dict(env or self.base_env)
             child_env["LOOPR_GIT_CONFIG_EMPTY"] = ""
             child_env["LOOPR_GIT_CONFIG_FALSE"] = "false"
@@ -1976,7 +2024,7 @@ class ReviewLoop:
                     *rest[diff_index + 1 :],
                 ]
             argv = [
-                "git",
+                resolved,
                 "-c",
                 f"core.hooksPath={os.devnull}",
                 "-c",
@@ -1984,6 +2032,8 @@ class ReviewLoop:
                 *self._content_filter_overrides(cwd or self.repo_dir),
                 *rest,
             ]
+        elif resolved is not None:
+            argv[0] = resolved
         return self.runner.run(
             argv,
             cwd=cwd or self.repo_dir,
@@ -2132,10 +2182,6 @@ class ReviewLoop:
         validate_git_ref(pr.base_ref, "base")
 
     def _version(self, executable: str, args: Sequence[str] = ("--version",)) -> str:
-        if not shutil.which(executable):
-            raise LoopError(
-                EXIT_PRECONDITION, f"required executable not found: {executable}"
-            )
         try:
             result = self.command([executable, *args], timeout=30)
         except CommandError as exc:
