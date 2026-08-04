@@ -1,0 +1,59 @@
+---
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+    working-directory: .
+jobs:
+  python-lint-and-scan:
+    permissions:
+      contents: read
+    uses: dceoy/gha-for-devops/.github/workflows/python-package-lint-and-scan.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      package-path: .
+      python-version: "3.12"
+  python-test:
+    permissions:
+      contents: read
+    uses: dceoy/gha-for-devops/.github/workflows/python-package-test.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      package-path: .
+      python-version: "3.12"
+  github-codeql-analysis:
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: dceoy/gha-for-devops/.github/workflows/github-codeql-analysis.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      language: >
+        ["python"]
+  dependabot-auto-merge:
+    if: >
+      github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+    needs:
+      - python-lint-and-scan
+      - python-test
+    uses: dceoy/gha-for-devops/.github/workflows/dependabot-auto-merge.yml@main  # zizmor: ignore[unpinned-uses]
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+      statuses: read
+    with:
+      unconditional: true
