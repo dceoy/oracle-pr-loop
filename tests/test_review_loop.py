@@ -178,6 +178,22 @@ class InputAndIsolationTests(unittest.TestCase):
         with self.assertRaises(loopr.LoopError):
             loopr.normalize_github_repo("https://github.example/acme/project.git")
 
+    def test_unsupported_posix_fails_before_bootstrap_or_subprocess(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = loopr.ReviewLoop(
+                args_for(pathlib.Path(temporary)),
+                loopr.CommandRunner({"PATH": os.environ["PATH"]}),
+            )
+            with (
+                mock.patch.object(loopr.sys, "platform", "darwin"),
+                mock.patch.object(loopr.os, "name", "posix"),
+                mock.patch.object(instance, "_bootstrap") as bootstrap,
+                self.assertRaises(loopr.LoopError) as caught,
+            ):
+                instance.execute()
+            self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+            bootstrap.assert_not_called()
+
     def test_model_environment_drops_credentials_and_ssh_agent(self) -> None:
         source = {
             "PATH": "/bin",
@@ -760,15 +776,18 @@ class ScriptedLoop(loopr.ReviewLoop):
         review: loopr.OracleReview,
         iteration: int,
         iteration_dir: pathlib.Path,
-    ) -> None:
+    ) -> int:
         self.calls.append(f"post:{review.verdict}")
         assert self.writer
         self.writer.text(
             iteration_dir / "review.md",
             review.review_body + f"\n{pr.head_sha}\nIteration: {iteration}\n",
         )
+        return 1
 
-    def verify_approval(self, expected_head_sha: str, expected_base_sha: str) -> None:
+    def verify_approval(
+        self, expected_head_sha: str, expected_base_sha: str, review_id: int
+    ) -> None:
         self.calls.append("verify")
 
     def run_codex(
@@ -839,7 +858,8 @@ class AcceptanceStateMachineTests(unittest.TestCase):
             author=author,
         )
         try:
-            code = scripted.execute()
+            with mock.patch.object(loopr.sys, "platform", "linux"):
+                code = scripted.execute()
         except loopr.LoopError as exc:
             code = exc.code
         return scripted, code, root
@@ -864,7 +884,8 @@ class AcceptanceStateMachineTests(unittest.TestCase):
         root = pathlib.Path(temporary.name)
         scripted = ScriptedLoop(root, [approval()])
         scripted.args.dry_run = True
-        self.assertEqual(loopr.EXIT_OK, scripted.execute())
+        with mock.patch.object(loopr.sys, "platform", "linux"):
+            self.assertEqual(loopr.EXIT_OK, scripted.execute())
         self.assertEqual(["precheck"], scripted.calls)
         self.assertFalse((root / ".pr-review-loop").exists())
 
@@ -967,9 +988,13 @@ class PatchSafetyTests(unittest.TestCase):
         self.loop.repo = "acme/project"
         self.loop.number = 7
         self.loop.pr_url = "https://github.com/acme/project/pull/7"
+        self.loop.origin_url = str(self.remote)
+        self.loop.push_url = str(self.remote)
         self.loop.artifacts_dir = self.primary / ".pr-review-loop"
         self.loop.artifacts_dir.mkdir()
         self.loop.writer = loopr.ArtifactWriter(self.loop.artifacts_dir, runner)
+        self.loop._author_identity = ("Loop Test", "loop@example.test")
+        self.loop._initialize_control_repository()
         self.worktree = self.loop.prepare_worktree(self.pr)
 
     def tearDown(self) -> None:
@@ -1097,17 +1122,48 @@ class PatchSafetyTests(unittest.TestCase):
         (worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
         iteration = self.loop.artifacts_dir / "relative-receive-pack"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
-            self.loop.validate_commit_push(
-                self.pr,
-                worktree,
-                1,
-                iteration,
-                self.loop._outside_state(worktree),
-                self.loop._nested_git_entries(worktree),
-            )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        pushed = self.loop.validate_commit_push(
+            self.pr,
+            worktree,
+            1,
+            iteration,
+            self.loop._outside_state(worktree),
+            self.loop._nested_git_entries(worktree),
+        )
+        self.assertTrue(pushed)
         self.assertFalse(marker.exists())
+
+    def test_authenticated_push_does_not_use_primary_checkout_helpers(self) -> None:
+        marker = pathlib.Path(self.temporary.name) / "primary-receive-pack-fired"
+        helper = self.primary / "receive-pack"
+        helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
+        helper.chmod(0o755)
+        self.git(
+            self.primary,
+            "config",
+            "remote.origin.receivepack",
+            "./receive-pack",
+        )
+        (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        iteration = self.loop.artifacts_dir / "primary-relative-receive-pack"
+        iteration.mkdir()
+        pushed = self.loop.validate_commit_push(
+            self.pr,
+            self.worktree,
+            1,
+            iteration,
+            self.loop._outside_state(self.worktree),
+            self.loop._nested_git_entries(self.worktree),
+        )
+        self.assertTrue(pushed)
+        self.assertFalse(marker.exists())
+        common = pathlib.Path(self.git(self.primary, "rev-parse", "--git-common-dir"))
+        if not common.is_absolute():
+            common = self.primary / common
+        self.assertNotEqual(
+            pathlib.Path(self.loop._control_repo or "").resolve(),
+            common.resolve(),
+        )
 
     def test_git_wrapper_ignores_a_tracked_core_fsmonitor_hook(self) -> None:
         # core.hooksPath does not cover core.fsmonitor: it is a distinct
@@ -1598,17 +1654,14 @@ class PatchSafetyTests(unittest.TestCase):
         self,
     ) -> None:
         self.git(self.primary, "checkout", "feature")
-        (self.primary / "doomed.txt").write_text("temporary\n", encoding="utf-8")
-        self.git(self.primary, "add", "doomed.txt")
-        self.git(self.primary, "commit", "-m", "add doomed file")
-        self.git(self.primary, "rm", "doomed.txt")
-        self.git(self.primary, "commit", "-m", "remove doomed file")
+        self.git(self.primary, "rm", "app.py")
+        self.git(self.primary, "commit", "-m", "remove app file")
         self.git(self.primary, "push", "origin", "feature")
         sha = self.git(self.primary, "rev-parse", "HEAD")
         raw = dict(self.pr.raw)
         raw["headRefOid"] = sha
         raw["changedFiles"] = 1
-        raw["files"] = [{"path": "doomed.txt", "changeType": "DELETED"}]
+        raw["files"] = [{"path": "app.py", "changeType": "DELETED"}]
         pr = loopr.PullRequest.from_json("acme/project", raw)
         worktree = self.loop.prepare_worktree(pr)
         iteration = self.loop.artifacts_dir / "deleted-bundle"
@@ -1617,7 +1670,7 @@ class PatchSafetyTests(unittest.TestCase):
             mock.patch.object(
                 self.loop,
                 "_gh",
-                return_value="diff --git a/doomed.txt b/doomed.txt\n",
+                return_value="diff --git a/app.py b/app.py\n",
             ),
             mock.patch.object(self.loop, "snapshot", return_value=pr),
         ):
@@ -1625,12 +1678,174 @@ class PatchSafetyTests(unittest.TestCase):
         manifest = json.loads(
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
+        self.assertIn(
+            "-VALUE = 1",
+            (iteration / "diff.patch").read_text(encoding="utf-8"),
+        )
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("deleted", by_path["doomed.txt"]["kind"])
-        self.assertIsNone(by_path["doomed.txt"]["attachment"])
+        self.assertEqual("deleted", by_path["app.py"]["kind"])
+        self.assertIsNone(by_path["app.py"]["attachment"])
         self.assertIn(
             "no current content", (iteration / "changed-files.txt").read_text()
         )
+
+    def test_bundle_fails_closed_before_oracle_on_known_credential_in_patch(
+        self,
+    ) -> None:
+        secret = "collision-secret"
+        self.loop.runner._secrets.add(secret)
+        self.git(self.primary, "checkout", "feature")
+        (self.primary / "app.py").write_text(f"VALUE = {secret!r}\n", encoding="utf-8")
+        self.git(self.primary, "commit", "-am", "add collision fixture")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["files"] = [{"path": "app.py", "status": "modified"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "credential-patch"
+        iteration.mkdir()
+        with (
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertFalse((iteration / "diff.patch").exists())
+
+    def test_bundle_detects_a_credential_split_across_blob_chunks(self) -> None:
+        secret = "chunk-boundary-secret"
+        self.loop.runner._secrets.add(secret)
+        self.git(self.primary, "checkout", "feature")
+        (self.primary / "app.py").write_text(secret + "\n", encoding="utf-8")
+        self.git(self.primary, "commit", "-am", "add chunk collision fixture")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["files"] = [{"path": "app.py", "status": "modified"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "credential-chunk"
+        iteration.mkdir()
+        original_control = self.loop._control_command
+
+        def fake_control(args: Any, **kwargs: Any) -> loopr.CommandResult:
+            assert isinstance(args, (list, tuple))
+            if len(args) > 2 and args[2] == "diff":
+                return loopr.CommandResult(
+                    tuple(str(item) for item in args), 0, b"diff\n", ""
+                )
+            return original_control(args, **kwargs)
+
+        def split_blob(_worktree: pathlib.Path, path: str, on_chunk: object) -> None:
+            self.assertEqual("app.py", path)
+            assert callable(on_chunk)
+            on_chunk(secret[:7].encode())
+            on_chunk((secret[7:] + "\n").encode())
+
+        with (
+            mock.patch.object(self.loop, "_control_command", side_effect=fake_control),
+            mock.patch.object(self.loop, "_stream_git_blob", side_effect=split_blob),
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        self.assertNotIn(secret, str(caught.exception))
+
+    def test_staged_patch_collision_fails_before_commit(self) -> None:
+        secret = "staged-collision-secret"
+        self.loop.runner._secrets.add(secret)
+        (self.worktree / "app.py").write_text(secret + "\n", encoding="utf-8")
+        iteration = self.loop.artifacts_dir / "credential-staged"
+        iteration.mkdir()
+        before = self.git(self.worktree, "rev-parse", "HEAD")
+        with self.assertRaises(loopr.LoopError) as caught:
+            self.loop.validate_commit_push(
+                self.pr,
+                self.worktree,
+                1,
+                iteration,
+                self.loop._outside_state(self.worktree),
+                self.loop._nested_git_entries(self.worktree),
+            )
+        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertEqual(before, self.git(self.worktree, "rev-parse", "HEAD"))
+        self.assertFalse((iteration / "resulting.patch").exists())
+
+    def test_oracle_output_collision_is_withheld_without_redaction(self) -> None:
+        secret = "oracle-collision-secret"
+        self.loop.runner._secrets.add(secret)
+        iteration = self.loop.artifacts_dir / "credential-oracle"
+        iteration.mkdir()
+        raw_review = approval(self.pr.head_sha) | {
+            "review_body": f"The value {secret} must not be retained."
+        }
+
+        def fake_oracle(command: list[str], **kwargs: object) -> loopr.CommandResult:
+            output = pathlib.Path(command[command.index("--write-output") + 1])
+            output.write_text(json.dumps(raw_review), encoding="utf-8")
+            return loopr.CommandResult(tuple(command), 0, "", "")
+
+        with (
+            mock.patch.object(self.loop, "command", side_effect=fake_oracle),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.oracle_review(
+                self.pr,
+                loopr.ReviewBundle(iteration, ()),
+            )
+        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertNotIn(secret, (iteration / "oracle-raw.md").read_text())
+
+    def test_failed_oracle_output_collision_is_withheld_without_redaction(self) -> None:
+        secret = "oracle-failure-collision-secret"
+        self.loop.runner._secrets.add(secret)
+        iteration = self.loop.artifacts_dir / "credential-oracle-failure"
+        iteration.mkdir()
+
+        def failing_oracle(command: list[str], **kwargs: object) -> loopr.CommandResult:
+            output = pathlib.Path(command[command.index("--write-output") + 1])
+            output.write_text(f"partial {secret}\n", encoding="utf-8")
+            raise loopr.CommandError("oracle failed")
+
+        with (
+            mock.patch.object(self.loop, "command", side_effect=failing_oracle),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.oracle_review(
+                self.pr,
+                loopr.ReviewBundle(iteration, ()),
+            )
+        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertNotIn(secret, (iteration / "oracle-raw.md").read_text())
+
+    def test_oracle_stdout_collision_is_withheld_without_redaction(self) -> None:
+        secret = "oracle-stdout-collision-secret"
+        self.loop.runner._secrets.add(secret)
+        iteration = self.loop.artifacts_dir / "credential-oracle-stdout"
+        iteration.mkdir()
+
+        def noisy_oracle(command: list[str], **kwargs: object) -> loopr.CommandResult:
+            return loopr.CommandResult(tuple(command), 0, f"log {secret}\n", "")
+
+        with (
+            mock.patch.object(self.loop, "command", side_effect=noisy_oracle),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.oracle_review(
+                self.pr,
+                loopr.ReviewBundle(iteration, ()),
+            )
+        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
+        self.assertNotIn(secret, str(caught.exception))
+        self.assertNotIn(secret, (iteration / "oracle-raw.md").read_text())
 
     def test_bundle_marks_a_submodule_gitlink_without_attaching_content(self) -> None:
         root = pathlib.Path(self.temporary.name)
@@ -1871,14 +2086,81 @@ class PatchSafetyTests(unittest.TestCase):
         )
         iteration = self.loop.artifacts_dir / "post-review-race"
         iteration.mkdir()
-        response = json.dumps({"commit_id": "f" * 40, "id": 2})
+        responses = iter(
+            [
+                json.dumps({"commit_id": "f" * 40, "id": 2}),
+                json.dumps({"id": 2, "state": "DISMISSED"}),
+            ]
+        )
         with (
             mock.patch.object(self.loop, "snapshot", return_value=self.pr),
-            mock.patch.object(self.loop, "_gh", return_value=response),
+            mock.patch.object(
+                self.loop, "_gh", side_effect=lambda *args, **kwargs: next(responses)
+            ),
             self.assertRaises(loopr.LoopError) as caught,
         ):
             self.loop.post_review(self.pr, review, 1, iteration)
         self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
+
+    def test_post_review_dismisses_when_only_the_base_moves(self) -> None:
+        review = loopr.parse_oracle_review(
+            json.dumps(approval(self.pr.head_sha)), self.pr.head_sha
+        )
+        iteration = self.loop.artifacts_dir / "post-review-base-race"
+        iteration.mkdir()
+        changed = loopr.PullRequest.from_json(
+            self.pr.repo,
+            self.pr.raw | {"baseRefOid": "d" * 40},
+        )
+        responses = iter(
+            [
+                json.dumps({"id": 12, "commit_id": self.pr.head_sha}),
+                json.dumps({"id": 12, "state": "DISMISSED"}),
+            ]
+        )
+        with (
+            mock.patch.object(self.loop, "snapshot", side_effect=[self.pr, changed]),
+            mock.patch.object(
+                self.loop, "_gh", side_effect=lambda *args, **kwargs: next(responses)
+            ) as gh_call,
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.post_review(self.pr, review, 1, iteration)
+        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
+        self.assertEqual(2, gh_call.call_count)
+        self.assertTrue(
+            any("/reviews" in value for value in gh_call.call_args_list[0].args[0])
+        )
+        self.assertTrue(
+            any("/dismissals" in value for value in gh_call.call_args_list[1].args[0])
+        )
+
+    def test_verify_approval_dismisses_when_base_moves_after_post(self) -> None:
+        responses = iter(
+            [
+                json.dumps(
+                    {
+                        "headRefOid": self.pr.head_sha,
+                        "baseRefOid": "d" * 40,
+                        "reviewDecision": "APPROVED",
+                        "state": "OPEN",
+                        "isDraft": False,
+                    }
+                ),
+                json.dumps({"id": 13, "state": "DISMISSED"}),
+            ]
+        )
+        with (
+            mock.patch.object(
+                self.loop, "_gh", side_effect=lambda *args, **kwargs: next(responses)
+            ) as gh_call,
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.verify_approval(self.pr.head_sha, self.pr.base_sha, 13)
+        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
+        self.assertTrue(
+            any("/dismissals" in value for value in gh_call.call_args_list[1].args[0])
+        )
 
 
 if __name__ == "__main__":

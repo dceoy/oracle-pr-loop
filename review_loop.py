@@ -813,6 +813,31 @@ class CommandRunner:
             value = value.replace(secret, "[REDACTED]")
         return value
 
+    def contains_secret(self, value: str | bytes) -> bool:
+        """Return whether a value contains any captured credential verbatim."""
+
+        if isinstance(value, bytes):
+            for secret in self._secrets:
+                try:
+                    encoded = secret.encode("utf-8")
+                except UnicodeEncodeError:
+                    continue
+                if encoded and encoded in value:
+                    return True
+            return False
+        return any(secret in value for secret in self._secrets)
+
+    def max_secret_bytes(self) -> int:
+        """Return the largest UTF-8 encoded credential length for stream scans."""
+
+        lengths: list[int] = []
+        for secret in self._secrets:
+            try:
+                lengths.append(len(secret.encode("utf-8")))
+            except UnicodeEncodeError:
+                continue
+        return max(lengths, default=0)
+
     def base_env(self) -> dict[str, str]:
         env = dict(self.source_env)
         env.pop("GH_REVIEW_TOKEN", None)
@@ -911,6 +936,7 @@ class CommandRunner:
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
         allow_stdout_truncation: bool = False,
         stdout_callback: Callable[[bytes], None] | None = None,
+        redact_stdout: bool = True,
     ) -> CommandResult:
         argv = tuple(str(arg) for arg in args)
         if not argv or any("\x00" in arg for arg in argv):
@@ -1113,11 +1139,14 @@ class CommandRunner:
             if binary:
                 stdout: str | bytes = stdout_bytes
             else:
-                stdout = self.redact(stdout_bytes.decode("utf-8", "replace"))
+                decoded_stdout = stdout_bytes.decode("utf-8", "replace")
+                stdout = (
+                    decoded_stdout if not redact_stdout else self.redact(decoded_stdout)
+                )
             result = CommandResult(argv, payload_returncode, stdout, stderr)
             if check and payload_returncode != 0:
-                detail = stderr.strip() or (
-                    stdout.strip() if isinstance(stdout, str) else ""
+                detail = stderr.strip() or self.redact(
+                    stdout_bytes.decode("utf-8", "replace")
                 )
                 if len(detail) > 2000:
                     detail = detail[:2000] + "..."
@@ -1145,6 +1174,7 @@ def run_command(
     input_text: str | None = None,
     check: bool = True,
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+    redact_stdout: bool = True,
     runner: CommandRunner | None = None,
 ) -> CommandResult:
     """Public reusable wrapper used by the orchestrator and external callers."""
@@ -1158,6 +1188,7 @@ def run_command(
         input_text=input_text,
         check=check,
         max_output_bytes=max_output_bytes,
+        redact_stdout=redact_stdout,
     )
 
 
@@ -1588,6 +1619,15 @@ def normalize_github_repo(remote: str) -> str:
     return f"{owner}/{name}"
 
 
+def canonical_github_remote(remote: str, repo: str) -> str:
+    """Construct a GitHub-only transport URL from a validated remote shape."""
+
+    parsed = urllib.parse.urlparse(remote.strip())
+    if remote.strip().startswith("git@github.com:") or parsed.scheme == "ssh":
+        return f"git@github.com:{repo}.git"
+    return f"https://github.com/{repo}.git"
+
+
 def resolve_pr_target(value: str, origin_repo: str) -> tuple[str, int, str]:
     if value.isdecimal():
         number = int(value)
@@ -1731,6 +1771,315 @@ class ReviewLoop:
         self._worktree_controls: dict[str, str] = {}
         self._repository_controls: dict[str, dict[str, str]] = {}
         self.current_iteration: int | None = None
+        self._control_repo: pathlib.Path | None = None
+        self._control_cwd: pathlib.Path | None = None
+        self._control_temp: tempfile.TemporaryDirectory[str] | None = None
+        self._author_identity: tuple[str, str] | None = None
+
+    @staticmethod
+    def _validate_private_directory(path: pathlib.Path, description: str) -> None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError as exc:
+            raise LoopError(EXIT_PRECONDITION, f"{description} does not exist") from exc
+        except OSError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, f"cannot inspect {description}: {exc}"
+            ) from exc
+        if not stat.S_ISDIR(metadata.st_mode) or path.is_symlink():
+            raise LoopError(
+                EXIT_PRECONDITION, f"{description} must be a real directory"
+            )
+        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+            raise LoopError(EXIT_PRECONDITION, f"{description} has an unexpected owner")
+        if hasattr(os, "getuid") and metadata.st_mode & 0o077:
+            raise LoopError(
+                EXIT_PRECONDITION, f"{description} permissions are too broad"
+            )
+
+    @classmethod
+    def _create_private_directory(cls, path: pathlib.Path, description: str) -> None:
+        try:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, f"cannot create {description}: {exc}"
+            ) from exc
+        cls._validate_private_directory(path, description)
+
+    @staticmethod
+    def _restrict_private_tree(root: pathlib.Path) -> None:
+        """Tighten freshly created Git control files before accepting the tree."""
+
+        paths = [root, *root.rglob("*")]
+        for path in paths:
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise LoopError(
+                    EXIT_PRECONDITION, "Git control repository cannot be inspected"
+                ) from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    "Git control repository contains an unexpected symlink",
+                )
+            try:
+                os.chmod(path, 0o700 if stat.S_ISDIR(metadata.st_mode) else 0o600)
+            except OSError as exc:
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    "Git control repository permissions cannot be restricted",
+                ) from exc
+
+    def _trusted_git_env(
+        self, control_repo: pathlib.Path | None = None
+    ) -> dict[str, str]:
+        """Build a Git environment that cannot inherit executable path controls."""
+
+        env = dict(self.base_env)
+        for key in tuple(env):
+            if key.startswith("GIT_") and key not in {
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            }:
+                env.pop(key, None)
+        for key in (
+            "SSH_ASKPASS",
+            "GIT_ASKPASS",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "GIT_PROXY_COMMAND",
+            "GIT_EXTERNAL_DIFF",
+        ):
+            env.pop(key, None)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        if control_repo is not None:
+            env["GIT_DIR"] = str(control_repo)
+        return env
+
+    def _control_setup_command(
+        self, args: Sequence[str], *, check: bool = True
+    ) -> CommandResult:
+        if self._control_cwd is None:
+            raise LoopError(
+                EXIT_PRECONDITION, "trusted Git control directory is missing"
+            )
+        return self.runner.run(
+            args,
+            cwd=self._control_cwd,
+            env=self._trusted_git_env(),
+            check=check,
+            max_output_bytes=MAX_COMMAND_OUTPUT_BYTES,
+        )
+
+    def _control_command(
+        self,
+        args: Sequence[str],
+        *,
+        timeout: int = COMMAND_TIMEOUT,
+        input_text: str | None = None,
+        check: bool = True,
+        binary: bool = False,
+        max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+        allow_stdout_truncation: bool = False,
+        stdout_callback: Callable[[bytes], None] | None = None,
+        redact_stdout: bool = True,
+    ) -> CommandResult:
+        if self._control_repo is None or self._control_cwd is None:
+            raise LoopError(
+                EXIT_PRECONDITION, "trusted Git control repository is missing"
+            )
+        control_args = list(args)
+        if len(control_args) > 1 and control_args[0] == "git":
+            if control_args[1] == "fetch":
+                control_args.insert(2, "--upload-pack=git-upload-pack")
+            elif control_args[1] == "ls-remote":
+                control_args.insert(2, "--upload-pack=git-upload-pack")
+            elif control_args[1] == "push":
+                control_args.insert(2, "--receive-pack=git-receive-pack")
+        return self.command(
+            control_args,
+            cwd=self._control_cwd,
+            env=self._trusted_git_env(self._control_repo),
+            timeout=timeout,
+            input_text=input_text,
+            check=check,
+            binary=binary,
+            max_output_bytes=max_output_bytes,
+            allow_stdout_truncation=allow_stdout_truncation,
+            stdout_callback=stdout_callback,
+            redact_stdout=redact_stdout,
+        )
+
+    def _cleanup_control(self) -> None:
+        if self._control_temp is not None:
+            self._control_temp.cleanup()
+            self._control_temp = None
+        self._control_repo = None
+        self._control_cwd = None
+
+    def _capture_author_identity(self) -> tuple[str, str]:
+        try:
+            result = self.command(
+                ["git", "var", "GIT_AUTHOR_IDENT"], cwd=self.repo_dir, timeout=30
+            ).stdout
+        except CommandError as exc:
+            raise LoopError(EXIT_PRECONDITION, str(exc)) from exc
+        identity = str(result).strip()
+        match = re.fullmatch(r"(.+?) <([^<>\r\n]+)> \d+ [+-]\d{4}", identity)
+        if match is None:
+            raise LoopError(EXIT_PRECONDITION, "Git author identity is invalid")
+        name, email = match.groups()
+        if any("\x00" in value or len(value) > 1024 for value in (name, email)):
+            raise LoopError(EXIT_PRECONDITION, "Git author identity is unsafe")
+        return name, email
+
+    def _initialize_control_repository(self) -> None:
+        """Create or validate the private bare repository used by Git orchestration."""
+
+        if self._author_identity is None:
+            raise LoopError(EXIT_PRECONDITION, "Git author identity is missing")
+        if self._control_repo is not None:
+            return
+
+        if self.args.dry_run:
+            self._control_temp = tempfile.TemporaryDirectory(prefix="loopr-control-")
+            root = pathlib.Path(self._control_temp.name)
+            self._validate_private_directory(root, "temporary Git control root")
+        else:
+            root = self.artifacts_dir / "control"
+            self._create_private_directory(root, "Git control root")
+
+        control_repo = root / f"pr-{self.number}.git"
+        control_cwd = root / f"pr-{self.number}-cwd"
+        self._create_private_directory(control_cwd, "trusted Git transport directory")
+        if any(control_cwd.iterdir()):
+            raise LoopError(
+                EXIT_PRECONDITION,
+                "trusted Git transport directory must be empty",
+            )
+        self._control_repo = control_repo
+        self._control_cwd = control_cwd
+
+        try:
+            metadata = control_repo.lstat()
+        except FileNotFoundError:
+            metadata = None
+        except OSError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, f"cannot inspect Git control repository: {exc}"
+            ) from exc
+        if metadata is not None and (
+            not stat.S_ISDIR(metadata.st_mode) or control_repo.is_symlink()
+        ):
+            raise LoopError(
+                EXIT_PRECONDITION,
+                "Git control repository path is occupied by a non-directory; "
+                "manual cleanup is required",
+            )
+
+        initialize = metadata is None or not any(control_repo.iterdir())
+        if initialize:
+            try:
+                self._control_setup_command(
+                    [
+                        "git",
+                        "-c",
+                        f"core.hooksPath={os.devnull}",
+                        "init",
+                        "--bare",
+                        "--quiet",
+                        str(control_repo),
+                    ]
+                )
+            except CommandError as exc:
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    f"cannot initialize Git control repository: {exc}",
+                ) from exc
+            self._restrict_private_tree(control_repo)
+        else:
+            config = control_repo / "config"
+            try:
+                config_metadata = config.lstat()
+            except OSError as exc:
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    "existing Git control repository has no regular config",
+                ) from exc
+            if not stat.S_ISREG(config_metadata.st_mode) or config.is_symlink():
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    "existing Git control repository config is unsafe",
+                )
+            try:
+                bare = self._control_setup_command(
+                    [
+                        "git",
+                        "-c",
+                        f"core.hooksPath={os.devnull}",
+                        "--git-dir",
+                        str(control_repo),
+                        "rev-parse",
+                        "--is-bare-repository",
+                    ]
+                ).stdout
+                version = self._control_setup_command(
+                    [
+                        "git",
+                        "-c",
+                        f"core.hooksPath={os.devnull}",
+                        "--git-dir",
+                        str(control_repo),
+                        "config",
+                        "--local",
+                        "--get",
+                        "loopr.control.version",
+                    ],
+                    check=False,
+                )
+            except CommandError as exc:
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    "existing Git control repository is not valid; manual cleanup "
+                    "is required",
+                ) from exc
+            if (
+                str(bare).strip() != "true"
+                or version.returncode != 0
+                or str(version.stdout).strip() != "1"
+            ):
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    "existing Git control repository is not owned by loopr; "
+                    "manual cleanup is required",
+                )
+
+        self._validate_private_directory(control_repo, "Git control repository")
+        name, email = self._author_identity
+        settings = {
+            "loopr.control.version": "1",
+            "loopr.control.pr": str(self.number),
+            "remote.origin.url": self.origin_url,
+            "remote.origin.pushurl": self.push_url,
+            "user.name": name,
+            "user.email": email,
+            "core.hooksPath": os.devnull,
+            "core.fsmonitor": "false",
+        }
+        try:
+            for key, value in settings.items():
+                self._control_command(
+                    ["git", "config", "--local", "--replace-all", key, value]
+                )
+        except CommandError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION,
+                f"cannot configure Git control repository: {exc}",
+            ) from exc
 
     def _content_filter_overrides(self, cwd: pathlib.Path) -> list[str]:
         # A repository, global, or system config scope can predefine a
@@ -1810,6 +2159,7 @@ class ReviewLoop:
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
         allow_stdout_truncation: bool = False,
         stdout_callback: Callable[[bytes], None] | None = None,
+        redact_stdout: bool = True,
     ) -> CommandResult:
         argv = list(args)
         child_env: dict[str, str] | None = None
@@ -1824,7 +2174,11 @@ class ReviewLoop:
             # or credentials. core.fsmonitor is a separate hook command from
             # core.hooksPath and is not covered by it.
             rest = argv[1:]
-            if rest and rest[0] == "diff":
+            try:
+                diff_index = rest.index("diff")
+            except ValueError:
+                diff_index = -1
+            if diff_index >= 0:
                 # A repository-configured diff.external, or a diff.<name>.command
                 # / diff.<name>.textconv driver PR-controlled .gitattributes can
                 # select via a diff= attribute, must not run with this
@@ -1833,7 +2187,13 @@ class ReviewLoop:
                 # config override (an empty value makes git try to execute the
                 # empty string and fail the diff outright); the flags are the
                 # only way to disable them without breaking the diff.
-                rest = [rest[0], "--no-ext-diff", "--no-textconv", *rest[1:]]
+                rest = [
+                    *rest[:diff_index],
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    *rest[diff_index + 1 :],
+                ]
             argv = [
                 "git",
                 "-c",
@@ -1854,6 +2214,7 @@ class ReviewLoop:
             max_output_bytes=max_output_bytes,
             allow_stdout_truncation=allow_stdout_truncation,
             stdout_callback=stdout_callback,
+            redact_stdout=redact_stdout,
         )
 
     def _bootstrap(self) -> None:
@@ -1873,10 +2234,10 @@ class ReviewLoop:
             and isinstance(push_origin, str)
         )
         self.repo_dir = pathlib.Path(root.strip()).resolve()
-        self.origin_url = origin.strip()
-        self.push_url = push_origin.strip()
-        origin_repo = normalize_github_repo(self.origin_url)
-        if normalize_github_repo(self.push_url).lower() != origin_repo.lower():
+        origin_remote = origin.strip()
+        push_remote = push_origin.strip()
+        origin_repo = normalize_github_repo(origin_remote)
+        if normalize_github_repo(push_remote).lower() != origin_repo.lower():
             raise LoopError(
                 EXIT_PRECONDITION,
                 "origin fetch and push URLs identify different repositories",
@@ -1889,6 +2250,8 @@ class ReviewLoop:
                 EXIT_PRECONDITION,
                 "local origin does not match the pull request repository",
             )
+        self.origin_url = canonical_github_remote(origin_remote, origin_repo)
+        self.push_url = canonical_github_remote(push_remote, origin_repo)
 
         configured = pathlib.Path(self.args.artifacts_dir).expanduser()
         candidate = (
@@ -1930,6 +2293,7 @@ class ReviewLoop:
         reviewer: bool = False,
         max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
         input_text: str | None = None,
+        redact_stdout: bool = True,
     ) -> str:
         env = (
             self.runner.reviewer_env(self.review_token)
@@ -1941,6 +2305,7 @@ class ReviewLoop:
             env=env,
             max_output_bytes=max_output_bytes,
             input_text=input_text,
+            redact_stdout=redact_stdout,
         ).stdout
         assert isinstance(result, str)
         return result
@@ -1948,7 +2313,9 @@ class ReviewLoop:
     def snapshot(self, *, reviewer: bool = False) -> PullRequest:
         try:
             raw = self._gh(
-                ["pr", "view", self.pr_url, "--json", PR_FIELDS], reviewer=reviewer
+                ["pr", "view", self.pr_url, "--json", PR_FIELDS],
+                reviewer=reviewer,
+                redact_stdout=False,
             )
             data = _json_object(raw, "pull request")
         except (CommandError, LoopError) as exc:
@@ -2116,7 +2483,7 @@ class ReviewLoop:
             self.command(
                 ["codex", "login", "status"], env=self.runner.codex_env(), timeout=30
             )
-            self.command(["git", "var", "GIT_AUTHOR_IDENT"], timeout=30)
+            self._author_identity = self._capture_author_identity()
             ignored = self.command(
                 [
                     "git",
@@ -2155,11 +2522,13 @@ class ReviewLoop:
             raise LoopError(EXIT_PRECONDITION, str(exc)) from exc
         if not reviewer or reviewer.lower() == pr.author.lower():
             raise LoopError(EXIT_PRECONDITION, "self-review is forbidden")
-        if permission not in {"read", "triage", "write", "maintain", "admin"}:
+        if permission != "admin":
             raise LoopError(
-                EXIT_PRECONDITION, "reviewer lacks repository review permission"
+                EXIT_PRECONDITION,
+                "reviewer requires repository admin permission for review dismissal",
             )
 
+        self._initialize_control_repository()
         self._check_pushable(pr)
         return pr
 
@@ -2176,7 +2545,7 @@ class ReviewLoop:
         here.
         """
         try:
-            remote_sha = self.command(
+            remote_sha = self._control_command(
                 ["git", "ls-remote", self.origin_url, f"refs/heads/{pr.head_ref}"]
             ).stdout
             assert isinstance(remote_sha, str)
@@ -2185,7 +2554,7 @@ class ReviewLoop:
                 raise LoopError(
                     EXIT_PRECONDITION, "remote head does not match the captured PR head"
                 )
-            self.command(
+            self._control_command(
                 [
                     "git",
                     "push",
@@ -2257,7 +2626,7 @@ class ReviewLoop:
                     EXIT_PRECONDITION, "worktree path cannot traverse a symlink"
                 )
         try:
-            self.command(
+            self._control_command(
                 [
                     "git",
                     "fetch",
@@ -2269,13 +2638,17 @@ class ReviewLoop:
                 ],
                 timeout=180,
             )
-            fetched = self.command(["git", "rev-parse", f"{ref_root}/head"]).stdout
+            fetched = self._control_command(
+                ["git", "rev-parse", f"{ref_root}/head"]
+            ).stdout
             assert isinstance(fetched, str)
             if fetched.strip() != pr.head_sha:
                 raise LoopError(
                     EXIT_RACE, "remote head changed before worktree preparation"
                 )
-            listing = self.command(["git", "worktree", "list", "--porcelain"]).stdout
+            listing = self._control_command(
+                ["git", "worktree", "list", "--porcelain"]
+            ).stdout
             assert isinstance(listing, str)
             registered = self._registered_worktrees(listing)
             target = str(worktree.resolve(strict=False))
@@ -2308,11 +2681,13 @@ class ReviewLoop:
             else:
                 if worktree.exists() and any(worktree.iterdir()):
                     raise LoopError(
-                        EXIT_PRECONDITION, "unregistered worktree path is not empty"
+                        EXIT_PRECONDITION,
+                        "unregistered or legacy worktree path is not empty; "
+                        "manual cleanup is required",
                     )
                 worktree.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                self.command(["git", "branch", "-f", branch, pr.head_sha])
-                self.command(
+                self._control_command(["git", "branch", "-f", branch, pr.head_sha])
+                self._control_command(
                     ["git", "worktree", "add", "--force", str(worktree), branch]
                 )
             head = self.command(["git", "rev-parse", "HEAD"], cwd=worktree).stdout
@@ -2492,6 +2867,16 @@ class ReviewLoop:
                 error_code, f"{description} is missing or invalid UTF-8"
             ) from exc
 
+    def _ensure_unredacted_review_content(
+        self, value: str | bytes, description: str, error_code: int
+    ) -> None:
+        if self.runner.contains_secret(value):
+            raise LoopError(
+                error_code,
+                f"{description} contains a known credential value; refusing to "
+                "redact review content",
+            )
+
     def collect_bundle(
         self, pr: PullRequest, worktree: pathlib.Path, iteration_dir: pathlib.Path
     ) -> ReviewBundle:
@@ -2500,28 +2885,6 @@ class ReviewLoop:
             raise LoopError(
                 EXIT_PRECONDITION, "pull request exceeds the 100-file context limit"
             )
-        try:
-            patch = self.command(
-                [
-                    "git",
-                    "diff",
-                    "--binary",
-                    "--full-index",
-                    f"{pr.base_sha}...{pr.head_sha}",
-                ],
-                cwd=self.repo_dir,
-                max_output_bytes=MAX_PATCH_BYTES,
-            ).stdout
-        except CommandError as exc:
-            raise LoopError(
-                EXIT_PRECONDITION, f"cannot collect bounded PR patch: {exc}"
-            ) from exc
-        assert isinstance(patch, str)
-        if len(patch.encode()) > MAX_PATCH_BYTES:
-            raise LoopError(
-                EXIT_PRECONDITION, "pull request patch exceeds the 2 MiB limit"
-            )
-
         current = self.snapshot()
         if current.head_sha != pr.head_sha or current.base_sha != pr.base_sha:
             raise LoopError(
@@ -2531,7 +2894,12 @@ class ReviewLoop:
 
         metadata = dict(pr.raw)
         metadata["reviewedHeadSha"] = pr.head_sha
-        pr_json = self.writer.json_text(metadata)
+        pr_json = (
+            json.dumps(metadata, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        )
+        self._ensure_unredacted_review_content(
+            pr_json, "pull request metadata", EXIT_PRECONDITION
+        )
         changed = sorted(pr.files, key=lambda item: str(item.get("path", "")))
         paths: list[str] = []
         statuses: dict[str, str] = {}
@@ -2545,6 +2913,54 @@ class ReviewLoop:
             change_type = item.get("changeType") or item.get("status") or "modified"
             statuses[path] = str(change_type).lower()
             paths.append(path)
+
+        patch_paths: list[str] = []
+        for path in paths:
+            if statuses[path] in {"removed", "deleted"}:
+                patch_paths.append(path)
+                continue
+            object_type = self._git_object_type(worktree, path)
+            if (
+                object_type == "blob"
+                and self._git_blob_size(worktree, path) > MAX_PATCH_BYTES
+            ):
+                continue
+            patch_paths.append(path)
+        patch_result = b""
+        if patch_paths:
+            try:
+                patch_result = self._control_command(
+                    [
+                        "git",
+                        f"--work-tree={worktree}",
+                        "diff",
+                        "--full-index",
+                        f"{pr.base_sha}...{pr.head_sha}",
+                        "--",
+                        *patch_paths,
+                    ],
+                    max_output_bytes=MAX_PATCH_BYTES,
+                    binary=True,
+                    redact_stdout=False,
+                ).stdout
+            except CommandError as exc:
+                raise LoopError(
+                    EXIT_PRECONDITION, f"cannot collect bounded PR patch: {exc}"
+                ) from exc
+            assert isinstance(patch_result, bytes)
+            self._ensure_unredacted_review_content(
+                patch_result, "pull request patch", EXIT_PRECONDITION
+            )
+            if len(patch_result) > MAX_PATCH_BYTES:
+                raise LoopError(
+                    EXIT_PRECONDITION, "pull request patch exceeds the 2 MiB limit"
+                )
+        try:
+            patch = patch_result.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, "pull request patch is not valid UTF-8"
+            ) from exc
 
         context = (
             f"# Pull request review context\n\n"
@@ -2614,6 +3030,9 @@ class ReviewLoop:
             byte_count = 0
             contains_nul = False
             valid_utf8 = True
+            secret_found = False
+            secret_tail = b""
+            max_secret_bytes = self.runner.max_secret_bytes()
             decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
 
             def inspect_blob_chunk(
@@ -2621,9 +3040,13 @@ class ReviewLoop:
                 retained_buffer: bytearray | None = retained,
                 blob_decoder: codecs.IncrementalDecoder = decoder,
             ) -> None:
-                nonlocal byte_count, contains_nul, valid_utf8
+                nonlocal byte_count, contains_nul, valid_utf8, secret_found, secret_tail
                 byte_count += len(chunk)
                 contains_nul = contains_nul or b"\x00" in chunk
+                if max_secret_bytes:
+                    window = secret_tail + chunk
+                    secret_found = secret_found or self.runner.contains_secret(window)
+                    secret_tail = window[-(max_secret_bytes - 1) :]
                 if retained_buffer is not None:
                     retained_buffer.extend(chunk)
                 if valid_utf8:
@@ -2638,6 +3061,12 @@ class ReviewLoop:
                     EXIT_PRECONDITION,
                     f"streamed blob size changed for {path}: expected {size} bytes, "
                     f"received {byte_count}",
+                )
+            if secret_found:
+                raise LoopError(
+                    EXIT_PRECONDITION,
+                    f"changed file content for {path} contains a known credential "
+                    "value; refusing to redact review content",
                 )
             try:
                 decoder.decode(b"", final=True)
@@ -2668,7 +3097,6 @@ class ReviewLoop:
                 )
                 changed_lines.append(f"{status}\t{path}\t[binary {size} bytes]")
                 continue
-            text = self.runner.redact(text)
             safe_name = attachments_dir / f"{index:03d}.txt"
             total += len(text.encode())
             if total > MAX_ATTACHED_TEXT_BYTES:
@@ -2691,6 +3119,12 @@ class ReviewLoop:
         changed_text = "\n".join(changed_lines) + ("\n" if changed_lines else "")
         manifest_text = (
             json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        )
+        self._ensure_unredacted_review_content(
+            changed_text, "changed-file manifest", EXIT_PRECONDITION
+        )
+        self._ensure_unredacted_review_content(
+            manifest_text, "attachment manifest", EXIT_PRECONDITION
         )
         total += len(changed_text.encode()) + len(manifest_text.encode())
         if total > MAX_ATTACHED_TEXT_BYTES:
@@ -2764,11 +3198,12 @@ class ReviewLoop:
         for attachment in bundle.attachments:
             command.extend(["--file", str(attachment)])
         try:
-            self.command(
+            oracle_result = self.command(
                 command,
                 env=self.runner.oracle_env(),
                 timeout=ORACLE_TIMEOUT,
                 max_output_bytes=4 * 1024 * 1024,
+                redact_stdout=False,
             )
         except CommandError as exc:
             partial = ""
@@ -2776,12 +3211,45 @@ class ReviewLoop:
                 partial = self._bounded_text_file(
                     raw_path, 4 * 1024 * 1024, EXIT_ORACLE, "Oracle output"
                 )
+            if self.runner.contains_secret(partial) or self.runner.contains_secret(
+                exc.stdout
+            ):
+                self.writer.text(
+                    raw_path,
+                    "Oracle output withheld because it contained a known credential value.\n",
+                )
+                raise LoopError(
+                    EXIT_ORACLE,
+                    "Oracle output contains a known credential value; refusing to "
+                    "redact review content",
+                ) from exc
             self.writer.text(raw_path, partial or exc.stdout)
             raise LoopError(EXIT_ORACLE, str(exc)) from exc
+        if isinstance(oracle_result.stdout, str) and self.runner.contains_secret(
+            oracle_result.stdout
+        ):
+            self.writer.text(
+                raw_path,
+                "Oracle output withheld because it contained a known credential value.\n",
+            )
+            raise LoopError(
+                EXIT_ORACLE,
+                "Oracle output contains a known credential value; refusing to "
+                "redact review content",
+            )
         raw = self._bounded_text_file(
             raw_path, 4 * 1024 * 1024, EXIT_ORACLE, "Oracle output"
         )
-        raw = self.runner.redact(raw)
+        if self.runner.contains_secret(raw):
+            self.writer.text(
+                raw_path,
+                "Oracle output withheld because it contained a known credential value.\n",
+            )
+            raise LoopError(
+                EXIT_ORACLE,
+                "Oracle output contains a known credential value; refusing to "
+                "redact review content",
+            )
         self.writer.text(raw_path, raw)
         if not raw.strip():
             raise LoopError(EXIT_ORACLE, "Oracle output is empty")
@@ -2799,13 +3267,71 @@ class ReviewLoop:
                 EXIT_RACE, "pull request base or head changed before review posting"
             )
 
+    def _dismiss_review(self, review_id: int) -> None:
+        payload = json.dumps(
+            {
+                "message": "Dismissed automatically because the reviewed PR snapshot became stale.",
+                "event": "DISMISS",
+            }
+        )
+        try:
+            raw = self._gh(
+                [
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    f"repos/{self.repo}/pulls/{self.number}/reviews/{review_id}/dismissals",
+                    "--method",
+                    "PUT",
+                    "--input",
+                    "-",
+                ],
+                reviewer=True,
+                input_text=payload,
+            )
+            dismissed = _json_object(raw, "dismissed review")
+        except (CommandError, LoopError) as exc:
+            raise LoopError(
+                EXIT_GITHUB, f"could not dismiss stale review {review_id}"
+            ) from exc
+        returned_value = dismissed.get("id")
+        if isinstance(returned_value, bool) or not isinstance(
+            returned_value, (int, str)
+        ):
+            raise LoopError(
+                EXIT_GITHUB,
+                f"GitHub returned an invalid dismissal for review {review_id}",
+            )
+        try:
+            returned_id = int(returned_value)
+        except ValueError as exc:
+            raise LoopError(
+                EXIT_GITHUB,
+                f"GitHub returned an invalid dismissal for review {review_id}",
+            ) from exc
+        if returned_id != review_id or dismissed.get("state") != "DISMISSED":
+            raise LoopError(
+                EXIT_GITHUB,
+                f"GitHub did not confirm dismissal of review {review_id}",
+            )
+
+    def _fail_after_stale_review(self, review_id: int, message: str) -> NoReturn:
+        try:
+            self._dismiss_review(review_id)
+        except LoopError as exc:
+            raise LoopError(
+                EXIT_GITHUB,
+                f"review {review_id} could not be neutralized after a race",
+            ) from exc
+        raise LoopError(EXIT_RACE, message)
+
     def post_review(
         self,
         pr: PullRequest,
         review: OracleReview,
         iteration: int,
         iteration_dir: pathlib.Path,
-    ) -> None:
+    ) -> int:
         assert self.writer
         self._ensure_current_snapshot(pr)
         footer = f"\n\n---\nReviewed head: `{pr.head_sha}`\nIteration: {iteration}\n"
@@ -2815,6 +3341,16 @@ class ReviewLoop:
                 EXIT_ORACLE, "review plus audit footer exceeds GitHub's body limit"
             )
         path = iteration_dir / "review.md"
+        if self.runner.contains_secret(body):
+            self.writer.text(
+                path,
+                "Review withheld because it contained a known credential value.\n",
+            )
+            raise LoopError(
+                EXIT_ORACLE,
+                "review body contains a known credential value; refusing to redact "
+                "review content",
+            )
         self.writer.text(path, body)
         event = "APPROVE" if review.verdict == "APPROVE" else "REQUEST_CHANGES"
         # `gh pr review` has no commit-SHA option, so a head that moves between
@@ -2839,13 +3375,38 @@ class ReviewLoop:
         except CommandError as exc:
             raise LoopError(EXIT_GITHUB, str(exc)) from exc
         posted = _json_object(raw, "posted review")
-        if posted.get("commit_id") != pr.head_sha:
+        posted_value = posted.get("id")
+        if isinstance(posted_value, bool) or not isinstance(posted_value, (int, str)):
+            raise LoopError(EXIT_GITHUB, "GitHub returned an invalid review id")
+        try:
+            review_id = int(posted_value)
+        except ValueError as exc:
             raise LoopError(
-                EXIT_RACE,
+                EXIT_GITHUB, "GitHub returned an invalid review id"
+            ) from exc
+        if review_id <= 0:
+            raise LoopError(EXIT_GITHUB, "GitHub returned an invalid review id")
+        if posted.get("commit_id") != pr.head_sha:
+            self._fail_after_stale_review(
+                review_id,
                 "GitHub anchored the submitted review to an unexpected commit",
             )
+        try:
+            self._ensure_current_snapshot(pr)
+        except LoopError as exc:
+            try:
+                self._dismiss_review(review_id)
+            except LoopError as dismissal_error:
+                raise LoopError(
+                    EXIT_GITHUB,
+                    f"review {review_id} could not be neutralized after a race",
+                ) from dismissal_error
+            raise exc
+        return review_id
 
-    def verify_approval(self, expected_head_sha: str, expected_base_sha: str) -> None:
+    def verify_approval(
+        self, expected_head_sha: str, expected_base_sha: str, review_id: int
+    ) -> None:
         try:
             raw = self._gh(
                 [
@@ -2866,8 +3427,9 @@ class ReviewLoop:
             value.get("headRefOid") != expected_head_sha
             or value.get("baseRefOid") != expected_base_sha
         ):
-            raise LoopError(
-                EXIT_RACE, "pull request base or head changed after approval posting"
+            self._fail_after_stale_review(
+                review_id,
+                "pull request base or head changed after approval posting",
             )
         if value.get("state") != "OPEN" or value.get("isDraft"):
             raise LoopError(
@@ -2886,11 +3448,29 @@ class ReviewLoop:
         )
 
     def _outside_state(self, worktree: pathlib.Path) -> dict[str, str]:
-        listing = self.command(["git", "worktree", "list", "--porcelain"]).stdout
+        listing_result = (
+            self._control_command(["git", "worktree", "list", "--porcelain"])
+            if self._control_repo is not None
+            else self.command(["git", "worktree", "list", "--porcelain"])
+        )
+        listing = listing_result.stdout
         assert isinstance(listing, str)
         states: dict[str, str] = {}
+        primary = self.repo_dir.resolve()
+        if primary != worktree.resolve():
+            primary_status = self.command(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=primary,
+            ).stdout
+            assert isinstance(primary_status, str)
+            states[str(primary)] = primary_status
         for path, _branch in self._registered_worktrees(listing):
             candidate = pathlib.Path(path)
+            if (
+                self._control_repo is not None
+                and candidate == self._control_repo.resolve()
+            ):
+                continue
             if candidate == worktree.resolve():
                 continue
             status = self.command(
@@ -3001,7 +3581,7 @@ class ReviewLoop:
     def _remote_head(self, pr: PullRequest) -> str:
         ref = f"refs/loopr/pr-{self.number}/race-head"
         try:
-            self.command(
+            self._control_command(
                 [
                     "git",
                     "fetch",
@@ -3012,7 +3592,7 @@ class ReviewLoop:
                 ],
                 timeout=180,
             )
-            value = self.command(["git", "rev-parse", ref]).stdout
+            value = self._control_command(["git", "rev-parse", ref]).stdout
             assert isinstance(value, str)
             return value.strip()
         except CommandError as exc:
@@ -3020,7 +3600,7 @@ class ReviewLoop:
 
     def _remote_branch_sha(self, branch: str) -> str:
         try:
-            result = self.command(
+            result = self._control_command(
                 ["git", "ls-remote", self.origin_url, f"refs/heads/{branch}"],
                 timeout=60,
             ).stdout
@@ -3138,16 +3718,25 @@ class ReviewLoop:
 
             self.command(["git", "add", "--all", "--"], cwd=worktree)
             self.command(["git", "diff", "--cached", "--check"], cwd=worktree)
-            patch = self.command(
+            patch_result = self.command(
                 ["git", "diff", "--cached", "--binary"],
                 cwd=worktree,
                 max_output_bytes=MAX_ATTACHED_TEXT_BYTES,
+                binary=True,
+                redact_stdout=False,
             ).stdout
-            assert isinstance(patch, str)
-            if not patch:
+            assert isinstance(patch_result, bytes)
+            if not patch_result:
                 raise LoopError(
                     EXIT_STALLED, "Codex implementation normalized to an empty patch"
                 )
+            self._ensure_unredacted_review_content(
+                patch_result, "staged patch", EXIT_CODEX
+            )
+            try:
+                patch = patch_result.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise LoopError(EXIT_CODEX, "staged patch is not valid UTF-8") from exc
             self.writer.text(iteration_dir / "resulting.patch", patch)
             self.command(
                 [
@@ -3165,7 +3754,7 @@ class ReviewLoop:
             assert isinstance(commit, str)
             commit = commit.strip()
             try:
-                self.command(
+                self._control_command(
                     [
                         "git",
                         "push",
@@ -3173,7 +3762,6 @@ class ReviewLoop:
                         self.push_url,
                         f"{commit}:refs/heads/{pr.head_ref}",
                     ],
-                    cwd=self.repo_dir,
                     timeout=180,
                 )
             except CommandError as exc:
@@ -3251,6 +3839,18 @@ class ReviewLoop:
                 )
 
     def execute(self) -> int:
+        if not (sys.platform.startswith("linux") or os.name == "nt"):
+            raise LoopError(
+                EXIT_PRECONDITION,
+                "unsupported platform: fail-closed subprocess containment is "
+                "available only on Linux and Windows",
+            )
+        try:
+            return self._execute()
+        finally:
+            self._cleanup_control()
+
+    def _execute(self) -> int:
         self._bootstrap()
         with PrLock(self.repo, self.number):
             self.transition("PRECHECK")
@@ -3295,10 +3895,10 @@ class ReviewLoop:
                         "VALIDATE_REVIEW", iteration, verdict=review.verdict
                     )
                     self.transition("POST_REVIEW", iteration)
-                    self.post_review(pr, review, iteration, iteration_dir)
+                    review_id = self.post_review(pr, review, iteration, iteration_dir)
                     if review.verdict == "APPROVE":
                         self.transition("APPROVAL_VERIFY", iteration)
-                        self.verify_approval(pr.head_sha, pr.base_sha)
+                        self.verify_approval(pr.head_sha, pr.base_sha, review_id)
                         self.finish("DONE", EXIT_OK)
                         return EXIT_OK
                     if iteration == self.args.max_iterations:
