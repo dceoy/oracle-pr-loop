@@ -1122,16 +1122,63 @@ class PrLock:
             os.close(fd)
 
     @staticmethod
-    def _pid_alive(pid: int) -> bool:
+    def _proc_stat_fields(pid: int) -> list[str] | None:
+        """Return the /proc/<pid>/stat fields from `state` onward, or None.
+
+        `comm` (the second field) is parenthesized and may itself contain
+        spaces or parentheses, so fields are only unambiguous after the last
+        `)` on the line.
+        """
+        try:
+            raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            return None
+        closing = raw.rfind(")")
+        if closing == -1:
+            return None
+        return raw[closing + 2 :].split()
+
+    @classmethod
+    def _own_start_time(cls) -> str | None:
+        fields = cls._proc_stat_fields(os.getpid())
+        if fields is None or len(fields) < 20:
+            return None
+        return fields[19]
+
+    @staticmethod
+    def _pid_alive(pid: int, start_time: str | None) -> bool:
+        """Return whether `pid` is still the same live holder that wrote the lock.
+
+        A bare `os.kill(pid, 0)` cannot tell a live holder apart from an
+        unrelated process the kernel has since reused that PID for -- including
+        one owned by a different user, where `os.kill` only reports EPERM --
+        nor from a zombie whose PID outlives the work it was doing. Comparing
+        the recorded `/proc/<pid>/stat` start time (field 22), which is
+        world-readable regardless of signal permission, rules out reuse; its
+        process state (field 3) rules out a zombie.
+        """
         if pid <= 0:
             return False
         try:
             os.kill(pid, 0)
+            signalable = True
         except ProcessLookupError:
             return False
         except PermissionError:
+            signalable = False
+        if start_time is None:
             return True
-        return True
+        fields = PrLock._proc_stat_fields(pid)
+        if fields is None or len(fields) < 20:
+            # /proc/<pid>/stat is unreadable. Having just been able to signal
+            # the pid makes an exit in the interim the likely explanation, so
+            # treat it as gone; having been unable to even signal it (e.g. a
+            # different UID, or a hidepid= mount) leaves it unproven, so fail
+            # closed rather than reclaim a lock that may still be held.
+            return not signalable
+        if fields[0] == "Z":
+            return False
+        return fields[19] == start_time
 
     def __enter__(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1155,7 +1202,11 @@ class PrLock:
                         self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
                     )
                     try:
-                        os.write(self.fd, f"{os.getpid()}\n".encode())
+                        start_time = self._own_start_time()
+                        payload = f"{os.getpid()}\n"
+                        if start_time is not None:
+                            payload += f"{start_time}\n"
+                        os.write(self.fd, payload.encode())
                         os.fsync(self.fd)
                         return self
                     except Exception:
@@ -1178,13 +1229,18 @@ class PrLock:
                             EXIT_PRECONDITION, "PR lock has an unexpected owner"
                         )
                     try:
-                        text = self.path.read_text(encoding="ascii").strip()
-                        pid = int(text)
-                    except (OSError, ValueError):
+                        lines = self.path.read_text(encoding="ascii").splitlines()
+                        pid = int(lines[0].strip())
+                    except (OSError, ValueError, IndexError):
                         raise LoopError(
                             EXIT_PRECONDITION, "PR lock exists and is unreadable"
                         )
-                    if self._pid_alive(pid):
+                    recorded_start_time = (
+                        lines[1].strip()
+                        if len(lines) > 1 and lines[1].strip()
+                        else None
+                    )
+                    if self._pid_alive(pid, recorded_start_time):
                         raise LoopError(
                             EXIT_PRECONDITION,
                             f"another review loop holds the lock for this PR "
@@ -2555,6 +2611,54 @@ class ReviewLoop:
             )
         return int(text)
 
+    def _derive_change_statuses(
+        self, worktree: pathlib.Path, base_sha: str, head_sha: str, paths: Sequence[str]
+    ) -> dict[str, str]:
+        # `gh pr view --json files` only exposes a `changeType`/`status` field on
+        # GitHub CLI >= 2.88.0. Trusting it (or its absence) would default every
+        # deletion to "modified" on older installations and misclassify a path
+        # that no longer exists at HEAD. The base/head diff is always available
+        # and is the authoritative source, independent of the installed gh version.
+        if not paths:
+            return {}
+        try:
+            result = self._control_command(
+                [
+                    "git",
+                    f"--work-tree={worktree}",
+                    "diff",
+                    "--name-status",
+                    "-z",
+                    "--no-renames",
+                    f"{base_sha}...{head_sha}",
+                    "--",
+                    *paths,
+                ],
+                max_output_bytes=MAX_PATCH_BYTES,
+                redact_stdout=False,
+            ).stdout
+        except CommandError as exc:
+            raise LoopError(
+                EXIT_PRECONDITION, f"cannot derive changed-file status: {exc}"
+            ) from exc
+        assert isinstance(result, str)
+        fields = result.split("\x00")
+        statuses: dict[str, str] = {}
+        index = 0
+        while index + 1 < len(fields):
+            code, git_path = fields[index], fields[index + 1]
+            index += 2
+            if not code or not git_path:
+                continue
+            statuses[git_path] = "removed" if code[0] == "D" else "modified"
+        missing = [path for path in paths if path not in statuses]
+        if missing:
+            raise LoopError(
+                EXIT_PRECONDITION,
+                f"changed path {missing[0]} is absent from the base/head diff",
+            )
+        return statuses
+
     def _stream_git_blob(
         self,
         worktree: pathlib.Path,
@@ -2627,21 +2731,23 @@ class ReviewLoop:
         )
         changed = sorted(pr.files, key=lambda item: str(item.get("path", "")))
         paths: list[str] = []
-        statuses: dict[str, str] = {}
+        seen: set[str] = set()
         for item in changed:
             path = str(item.get("path") or "")
             validate_changed_path(path)
-            if path in statuses:
+            if path in seen:
                 raise LoopError(
                     EXIT_PRECONDITION, "GitHub returned duplicate changed file paths"
                 )
-            change_type = item.get("changeType") or item.get("status") or "modified"
-            statuses[path] = str(change_type).lower()
+            seen.add(path)
             paths.append(path)
+        statuses = self._derive_change_statuses(
+            worktree, pr.base_sha, pr.head_sha, paths
+        )
 
         patch_paths: list[str] = []
         for path in paths:
-            if statuses[path] in {"removed", "deleted"}:
+            if statuses[path] == "removed":
                 patch_paths.append(path)
                 continue
             object_type = self._git_object_type(worktree, path)
@@ -2720,7 +2826,7 @@ class ReviewLoop:
             if path in seen:
                 continue
             seen.add(path)
-            if status in {"removed", "deleted"}:
+            if status == "removed":
                 manifest.append(
                     {
                         "path": path,

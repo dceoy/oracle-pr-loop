@@ -302,11 +302,55 @@ class InputAndIsolationTests(unittest.TestCase):
             if index not in successes:
                 self.assertIsInstance(result, loopr.LoopError)
         winner = locks[successes[0]]
-        self.assertEqual(
-            str(os.getpid()), winner.path.read_text(encoding="ascii").strip()
-        )
+        recorded_lines = winner.path.read_text(encoding="ascii").splitlines()
+        self.assertEqual(str(os.getpid()), recorded_lines[0].strip())
         winner.__exit__(None, None, None)
         self.assertFalse(winner.path.exists())
+
+    def test_stale_lock_with_pid_reused_by_a_different_process_is_reclaimed(
+        self,
+    ) -> None:
+        if not sys.platform.startswith("linux"):
+            self.skipTest("/proc/<pid>/stat identity checks are Linux-only")
+        # A crashed loop's PID can be reused by an unrelated live process
+        # before the next run starts. Recovery must not treat that live PID
+        # as the still-running holder just because os.kill(pid, 0) succeeds;
+        # the recorded start time no longer matching is the tell.
+        lock = loopr.PrLock("acme/project", 5150)
+        lock.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        real_start_time = loopr.PrLock._own_start_time()
+        assert real_start_time is not None
+        mismatched_start_time = str(int(real_start_time) + 1)
+        lock.path.write_text(
+            f"{os.getpid()}\n{mismatched_start_time}\n", encoding="ascii"
+        )
+        with lock:
+            self.assertTrue(lock.path.exists())
+        self.assertFalse(lock.path.exists())
+
+    def test_pid_alive_treats_an_unreaped_zombie_as_not_the_lock_holder(
+        self,
+    ) -> None:
+        if not sys.platform.startswith("linux"):
+            self.skipTest("/proc/<pid>/stat identity checks are Linux-only")
+        # An unreaped zombie keeps os.kill(pid, 0) succeeding after the loop
+        # it once was has finished all its work; its process state must be
+        # enough to recognize it as no longer a valid lock holder.
+        child = os.fork()
+        if child == 0:
+            os._exit(0)
+        try:
+            deadline = time.monotonic() + 5
+            fields = None
+            while time.monotonic() < deadline:
+                fields = loopr.PrLock._proc_stat_fields(child)
+                if fields is not None and fields[0] == "Z":
+                    break
+                time.sleep(0.02)
+            assert fields is not None and fields[0] == "Z", "child never zombified"
+            self.assertFalse(loopr.PrLock._pid_alive(child, fields[19]))
+        finally:
+            os.waitpid(child, 0)
 
     def test_lock_release_closes_the_descriptor_before_unlinking(self) -> None:
         # Assert the fd is already closed (via EBADF) by the time unlink()
@@ -1638,6 +1682,39 @@ class PatchSafetyTests(unittest.TestCase):
             "no current content", (iteration / "changed-files.txt").read_text()
         )
 
+    def test_bundle_marks_a_deleted_file_without_a_gh_change_type_field(
+        self,
+    ) -> None:
+        # `gh pr view --json files` only returns changeType/status on GitHub
+        # CLI >= 2.88.0; older installations return just path/additions/
+        # deletions. Deletion classification must not depend on either field
+        # existing and must instead come from the local base/head diff.
+        self.git(self.primary, "checkout", "feature")
+        self.git(self.primary, "rm", "app.py")
+        self.git(self.primary, "commit", "-m", "remove app file")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": "app.py", "additions": 0, "deletions": 1}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "deleted-bundle-no-change-type"
+        iteration.mkdir()
+        with mock.patch.object(self.loop, "snapshot", return_value=pr):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        self.assertEqual("deleted", by_path["app.py"]["kind"])
+        self.assertIsNone(by_path["app.py"]["attachment"])
+        self.assertIn(
+            "-VALUE = 1",
+            (iteration / "diff.patch").read_text(encoding="utf-8"),
+        )
+
     def test_bundle_fails_closed_before_oracle_on_known_credential_in_patch(
         self,
     ) -> None:
@@ -1683,7 +1760,7 @@ class PatchSafetyTests(unittest.TestCase):
 
         def fake_control(args: Any, **kwargs: Any) -> loopr.CommandResult:
             assert isinstance(args, (list, tuple))
-            if len(args) > 2 and args[2] == "diff":
+            if "--full-index" in args:
                 return loopr.CommandResult(
                     tuple(str(item) for item in args), 0, b"diff\n", ""
                 )
