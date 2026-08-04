@@ -178,7 +178,7 @@ class InputAndIsolationTests(unittest.TestCase):
         with self.assertRaises(loopr.LoopError):
             loopr.normalize_github_repo("https://github.example/acme/project.git")
 
-    def test_unsupported_posix_fails_before_bootstrap_or_subprocess(self) -> None:
+    def test_non_linux_platform_fails_before_bootstrap_or_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             instance = loopr.ReviewLoop(
                 args_for(pathlib.Path(temporary)),
@@ -186,7 +186,6 @@ class InputAndIsolationTests(unittest.TestCase):
             )
             with (
                 mock.patch.object(loopr.sys, "platform", "darwin"),
-                mock.patch.object(loopr.os, "name", "posix"),
                 mock.patch.object(instance, "_bootstrap") as bootstrap,
                 self.assertRaises(loopr.LoopError) as caught,
             ):
@@ -310,10 +309,8 @@ class InputAndIsolationTests(unittest.TestCase):
         self.assertFalse(winner.path.exists())
 
     def test_lock_release_closes_the_descriptor_before_unlinking(self) -> None:
-        # On Windows an open os.open() handle does not grant delete-sharing,
-        # so unlink() must not be attempted while the descriptor is still
-        # open. Assert the fd is already closed (via EBADF) by the time
-        # unlink() runs, without patching the global os.close.
+        # Assert the fd is already closed (via EBADF) by the time unlink()
+        # runs, without patching the global os.close.
         lock = loopr.PrLock("acme/project", 9)
         lock.__enter__()
         fd = lock.fd
@@ -332,54 +329,6 @@ class InputAndIsolationTests(unittest.TestCase):
             lock.__exit__(None, None, None)
         self.assertTrue(unlink_called)
         self.assertFalse(lock.path.exists())
-
-    def test_windows_job_object_contains_a_detached_grandchild(self) -> None:
-        if os.name != "nt":
-            self.skipTest(
-                "Windows Job Object containment is exercised via real "
-                "kernel32 calls and cannot be validated off Windows"
-            )
-        runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            marker = root / "grandchild-survived"
-            grandchild_script = root / "grandchild.py"
-            grandchild_script.write_text(
-                "import sys, time\ntime.sleep(1)\nopen(sys.argv[1], 'w').close()\n",
-                encoding="utf-8",
-            )
-            leader_script = root / "leader.py"
-            leader_script.write_text(
-                "import subprocess, sys\n"
-                "subprocess.Popen(\n"
-                "    [sys.executable, sys.argv[1], sys.argv[2]],\n"
-                "    stdout=subprocess.DEVNULL,\n"
-                "    stderr=subprocess.DEVNULL,\n"
-                "    stdin=subprocess.DEVNULL,\n"
-                ")\n",
-                encoding="utf-8",
-            )
-            result = runner.run(
-                ["python3", str(leader_script), str(grandchild_script), str(marker)],
-                cwd=root,
-                env=runner.base_env(),
-            )
-            self.assertEqual(0, result.returncode)
-            self.assertFalse(marker.exists())
-            time.sleep(1.5)
-            self.assertFalse(marker.exists())
-
-    def test_pid_liveness_on_windows_never_probes_with_os_kill(self) -> None:
-        with (
-            mock.patch.object(loopr.os, "name", "nt"),
-            mock.patch.object(
-                loopr.PrLock, "_pid_alive_windows", return_value=True
-            ) as windows_probe,
-            mock.patch.object(loopr.os, "kill") as kill_call,
-        ):
-            self.assertTrue(loopr.PrLock._pid_alive(4321))
-        windows_probe.assert_called_once_with(4321)
-        kill_call.assert_not_called()
 
     def test_command_wrapper_can_truncate_bounded_stdout_without_raising(self) -> None:
         runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})

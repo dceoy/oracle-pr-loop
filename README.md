@@ -22,9 +22,8 @@ instructions and test commands before using it on code you do not trust.
 - [Codex CLI](https://github.com/openai/codex) with `codex login` completed
 - A dedicated GitHub reviewer account with repository access and a token in
   `GH_REVIEW_TOKEN`; it must be different from the PR author
-- A Linux or Windows host; other POSIX platforms are rejected before any
-  subprocess starts because they cannot provide the required descendant
-  containment guarantee
+- A Linux host; other platforms are rejected before any subprocess starts
+  because they cannot provide the required descendant containment guarantee
 
 Only same-repository, non-draft, open GitHub.com PRs are supported. The local
 user must be able to push the PR head branch. The reviewer account must have
@@ -145,8 +144,8 @@ fork support, daemon mode, or human-thread resolution.
   by Codex itself are not knowable to this check.
   Only run this tool against pull requests you would trust with read access
   to the operator's account.
-- Linux and Windows containment paths are exercised by the repository CI
-  workflow, but CI status is not itself an approval gate: GitHub approval is
+- The Linux containment path is exercised by the repository CI workflow, but
+  CI status is not itself an approval gate: GitHub approval is
   verified for the exact reviewed head SHA, while a red or absent check suite
   does not block approval.
 - The pushability precheck only proves push authentication and
@@ -162,9 +161,8 @@ fork support, daemon mode, or human-thread resolution.
   result on success, failure, timeout, overflow, or interruption. Descendants
   are terminated through stable Linux pidfds rather than reused numeric PIDs.
   Missing `prctl`, `/proc` child enumeration, or pidfd support, and any cleanup
-  uncertainty, fail closed before the caller can use the result. Windows uses a
-  kill-on-close Job Object assigned before the process resumes. macOS and BSD
-  are rejected rather than using a weaker process-group fallback.
+  uncertainty, fail closed before the caller can use the result. Non-Linux
+  platforms are rejected rather than using a weaker process-group fallback.
 - The reviewer-permission precheck requires an administrator reviewer account
   for stale-review dismissal. The reviewer token must also have the pull-request
   review write grant; GitHub may still reject an under-scoped token at the API,

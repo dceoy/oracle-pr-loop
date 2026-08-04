@@ -165,186 +165,6 @@ class CommandResult:
     stderr: str
 
 
-if os.name == "nt":
-
-    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("PerProcessUserTimeLimit", ctypes.c_int64),
-            ("PerJobUserTimeLimit", ctypes.c_int64),
-            ("LimitFlags", ctypes.c_uint32),
-            ("MinimumWorkingSetSize", ctypes.c_size_t),
-            ("MaximumWorkingSetSize", ctypes.c_size_t),
-            ("ActiveProcessLimit", ctypes.c_uint32),
-            ("Affinity", ctypes.c_void_p),
-            ("PriorityClass", ctypes.c_uint32),
-            ("SchedulingClass", ctypes.c_uint32),
-        ]
-
-    class _IO_COUNTERS(ctypes.Structure):
-        _fields_ = [
-            ("ReadOperationCount", ctypes.c_uint64),
-            ("WriteOperationCount", ctypes.c_uint64),
-            ("OtherOperationCount", ctypes.c_uint64),
-            ("ReadTransferCount", ctypes.c_uint64),
-            ("WriteTransferCount", ctypes.c_uint64),
-            ("OtherTransferCount", ctypes.c_uint64),
-        ]
-
-    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-        _fields_ = [
-            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
-            ("IoInfo", _IO_COUNTERS),
-            ("ProcessMemoryLimit", ctypes.c_size_t),
-            ("JobMemoryLimit", ctypes.c_size_t),
-            ("PeakProcessMemoryUsed", ctypes.c_size_t),
-            ("PeakJobMemoryUsed", ctypes.c_size_t),
-        ]
-
-    class _THREADENTRY32(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", ctypes.c_uint32),
-            ("cntUsage", ctypes.c_uint32),
-            ("th32ThreadID", ctypes.c_uint32),
-            ("th32OwnerProcessID", ctypes.c_uint32),
-            ("tpBasePri", ctypes.c_long),
-            ("tpDeltaPri", ctypes.c_long),
-            ("dwFlags", ctypes.c_uint32),
-        ]
-
-    class _WindowsJobObject:
-        """A kill-on-close Job Object that contains one Windows process tree.
-
-        The leader is created suspended and assigned to this job before its
-        first instruction runs, so a descendant it spawns inherits job
-        membership from the start. Without this, `taskkill /T` after
-        `process.wait()` targets a PID that may no longer identify the
-        process tree, letting a descendant outlive the leader.
-        """
-
-        CREATE_SUSPENDED = 0x00000004
-        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-        _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
-        _TH32CS_SNAPTHREAD = 0x00000004
-        _THREAD_SUSPEND_RESUME = 0x0002
-
-        def __init__(self) -> None:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-            kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
-            kernel32.SetInformationJobObject.restype = ctypes.c_int
-            kernel32.SetInformationJobObject.argtypes = (
-                ctypes.c_void_p,
-                ctypes.c_int,
-                ctypes.c_void_p,
-                ctypes.c_uint32,
-            )
-            kernel32.AssignProcessToJobObject.restype = ctypes.c_int
-            kernel32.AssignProcessToJobObject.argtypes = (
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-            )
-            kernel32.TerminateJobObject.restype = ctypes.c_int
-            kernel32.TerminateJobObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
-            kernel32.CloseHandle.restype = ctypes.c_int
-            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-            kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
-            kernel32.CreateToolhelp32Snapshot.argtypes = (
-                ctypes.c_uint32,
-                ctypes.c_uint32,
-            )
-            kernel32.Thread32First.restype = ctypes.c_int
-            kernel32.Thread32First.argtypes = (
-                ctypes.c_void_p,
-                ctypes.POINTER(_THREADENTRY32),
-            )
-            kernel32.Thread32Next.restype = ctypes.c_int
-            kernel32.Thread32Next.argtypes = (
-                ctypes.c_void_p,
-                ctypes.POINTER(_THREADENTRY32),
-            )
-            kernel32.OpenThread.restype = ctypes.c_void_p
-            kernel32.OpenThread.argtypes = (
-                ctypes.c_uint32,
-                ctypes.c_int,
-                ctypes.c_uint32,
-            )
-            kernel32.ResumeThread.restype = ctypes.c_uint32
-            kernel32.ResumeThread.argtypes = (ctypes.c_void_p,)
-            self._kernel32 = kernel32
-            handle = kernel32.CreateJobObjectW(None, None)
-            if not handle:
-                raise ctypes.WinError(ctypes.get_last_error())
-            self._handle: int | None = handle
-            info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-            info.BasicLimitInformation.LimitFlags = (
-                self._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            )
-            if not kernel32.SetInformationJobObject(
-                handle,
-                self._JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
-                ctypes.byref(info),
-                ctypes.sizeof(info),
-            ):
-                error = ctypes.get_last_error()
-                kernel32.CloseHandle(handle)
-                self._handle = None
-                raise ctypes.WinError(error)
-
-        def assign_and_resume(self, process: subprocess.Popen) -> None:
-            """Assign the still-suspended `process` to this job and start it."""
-
-            kernel32 = self._kernel32
-            if not kernel32.AssignProcessToJobObject(
-                self._handle, int(process._handle)
-            ):
-                raise ctypes.WinError(ctypes.get_last_error())
-            thread_handle = self._open_only_thread(process.pid)
-            try:
-                if kernel32.ResumeThread(thread_handle) == 0xFFFFFFFF:
-                    raise ctypes.WinError(ctypes.get_last_error())
-            finally:
-                kernel32.CloseHandle(thread_handle)
-
-        def _open_only_thread(self, pid: int) -> int:
-            # A process created with CREATE_SUSPENDED has exactly one
-            # thread until it is resumed; Popen does not expose the thread
-            # handle _winapi.CreateProcess returned (it closes it
-            # immediately), so the suspended thread is found by scanning
-            # system threads for this still-open pid.
-            kernel32 = self._kernel32
-            snapshot = kernel32.CreateToolhelp32Snapshot(self._TH32CS_SNAPTHREAD, 0)
-            if not snapshot or snapshot == ctypes.c_void_p(-1).value:
-                raise ctypes.WinError(ctypes.get_last_error())
-            try:
-                entry = _THREADENTRY32()
-                entry.dwSize = ctypes.sizeof(_THREADENTRY32)
-                found: int | None = None
-                more = kernel32.Thread32First(snapshot, ctypes.byref(entry))
-                while more:
-                    if entry.th32OwnerProcessID == pid:
-                        found = entry.th32ThreadID
-                        break
-                    more = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
-            finally:
-                kernel32.CloseHandle(snapshot)
-            if found is None:
-                raise OSError(f"no thread found for suspended process {pid}")
-            handle = kernel32.OpenThread(self._THREAD_SUSPEND_RESUME, False, found)
-            if not handle:
-                raise ctypes.WinError(ctypes.get_last_error())
-            return handle
-
-        def terminate(self) -> None:
-            with contextlib.suppress(OSError):
-                self._kernel32.TerminateJobObject(self._handle, 1)
-
-        def close(self) -> None:
-            if self._handle is not None:
-                with contextlib.suppress(OSError):
-                    self._kernel32.CloseHandle(self._handle)
-                self._handle = None
-
-
 def _linux_enable_subreaper() -> None:
     """Enable child subreaper adoption for the current Linux supervisor."""
 
@@ -952,16 +772,7 @@ class CommandRunner:
         overflow: list[str] = []
         stream_errors: list[str] = []
         kill_lock = threading.Lock()
-        job: Any | None = None
         linux_supervisor: _LinuxSupervisorProcess | None = None
-        if os.name == "nt":
-            try:
-                job = _WindowsJobObject()
-            except OSError as exc:
-                raise CommandError(
-                    f"cannot create Windows job object for {safe_command}: "
-                    f"{self.redact(str(exc))}"
-                ) from exc
         try:
             if sys.platform.startswith("linux"):
                 try:
@@ -991,26 +802,10 @@ class CommandRunner:
                         stderr=subprocess.PIPE,
                         shell=False,
                         start_new_session=True,
-                        creationflags=job.CREATE_SUSPENDED if job is not None else 0,
                     )
                 except OSError as exc:
                     raise CommandError(
                         f"cannot run command {safe_command}: {self.redact(str(exc))}"
-                    ) from exc
-            if job is not None:
-                # The leader is still suspended (CREATE_SUSPENDED above) and
-                # has not run its first instruction, so assigning it to the
-                # job here closes the window in which it could spawn a
-                # descendant outside the job before containment exists.
-                try:
-                    job.assign_and_resume(process)
-                except OSError as exc:
-                    assert isinstance(process, subprocess.Popen)
-                    process.kill()
-                    process.wait()
-                    raise CommandError(
-                        f"cannot initialize Windows job object for "
-                        f"{safe_command}: {self.redact(str(exc))}"
                     ) from exc
 
             def terminate() -> None:
@@ -1021,24 +816,9 @@ class CommandRunner:
                 with kill_lock:
                     if linux_supervisor is not None:
                         linux_supervisor.request_termination()
-                    elif os.name == "posix":
+                    else:
                         with contextlib.suppress(OSError):
                             os.killpg(process.pid, signal.SIGKILL)
-                    else:
-                        # The job object (assigned before the leader's first
-                        # instruction ran) contains the whole tree, so
-                        # terminating it reaches descendants that a PID-based
-                        # taskkill issued after process.wait() could no longer
-                        # reliably target. process.kill() is kept as an
-                        # unconditional guarantee that the leader itself dies.
-                        # `job` is always set on this branch (os.name == "nt"
-                        # implies it was created above); this check merely
-                        # avoids an AttributeError under python -O, where
-                        # `assert` statements are stripped.
-                        if job is not None:
-                            job.terminate()
-                        with contextlib.suppress(OSError):
-                            process.kill()
 
             def drain(name: str, stream: Any, limit: int) -> None:
                 try:
@@ -1161,8 +941,6 @@ class CommandRunner:
         finally:
             if linux_supervisor is not None:
                 linux_supervisor.close()
-            if job is not None:
-                job.close()
 
 
 def run_command(
@@ -1262,17 +1040,13 @@ class ReviewBundle:
 
 
 class PrLock:
-    """Portable process lock using atomic file creation and stale-PID recovery."""
+    """POSIX process lock using atomic file creation and stale-PID recovery."""
 
     def __init__(self, repo: str, number: int):
         self.digest = hashlib.sha256(f"{repo.lower()}#{number}".encode()).hexdigest()[
             :24
         ]
-        owner = (
-            str(os.getuid())
-            if hasattr(os, "getuid")
-            else os.environ.get("USERNAME", "user")
-        )
+        owner = str(os.getuid())
         self.directory = pathlib.Path(tempfile.gettempdir()) / f"loopr-locks-{owner}"
         self.path = self.directory / f"{self.digest}.lock"
         self.fd: int | None = None
@@ -1298,7 +1072,7 @@ class PrLock:
         try:
             fd = os.open(
                 arbiter,
-                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
                 0o600,
             )
         except OSError as exc:
@@ -1311,7 +1085,7 @@ class PrLock:
                 raise LoopError(
                     EXIT_PRECONDITION, "PR lock arbiter is not a regular file"
                 )
-            if hasattr(os, "getuid") and arbiter_stat.st_uid != os.getuid():
+            if arbiter_stat.st_uid != os.getuid():
                 raise LoopError(
                     EXIT_PRECONDITION, "PR lock arbiter has an unexpected owner"
                 )
@@ -1319,26 +1093,18 @@ class PrLock:
             os.lseek(fd, 0, os.SEEK_SET)
             # Bounded, non-blocking retries: a held lock must fail closed
             # with a LoopError within LOCK_ARBITER_TIMEOUT rather than block
-            # this call forever (POSIX flock) or surface a bare OSError from
-            # msvcrt's own internal retry-then-raise behavior (Windows).
+            # this call forever.
             deadline = time.monotonic() + LOCK_ARBITER_TIMEOUT
             while True:
                 try:
-                    if os.name == "nt":
-                        import msvcrt
+                    import fcntl
 
-                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                    else:
-                        import fcntl
-
-                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
-                except (BlockingIOError, PermissionError):
-                    # BlockingIOError: fcntl.flock's LOCK_NB contention
-                    # errno (POSIX). PermissionError: msvcrt.locking's
-                    # lock-violation errno (Windows). Any other OSError is a
-                    # real failure (e.g. EBADF) and must not be retried away
-                    # as if it were ordinary contention.
+                except BlockingIOError:
+                    # fcntl.flock's LOCK_NB contention errno. Any other
+                    # OSError is a real failure (e.g. EBADF) and must not be
+                    # retried away as if it were ordinary contention.
                     if time.monotonic() >= deadline:
                         raise LoopError(
                             EXIT_PRECONDITION,
@@ -1348,17 +1114,10 @@ class PrLock:
             try:
                 yield
             finally:
-                if os.name == "nt":
-                    import msvcrt
+                import fcntl
 
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    with contextlib.suppress(OSError):
-                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    with contextlib.suppress(OSError):
-                        fcntl.flock(fd, fcntl.LOCK_UN)
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
@@ -1366,8 +1125,6 @@ class PrLock:
     def _pid_alive(pid: int) -> bool:
         if pid <= 0:
             return False
-        if os.name == "nt":
-            return PrLock._pid_alive_windows(pid)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -1376,28 +1133,6 @@ class PrLock:
             return True
         return True
 
-    @staticmethod
-    def _pid_alive_windows(pid: int) -> bool:
-        # os.kill(pid, 0) is not a side-effect-free liveness probe on Windows;
-        # it can affect the target process. Use OpenProcess directly instead.
-        error_invalid_parameter = 87
-        process_query_limited_information = 0x1000
-        kernel32 = ctypes.WinDLL(  # type: ignore[reportAttributeAccessIssue]
-            "kernel32", use_last_error=True
-        )
-        kernel32.OpenProcess.restype = ctypes.c_void_p
-        kernel32.OpenProcess.argtypes = (
-            ctypes.c_ulong,
-            ctypes.c_int,
-            ctypes.c_ulong,
-        )
-        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
-        if handle:
-            kernel32.CloseHandle(handle)
-            return True
-        return ctypes.get_last_error() != error_invalid_parameter  # type: ignore[reportAttributeAccessIssue]
-
     def __enter__(self):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory_stat = self.directory.lstat()
@@ -1405,15 +1140,11 @@ class PrLock:
             raise LoopError(
                 EXIT_PRECONDITION, "PR lock directory is not a real directory"
             )
-        if hasattr(os, "getuid") and directory_stat.st_uid != os.getuid():
+        if directory_stat.st_uid != os.getuid():
             raise LoopError(
                 EXIT_PRECONDITION, "PR lock directory has an unexpected owner"
             )
-        # st_mode permission bits are POSIX semantics; Windows directory access
-        # is governed by ACLs, and st_mode there exposes synthetic bits that do
-        # not reflect the ACL applied by mkdir(mode=0o700), so this check would
-        # spuriously reject a correctly restricted Windows lock directory.
-        if hasattr(os, "getuid") and directory_stat.st_mode & 0o077:
+        if directory_stat.st_mode & 0o077:
             raise LoopError(
                 EXIT_PRECONDITION, "PR lock directory permissions are too broad"
             )
@@ -1442,7 +1173,7 @@ class PrLock:
                         raise LoopError(
                             EXIT_PRECONDITION, "PR lock is not a regular file"
                         )
-                    if hasattr(os, "getuid") and existing.st_uid != os.getuid():
+                    if existing.st_uid != os.getuid():
                         raise LoopError(
                             EXIT_PRECONDITION, "PR lock has an unexpected owner"
                         )
@@ -1471,10 +1202,6 @@ class PrLock:
         if self.fd is not None:
             fd = self.fd
             self.fd = None
-            # Close the descriptor before unlinking: on Windows an open
-            # os.open() handle does not grant delete-sharing, so unlinking
-            # the pathname while still holding it raises PermissionError and
-            # leaves the lock behind.
             try:
                 owned = os.fstat(fd)
             finally:
@@ -1790,9 +1517,9 @@ class ReviewLoop:
             raise LoopError(
                 EXIT_PRECONDITION, f"{description} must be a real directory"
             )
-        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        if metadata.st_uid != os.getuid():
             raise LoopError(EXIT_PRECONDITION, f"{description} has an unexpected owner")
-        if hasattr(os, "getuid") and metadata.st_mode & 0o077:
+        if metadata.st_mode & 0o077:
             raise LoopError(
                 EXIT_PRECONDITION, f"{description} permissions are too broad"
             )
@@ -1894,9 +1621,7 @@ class ReviewLoop:
             )
         control_args = list(args)
         if len(control_args) > 1 and control_args[0] == "git":
-            if control_args[1] == "fetch":
-                control_args.insert(2, "--upload-pack=git-upload-pack")
-            elif control_args[1] == "ls-remote":
+            if control_args[1] in ("fetch", "ls-remote"):
                 control_args.insert(2, "--upload-pack=git-upload-pack")
             elif control_args[1] == "push":
                 control_args.insert(2, "--receive-pack=git-receive-pack")
@@ -3039,14 +2764,15 @@ class ReviewLoop:
                 chunk: bytes,
                 retained_buffer: bytearray | None = retained,
                 blob_decoder: codecs.IncrementalDecoder = decoder,
+                secret_budget: int = max_secret_bytes,
             ) -> None:
                 nonlocal byte_count, contains_nul, valid_utf8, secret_found, secret_tail
                 byte_count += len(chunk)
                 contains_nul = contains_nul or b"\x00" in chunk
-                if max_secret_bytes:
+                if secret_budget:
                     window = secret_tail + chunk
                     secret_found = secret_found or self.runner.contains_secret(window)
-                    secret_tail = window[-(max_secret_bytes - 1) :]
+                    secret_tail = window[-(secret_budget - 1) :]
                 if retained_buffer is not None:
                     retained_buffer.extend(chunk)
                 if valid_utf8:
@@ -3393,7 +3119,7 @@ class ReviewLoop:
             )
         try:
             self._ensure_current_snapshot(pr)
-        except LoopError as exc:
+        except LoopError:
             try:
                 self._dismiss_review(review_id)
             except LoopError as dismissal_error:
@@ -3401,7 +3127,7 @@ class ReviewLoop:
                     EXIT_GITHUB,
                     f"review {review_id} could not be neutralized after a race",
                 ) from dismissal_error
-            raise exc
+            raise
         return review_id
 
     def verify_approval(
@@ -3839,11 +3565,11 @@ class ReviewLoop:
                 )
 
     def execute(self) -> int:
-        if not (sys.platform.startswith("linux") or os.name == "nt"):
+        if not sys.platform.startswith("linux"):
             raise LoopError(
                 EXIT_PRECONDITION,
                 "unsupported platform: fail-closed subprocess containment is "
-                "available only on Linux and Windows",
+                "available only on Linux",
             )
         try:
             return self._execute()
