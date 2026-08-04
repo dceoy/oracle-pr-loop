@@ -3272,7 +3272,7 @@ class ReviewLoop:
         pr: PullRequest,
         paths: list[str],
         statuses: dict[str, str],
-        removed_sources: dict[str, str],
+        removed_sources: dict[str, str | None],
     ) -> str:
         """Collect the bounded, credential-checked PR patch as text.
 
@@ -3343,7 +3343,7 @@ class ReviewLoop:
 
     @staticmethod
     def _bundle_removed_entry(
-        path: str, removed_sources: dict[str, str]
+        path: str, removed_sources: dict[str, str | None]
     ) -> tuple[dict[str, Any], str]:
         """Build the manifest entry and changed-file line for a removed path.
 
@@ -3519,7 +3519,7 @@ class ReviewLoop:
         iteration_dir: pathlib.Path,
         paths: list[str],
         statuses: dict[str, str],
-        removed_sources: dict[str, str],
+        removed_sources: dict[str, str | None],
         total: int,
     ) -> tuple[list[dict[str, Any]], list[pathlib.Path], str, int]:
         """Classify and attach every changed, instruction, and removed path.

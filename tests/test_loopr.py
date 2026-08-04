@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest import mock
 
 import pytest
@@ -2178,7 +2178,7 @@ class PatchSafetyTests(unittest.TestCase):
                 return loopr.CommandResult(
                     tuple(str(item) for item in args), 0, b"diff\n", ""
                 )
-            return original_control(args, **kwargs)
+            return original_control(args, **cast("dict[str, Any]", kwargs))
 
         def split_blob(_worktree: pathlib.Path, path: str, on_chunk: object) -> None:
             assert path == "app.py"
