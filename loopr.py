@@ -2429,7 +2429,7 @@ class ReviewLoop:
 
     def prepare_worktree(self, pr: PullRequest) -> pathlib.Path:
         ref_root = f"refs/loopr/pr-{self.number}"
-        branch = f"review-loop/pr-{self.number}"
+        branch = f"loopr/pr-{self.number}"
         worktree = self.artifacts_dir / "worktrees" / f"pr-{self.number}"
         try:
             worktree.resolve(strict=False).relative_to(self.artifacts_dir.resolve())
@@ -3572,7 +3572,7 @@ class ReviewLoop:
             ).stdout
             if (
                 str(head).strip() != pr.head_sha
-                or str(branch).strip() != f"review-loop/pr-{self.number}"
+                or str(branch).strip() != f"loopr/pr-{self.number}"
             ):
                 raise LoopError(
                     EXIT_CODEX, "Codex changed the dedicated worktree HEAD or branch"
@@ -3889,7 +3889,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--artifacts-dir",
-        default=".pr-review-loop",
+        default=".pr-loopr",
         help="repository-relative audit directory",
     )
     parser.add_argument(
@@ -3909,10 +3909,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return ReviewLoop(args, runner).execute()
     except LoopError as exc:
-        sys.stderr.write(f"review-loop: {runner.redact(str(exc))}\n")
+        sys.stderr.write(f"loopr: {runner.redact(str(exc))}\n")
         return exc.code
     except KeyboardInterrupt:
-        sys.stderr.write("review-loop: interrupted; failed closed\n")
+        sys.stderr.write("loopr: interrupted; failed closed\n")
         return EXIT_PRECONDITION
 
 

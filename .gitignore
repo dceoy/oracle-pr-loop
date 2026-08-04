@@ -1,5 +1,5 @@
 # loopr runtime artifacts
-.pr-review-loop/
+.pr-loopr/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

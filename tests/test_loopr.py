@@ -15,7 +15,7 @@ from unittest import mock
 
 import pytest
 
-import review_loop as loopr
+import loopr
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -82,7 +82,7 @@ def args_for(repo: pathlib.Path, *, maximum: int = 5) -> argparse.Namespace:
         repo_dir=str(repo),
         max_iterations=maximum,
         oracle_thinking_time="heavy",
-        artifacts_dir=".pr-review-loop",
+        artifacts_dir=".pr-loopr",
         dry_run=False,
     )
 
@@ -706,7 +706,7 @@ class ScriptedLoop(loopr.ReviewLoop):
         self.repo = "acme/project"
         self.number = 7
         self.pr_url = "https://github.com/acme/project/pull/7"
-        self.artifacts_dir = self.repo_dir / ".pr-review-loop"
+        self.artifacts_dir = self.repo_dir / ".pr-loopr"
         self.writer = loopr.ArtifactWriter(self.artifacts_dir, self.runner)
 
     def precheck(self) -> loopr.PullRequest:
@@ -881,7 +881,7 @@ class AcceptanceStateMachineTests(unittest.TestCase):
         with mock.patch.object(loopr.sys, "platform", "linux"):
             assert scripted.execute() == loopr.EXIT_OK
         assert scripted.calls == ["precheck"]
-        assert not (root / ".pr-review-loop").exists()
+        assert not (root / ".pr-loopr").exists()
 
     def test_no_op_codex_is_stalled_without_push(self) -> None:
         scripted, code, _ = self.run_script([request_changes()], no_op=True)
@@ -943,7 +943,7 @@ class AcceptanceStateMachineTests(unittest.TestCase):
         scripted, code, root = self.run_script([approval()], author="reviewer")
         assert code == loopr.EXIT_PRECONDITION
         assert not any(call.startswith("post:") for call in scripted.calls)
-        assert not (root / ".pr-review-loop").exists()
+        assert not (root / ".pr-loopr").exists()
 
 
 class PatchSafetyTests(unittest.TestCase):
@@ -985,7 +985,7 @@ class PatchSafetyTests(unittest.TestCase):
         self.loop.pr_url = "https://github.com/acme/project/pull/7"
         self.loop.origin_url = str(self.remote)
         self.loop.push_url = str(self.remote)
-        self.loop.artifacts_dir = self.primary / ".pr-review-loop"
+        self.loop.artifacts_dir = self.primary / ".pr-loopr"
         self.loop.artifacts_dir.mkdir()
         self.loop.writer = loopr.ArtifactWriter(self.loop.artifacts_dir, runner)
         self.loop._author_identity = ("Loop Test", "loop@example.test")

@@ -139,7 +139,7 @@ reportUnknownLambdaType = "none"
 
 [tool.pytest.ini_options]
 addopts = [
-  "--cov=review_loop",
+  "--cov=loopr",
   "--cov-branch",
   "--doctest-modules",
   "--capture=no",
@@ -152,7 +152,7 @@ python_functions = ["test_*"]
 minversion = "9.0"
 
 [tool.coverage.run]
-source = ["review_loop"]
+source = ["loopr"]
 omit = ["tests/**"]
 
 [tool.coverage.report]

@@ -55,13 +55,13 @@ Export the dedicated reviewer's token without writing it to a file, then run:
 
 ```console
 export GH_REVIEW_TOKEN='...'
-python3 review_loop.py --pr 123
+python3 loopr.py --pr 123
 ```
 
 `--pr` accepts either a number inferable from local `origin` or a canonical URL:
 
 ```console
-python3 review_loop.py --pr https://github.com/OWNER/REPO/pull/123
+python3 loopr.py --pr https://github.com/OWNER/REPO/pull/123
 ```
 
 Options:
@@ -72,14 +72,14 @@ Options:
   an unreviewable final patch.
 - `--oracle-thinking-time {light,standard,extended,heavy}`: default `heavy`.
 - `--artifacts-dir DIR`: repository-relative audit root, default
-  `.pr-review-loop`.
+  `.pr-loopr`.
 - `--dry-run`: check dependencies, authentication, PR identity, permissions,
   push authentication and lease freshness, and locking without invoking
   ChatGPT/Codex or changing a remote or worktree; see
   [Limitations](#limitations) for what the pushability check does not cover.
 
 Each run writes deterministic, permission-restricted audit material below
-`.pr-review-loop/runs/`, including exact PR metadata and patch, a changed-file
+`.pr-loopr/runs/`, including exact PR metadata and patch, a changed-file
 manifest, complete changed text, explicit binary-file entries, Oracle input and
 output, the posted review, Codex events/final response when applicable, the
 resulting binary patch, pushed SHA, versions, and state transitions. Diagnostics
@@ -125,7 +125,7 @@ fork support, daemon mode, or human-thread resolution.
   Git fetch, race checks, dry-run pushes, and real pushes run from a private
   bare control repository with an empty trusted working directory; the primary
   checkout is only inspected for identity, ignore state, and outside-worktree
-  mutations. Codex edits only `.pr-review-loop/worktrees/pr-N/`.
+  mutations. Codex edits only `.pr-loopr/worktrees/pr-N/`.
 - The orchestrator rejects dirty/conflicting loop worktrees, whitespace errors,
   new nested Git repositories, submodule URL changes, no-op patches, and changed
   outside-worktree state. A final `--force-with-lease` prevents overwriting a
@@ -172,7 +172,7 @@ The single-file implementation is longer than the original 250–400-line sizing
 target because the issue's mandatory safety boundaries require explicit bounded
 subprocess handling, token-scoped environments, path and schema validation,
 worktree conflict detection, deterministic attachment construction, audit state,
-and race-safe Git operations. Keeping those checks visible in `review_loop.py`
+and race-safe Git operations. Keeping those checks visible in `loopr.py`
 is preferable to hiding core behavior in undeclared dependencies or services.
 
 ## Tests
