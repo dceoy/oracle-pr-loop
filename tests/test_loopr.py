@@ -701,6 +701,7 @@ class InputAndIsolationTests(unittest.TestCase):
             ) -> loopr.CommandResult:
                 environment = kwargs["env"]
                 assert isinstance(environment, dict)
+                environment = cast("dict[object, object]", environment)
                 captured.update({
                     str(key): str(value) for key, value in environment.items()
                 })
@@ -794,7 +795,7 @@ class ScriptedLoop(loopr.ReviewLoop):
         """Collect bundle."""
         self.calls.append("collect")
         assert self.writer
-        paths = []
+        paths: list[pathlib.Path] = []
         for name, content in {
             "pr.json": json.dumps(pr.raw),
             "context.md": pr.head_sha,

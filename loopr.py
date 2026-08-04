@@ -34,7 +34,7 @@ import uuid
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
     from typing import IO
 
     JSONValue = (
@@ -314,7 +314,7 @@ def _linux_reap_available() -> bool:
 
 
 def _linux_cleanup_children(  # ruff: ignore[complex-structure] -- supervisor/reaping internals; cannot be exercised in this sandbox (pidfd_open unavailable), so left as a read-reviewed structural property rather than restructured blind
-    payload: subprocess.Popen,
+    payload: subprocess.Popen[bytes],
     supervisor_pid: int,
     safe_command: str,
     *,
@@ -429,7 +429,7 @@ def _linux_supervisor_main(
     safe_command: str,
 ) -> NoReturn:
     """Run one payload as the sole child of a Linux subreaper."""
-    payload: subprocess.Popen | None = None
+    payload: subprocess.Popen[bytes] | None = None
     exit_code = 1
     try:  # ruff: ignore[too-many-statements-in-try-clause] -- supervisor/reaping internals; cannot be exercised in this sandbox (pidfd_open unavailable), so left as a read-reviewed structural property rather than restructured blind
         _linux_enable_subreaper()
@@ -568,7 +568,7 @@ class _LinuxSupervisorProcess:
             if not isinstance(message, dict):
                 msg = f"Linux supervisor returned invalid status: {safe_command}"
                 raise CommandError(msg)
-            messages.append(message)
+            messages.append(cast("dict[str, object]", message))
         result_messages = [item for item in messages if item.get("type") == "result"]
         error_messages = [item for item in messages if item.get("type") == "error"]
         if error_messages:
@@ -1135,10 +1135,10 @@ class PullRequest:
         Returns:
             The parsed pull request.
         """
-        author = data.get("author") or {}
-        head_repository = data.get("headRepository") or {}
-        head_owner = data.get("headRepositoryOwner") or {}
-        head_repo = head_repository.get("nameWithOwner")
+        author: dict[str, Any] = data.get("author") or {}
+        head_repository: dict[str, Any] = data.get("headRepository") or {}
+        head_owner: dict[str, Any] = data.get("headRepositoryOwner") or {}
+        head_repo: str | None = head_repository.get("nameWithOwner")
         if not head_repo:
             owner = head_owner.get("login") or head_owner.get("name")
             name = head_repository.get("name")
@@ -1200,7 +1200,7 @@ class PrLock:
         self.fd: int | None = None
 
     @contextlib.contextmanager
-    def _serialized_recovery(self) -> Iterator[None]:
+    def _serialized_recovery(self) -> Generator[None]:
         """Serialize stale-lock detection and replacement across contenders.
 
         Without an OS-level lock here, two contenders can both observe the
@@ -1490,7 +1490,7 @@ def _json_object(text: str, description: str) -> dict[str, Any]:
         ) from exc
     if not isinstance(value, dict):
         raise LoopError(EXIT_PRECONDITION, f"{description} must be a JSON object")
-    return value
+    return cast("dict[str, Any]", value)
 
 
 def _extract_oracle_json_object(text: str) -> dict[str, Any]:
@@ -1513,7 +1513,12 @@ def _extract_oracle_json_object(text: str) -> dict[str, Any]:
         raise LoopError(
             EXIT_ORACLE, f"Oracle returned invalid or trailing JSON: {exc}"
         ) from exc
-    if not isinstance(value, dict) or set(value) != REVIEW_SCHEMA_KEYS:
+    if not isinstance(value, dict):
+        raise LoopError(
+            EXIT_ORACLE, "Oracle result does not match the exact top-level schema"
+        )
+    value = cast("dict[str, Any]", value)
+    if set(value) != REVIEW_SCHEMA_KEYS:
         raise LoopError(
             EXIT_ORACLE, "Oracle result does not match the exact top-level schema"
         )
@@ -1560,8 +1565,13 @@ def _validate_oracle_findings(
             EXIT_ORACLE, "Oracle finding and note collections must be arrays"
         )
     checked_blockers: list[dict[str, str]] = []
-    for blocker in blockers:
-        if not isinstance(blocker, dict) or set(blocker) != BLOCKER_KEYS:
+    for raw_blocker in cast("list[Any]", blockers):
+        if not isinstance(raw_blocker, dict):
+            raise LoopError(
+                EXIT_ORACLE, "blocking finding does not match the exact schema"
+            )
+        blocker = cast("dict[str, Any]", raw_blocker)
+        if set(blocker) != BLOCKER_KEYS:
             raise LoopError(
                 EXIT_ORACLE, "blocking finding does not match the exact schema"
             )
@@ -1573,9 +1583,12 @@ def _validate_oracle_findings(
                 EXIT_ORACLE, "blocking finding fields must be non-empty strings"
             )
         checked_blockers.append(dict(blocker))
-    if any(not isinstance(note, str) or not note.strip() for note in notes):
-        raise LoopError(EXIT_ORACLE, "non-blocking notes must be non-empty strings")
-    return checked_blockers, notes
+    checked_notes: list[str] = []
+    for raw_note in cast("list[Any]", notes):
+        if not isinstance(raw_note, str) or not raw_note.strip():
+            raise LoopError(EXIT_ORACLE, "non-blocking notes must be non-empty strings")
+        checked_notes.append(raw_note)
+    return checked_blockers, checked_notes
 
 
 def _validate_oracle_verdict_consistency(
