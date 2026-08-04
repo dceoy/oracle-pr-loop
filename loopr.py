@@ -24,7 +24,7 @@ import select
 import shutil
 import signal
 import stat
-import subprocess
+import subprocess  # ruff: ignore[suspicious-subprocess-import] -- this is a process-execution orchestrator
 import sys
 import tempfile
 import threading
@@ -35,6 +35,17 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from typing import IO
+
+    JSONValue = (
+        str
+        | int
+        | float
+        | bool
+        | None
+        | Sequence["JSONValue"]
+        | Mapping[str, "JSONValue"]
+    )
 
 EXIT_OK = 0
 EXIT_PRECONDITION = 2
@@ -58,6 +69,21 @@ POLL_TIMEOUT = 90
 POLL_INTERVAL = 2
 LOCK_ARBITER_TIMEOUT = 30
 LOCK_ARBITER_INTERVAL = 0.2
+
+MIN_SECRET_VALUE_LENGTH = 4
+MAX_REDACTED_COMMAND_ERROR_DETAIL_BYTES = 2000
+PROC_STAT_MIN_FIELDS_FOR_START_TIME = 20
+ORACLE_REVIEW_BODY_MAX_BYTES = 60_000
+GITHUB_REVIEW_BODY_MAX_BYTES = 65_000
+GITHUB_REPO_URL_PART_COUNT = 2
+GITHUB_PR_URL_PART_COUNT = 4
+ASCII_PRINTABLE_MIN = 32
+ASCII_DEL = 127
+GIT_IDENTITY_FIELD_MAX_LENGTH = 1024
+MIN_NODE_MAJOR_VERSION = 24
+WORKTREE_GIT_CONTROL_FILE_MAX_BYTES = 4096
+LS_TREE_MIN_FIELDS = 2
+WORKTREE_ENTRY_VALIDATION_LIMIT = 100_000
 
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
@@ -173,7 +199,11 @@ class CommandResult:
 
 
 def _linux_enable_subreaper() -> None:
-    """Enable child subreaper adoption for the current Linux supervisor."""
+    """Enable child subreaper adoption for the current Linux supervisor.
+
+    Raises:
+        OSError: If prctl is unavailable or the subreaper flag cannot be set.
+    """
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         prctl = libc.prctl
@@ -230,7 +260,13 @@ def _linux_kill_pid(pid: int) -> bool:
 
 
 def _linux_proc_children(pid: int, *, required: bool = False) -> set[int]:
-    """Return the kernel-reported direct children of a process."""
+    """Return the kernel-reported direct children of a process.
+
+    Raises:
+        FileNotFoundError: If `required` is set and the process has no
+            `/proc` children entry (e.g. it has already exited).
+        OSError: If `/proc` reports a non-numeric child pid.
+    """
     path = f"/proc/{pid}/task/{pid}/children"
     try:
         raw = pathlib.Path(path).read_bytes()
@@ -247,7 +283,11 @@ def _linux_proc_children(pid: int, *, required: bool = False) -> set[int]:
 
 
 def _linux_require_proc_child_enumeration(pid: int) -> None:
-    """Fail closed unless the supervisor can enumerate its children."""
+    """Fail closed unless the supervisor can enumerate its children.
+
+    Raises:
+        OSError: If `/proc` is unavailable or `pid` cannot be enumerated.
+    """
     if not pathlib.Path("/proc").is_dir():
         raise OSError(errno.ENOSYS, "/proc child enumeration is unavailable")
     _linux_proc_children(pid, required=True)
@@ -255,7 +295,11 @@ def _linux_require_proc_child_enumeration(pid: int) -> None:
 
 
 def _linux_reap_available() -> bool:
-    """Reap every currently waitable child and report whether one was found."""
+    """Reap every currently waitable child and report whether one was found.
+
+    Returns:
+        True if at least one child was reaped, False otherwise.
+    """
     reaped = False
     while True:
         try:
@@ -276,7 +320,15 @@ def _linux_cleanup_children(
     *,
     terminate_payload: bool,
 ) -> int:
-    """Kill and reap the payload and every child adopted by the supervisor."""
+    """Kill and reap the payload and every child adopted by the supervisor.
+
+    Returns:
+        The exit code of the reaped payload process.
+
+    Raises:
+        CommandError: If the payload or any adopted child cannot be reaped
+            or terminated.
+    """
     if terminate_payload and payload.poll() is None:
         with contextlib.suppress(ProcessLookupError):
             _linux_kill_pid(payload.pid)
@@ -382,7 +434,7 @@ def _linux_supervisor_main(
     try:
         _linux_enable_subreaper()
         _linux_require_proc_child_enumeration(os.getpid())
-        payload = subprocess.Popen(
+        payload = subprocess.Popen(  # ruff: ignore[subprocess-without-shell-equals-true] -- shell=False, trusted-executable argv is this tool's job
             argv,
             cwd=cwd,
             env=dict(env),
@@ -443,9 +495,9 @@ class _LinuxSupervisorProcess:
         self,
         argv: tuple[str, ...],
         pid: int,
-        stdin: Any,
-        stdout: Any,
-        stderr: Any,
+        stdin: IO[bytes] | None,
+        stdout: IO[bytes],
+        stderr: IO[bytes],
         command_fd: int,
         status_fd: int,
     ) -> None:
@@ -476,7 +528,9 @@ class _LinuxSupervisorProcess:
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    assert timeout is not None
+                    if timeout is None:
+                        msg = "internal invariant violated: timeout is None"
+                        raise RuntimeError(msg)
                     raise subprocess.TimeoutExpired(self.args, timeout)
                 time.sleep(min(0.01, remaining))
 
@@ -548,7 +602,14 @@ def _linux_spawn_supervisor(
     input_bytes: bytes | None,
     safe_command: str,
 ) -> _LinuxSupervisorProcess:
-    """Fork a supervisor and wire only payload stdio to the caller."""
+    """Fork a supervisor and wire only payload stdio to the caller.
+
+    Returns:
+        The parent-side handle to the forked Linux supervisor process.
+
+    Raises:
+        OSError: If forking the supervisor process fails.
+    """
     stdout_read, stdout_write = os.pipe()
     stderr_read, stderr_write = os.pipe()
     status_read, status_write = os.pipe()
@@ -619,7 +680,9 @@ class CommandRunner:
         self._secrets = {
             value
             for key, value in self.source_env.items()
-            if value and len(value) >= 4 and SECRET_KEY_RE.search(key)
+            if value
+            and len(value) >= MIN_SECRET_VALUE_LENGTH
+            and SECRET_KEY_RE.search(key)
         }
         self._trusted_executables: dict[str, str] = {}
 
@@ -634,6 +697,12 @@ class CommandRunner:
         written to, that worktree run in place of the trusted tool. Only
         absolute `PATH` entries are searched, and the result is cached
         since `PATH` does not change over the life of the process.
+
+        Returns:
+            The resolved absolute path to the executable.
+
+        Raises:
+            CommandError: If no absolute `PATH` entry contains `name`.
         """
         if os.sep in name:
             return name
@@ -658,7 +727,12 @@ class CommandRunner:
         return resolved
 
     def redact(self, value: str) -> str:
-        """Replace every captured credential value in a string with a placeholder."""
+        """Replace every captured credential value in a string with a placeholder.
+
+        Returns:
+            The value with every captured credential replaced by
+            "[REDACTED]".
+        """
         for secret in sorted(self._secrets, key=len, reverse=True):
             value = value.replace(secret, "[REDACTED]")
         return value
@@ -768,7 +842,11 @@ class CommandRunner:
         })
 
     def model_env(self) -> dict[str, str]:
-        """Backward-compatible alias for the stricter Codex environment."""
+        """Backward-compatible alias for the stricter Codex environment.
+
+        Returns:
+            The minimal allowlisted environment for the Codex CLI.
+        """
         return self.codex_env()
 
     def run(
@@ -786,7 +864,18 @@ class CommandRunner:
         stdout_callback: Callable[[bytes], None] | None = None,
         redact_stdout: bool = True,
     ) -> CommandResult:
-        """Run a command with bounded, streamed capture and containment on Linux."""
+        """Run a command with bounded, streamed capture and containment on Linux.
+
+        Returns:
+            The captured result of the completed command.
+
+        Raises:
+            CommandError: If the argument vector is invalid, the input or
+                output exceeds its configured bound, or the command cannot
+                be started, contained, or reaped.
+            RuntimeError: If a Popen stream that must be piped is
+                unexpectedly unavailable.
+        """
         argv = tuple(str(arg) for arg in args)
         if not argv or any("\x00" in arg for arg in argv):
             msg = "invalid subprocess argument vector"
@@ -824,7 +913,7 @@ class CommandRunner:
                     raise CommandError(msg) from exc
             else:
                 try:
-                    process = subprocess.Popen(
+                    process = subprocess.Popen(  # ruff: ignore[subprocess-without-shell-equals-true] -- shell=False, trusted-executable argv is this tool's job
                         argv,
                         cwd=cwd,
                         env=dict(env),
@@ -852,7 +941,7 @@ class CommandRunner:
                         with contextlib.suppress(OSError):
                             os.killpg(process.pid, signal.SIGKILL)
 
-            def drain(name: str, stream: Any, limit: int) -> None:
+            def drain(name: str, stream: IO[bytes], limit: int) -> None:
                 try:
                     while True:
                         chunk = stream.read(COMMAND_STREAM_CHUNK_BYTES)
@@ -874,7 +963,9 @@ class CommandRunner:
                     stream.close()
 
             def feed() -> None:
-                assert process.stdin is not None
+                if process.stdin is None:
+                    msg = "internal invariant violated: process.stdin is None"
+                    raise RuntimeError(msg)
                 try:
                     process.stdin.write(input_bytes or b"")
                     process.stdin.flush()
@@ -883,8 +974,12 @@ class CommandRunner:
                 finally:
                     process.stdin.close()
 
-            assert process.stdout is not None
-            assert process.stderr is not None
+            if process.stdout is None:
+                msg = "internal invariant violated: process.stdout is None"
+                raise RuntimeError(msg)
+            if process.stderr is None:
+                msg = "internal invariant violated: process.stderr is None"
+                raise RuntimeError(msg)
             threads = [
                 threading.Thread(
                     target=drain,
@@ -960,8 +1055,8 @@ class CommandRunner:
                 detail = stderr.strip() or self.redact(
                     stdout_bytes.decode("utf-8", "replace")
                 )
-                if len(detail) > 2000:
-                    detail = detail[:2000] + "..."
+                if len(detail) > MAX_REDACTED_COMMAND_ERROR_DETAIL_BYTES:
+                    detail = detail[:MAX_REDACTED_COMMAND_ERROR_DETAIL_BYTES] + "..."
                 suffix = f": {detail}" if detail else ""
                 msg = f"command failed ({payload_returncode}): {safe_command}{suffix}"
                 raise CommandError(
@@ -988,7 +1083,11 @@ def run_command(
     redact_stdout: bool = True,
     runner: CommandRunner | None = None,
 ) -> CommandResult:
-    """Public reusable wrapper used by the orchestrator and external callers."""
+    """Public reusable wrapper used by the orchestrator and external callers.
+
+    Returns:
+        The captured result of the completed command.
+    """
     active_runner = runner or CommandRunner(env)
     return active_runner.run(
         args,
@@ -1026,7 +1125,11 @@ class PullRequest:
 
     @classmethod
     def from_json(cls, repo: str, data: dict[str, Any]) -> PullRequest:
-        """Build a PullRequest from GitHub's `gh pr view --json` output."""
+        """Build a PullRequest from GitHub's `gh pr view --json` output.
+
+        Returns:
+            The parsed pull request.
+        """
         author = data.get("author") or {}
         head_repository = data.get("headRepository") or {}
         head_owner = data.get("headRepositoryOwner") or {}
@@ -1107,6 +1210,10 @@ class PrLock:
         contender that opens a freshly created file at the same path). One
         small file per repo#PR persisting in the lock directory is a cheap
         trade for that.
+
+        Raises:
+            LoopError: If the arbiter file cannot be opened or locked
+                within `LOCK_ARBITER_TIMEOUT`.
         """
         arbiter = self.directory / f"{self.digest}.arbiter"
         try:
@@ -1137,7 +1244,7 @@ class PrLock:
             deadline = time.monotonic() + LOCK_ARBITER_TIMEOUT
             while True:
                 try:
-                    import fcntl
+                    import fcntl  # ruff: ignore[import-outside-top-level] -- POSIX-only module
 
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
@@ -1154,7 +1261,7 @@ class PrLock:
             try:
                 yield
             finally:
-                import fcntl
+                import fcntl  # ruff: ignore[import-outside-top-level] -- POSIX-only module
 
                 with contextlib.suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1181,7 +1288,7 @@ class PrLock:
     @classmethod
     def _own_start_time(cls) -> str | None:
         fields = cls._proc_stat_fields(os.getpid())
-        if fields is None or len(fields) < 20:
+        if fields is None or len(fields) < PROC_STAT_MIN_FIELDS_FOR_START_TIME:
             return None
         return fields[19]
 
@@ -1209,7 +1316,7 @@ class PrLock:
         if start_time is None:
             return True
         fields = PrLock._proc_stat_fields(pid)
-        if fields is None or len(fields) < 20:
+        if fields is None or len(fields) < PROC_STAT_MIN_FIELDS_FOR_START_TIME:
             # /proc/<pid>/stat is unreadable. Having just been able to signal
             # the pid makes an exit in the interim the likely explanation, so
             # treat it as gone; having been unable to even signal it (e.g. a
@@ -1221,7 +1328,16 @@ class PrLock:
         return fields[19] == start_time
 
     def __enter__(self) -> PrLock:
-        """Acquire the PR lock, recovering a stale holder's file if needed."""
+        """Acquire the PR lock, recovering a stale holder's file if needed.
+
+        Returns:
+            This lock, now held by the current process.
+
+        Raises:
+            LoopError: If the lock directory is unsafe, the lock is held by
+                another live process, or the arbiter is contended past the
+                timeout.
+        """
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory_stat = self.directory.lstat()
         if not stat.S_ISDIR(directory_stat.st_mode) or self.directory.is_symlink():
@@ -1334,7 +1450,16 @@ def _json_object(text: str, description: str) -> dict[str, Any]:
 
 
 def parse_oracle_review(text: str, expected_sha: str) -> OracleReview:
-    """Parse the one allowed JSON object without repair or inference."""
+    """Parse the one allowed JSON object without repair or inference.
+
+    Returns:
+        The parsed and validated Oracle review.
+
+    Raises:
+        LoopError: If the text is not exactly one valid JSON object shaped
+            like an Oracle review, or its verdict is inconsistent with
+            `expected_sha`.
+    """
     candidate = text.strip()
     fence = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*)\r?\n```", candidate, re.DOTALL)
     if fence:
@@ -1357,7 +1482,7 @@ def parse_oracle_review(text: str, expected_sha: str) -> OracleReview:
         raise LoopError(EXIT_ORACLE, "invalid Oracle verdict")
     if not isinstance(value["review_body"], str) or not value["review_body"].strip():
         raise LoopError(EXIT_ORACLE, "Oracle review_body must be non-empty")
-    if len(value["review_body"].encode()) > 60_000:
+    if len(value["review_body"].encode()) > ORACLE_REVIEW_BODY_MAX_BYTES:
         raise LoopError(
             EXIT_ORACLE, "Oracle review_body is too large for a GitHub review"
         )
@@ -1408,7 +1533,12 @@ def parse_oracle_review(text: str, expected_sha: str) -> OracleReview:
 
 
 def normalize_github_repo(remote: str) -> str:
-    """Return owner/name for an unambiguous github.com remote."""
+    """Return owner/name for an unambiguous github.com remote.
+
+    Raises:
+        LoopError: If `remote` is not an unambiguous `github.com` remote
+            with a valid owner/name shape.
+    """
     value = remote.strip()
     match = re.fullmatch(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?", value)
     if not match:
@@ -1428,7 +1558,7 @@ def normalize_github_repo(remote: str) -> str:
                 EXIT_PRECONDITION, "origin must be an unambiguous github.com URL"
             )
         parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) != 2:
+        if len(parts) != GITHUB_REPO_URL_PART_COUNT:
             raise LoopError(
                 EXIT_PRECONDITION, "origin must identify exactly one GitHub repository"
             )
@@ -1444,7 +1574,11 @@ def normalize_github_repo(remote: str) -> str:
 
 
 def canonical_github_remote(remote: str, repo: str) -> str:
-    """Construct a GitHub-only transport URL from a validated remote shape."""
+    """Construct a GitHub-only transport URL from a validated remote shape.
+
+    Returns:
+        The canonical `https://github.com/OWNER/REPO.git` remote URL.
+    """
     parsed = urllib.parse.urlparse(remote.strip())
     if remote.strip().startswith("git@github.com:") or parsed.scheme == "ssh":
         return f"git@github.com:{repo}.git"
@@ -1452,7 +1586,15 @@ def canonical_github_remote(remote: str, repo: str) -> str:
 
 
 def resolve_pr_target(value: str, origin_repo: str) -> tuple[str, int, str]:
-    """Resolve a --pr value to a canonical (repo, number, URL) triple."""
+    """Resolve a --pr value to a canonical (repo, number, URL) triple.
+
+    Returns:
+        The resolved (repo, number, URL) triple.
+
+    Raises:
+        LoopError: If `value` is neither a bare PR number nor an
+            unambiguous `https://github.com/OWNER/REPO/pull/NUMBER` URL.
+    """
     if value.isdecimal():
         number = int(value)
         repo = origin_repo
@@ -1464,7 +1606,7 @@ def resolve_pr_target(value: str, origin_repo: str) -> tuple[str, int, str]:
             or parsed.netloc.lower() != "github.com"
             or parsed.query
             or parsed.fragment
-            or len(parts) != 4
+            or len(parts) != GITHUB_PR_URL_PART_COUNT
             or parts[2] != "pull"
             or not parts[3].isdecimal()
         ):
@@ -1486,10 +1628,17 @@ def resolve_pr_target(value: str, origin_repo: str) -> tuple[str, int, str]:
 
 
 def validate_git_ref(ref: str, label: str) -> None:
-    """Fail closed unless a branch name is a safe, unambiguous Git ref component."""
+    """Fail closed unless a branch name is a safe, unambiguous Git ref component.
+
+    Raises:
+        LoopError: If `ref` is empty, contains a control character or a
+            forbidden Git ref character, or is otherwise an unsafe or
+            ambiguous ref component.
+    """
     forbidden = set(" ~^:?*[\\")
     if not ref or any(
-        ord(char) < 32 or ord(char) == 127 or char in forbidden for char in ref
+        ord(char) < ASCII_PRINTABLE_MIN or ord(char) == ASCII_DEL or char in forbidden
+        for char in ref
     ):
         raise LoopError(EXIT_PRECONDITION, f"invalid {label} branch name")
     parts = ref.split("/")
@@ -1507,11 +1656,22 @@ def validate_git_ref(ref: str, label: str) -> None:
 
 
 def validate_changed_path(path: str) -> pathlib.PurePosixPath:
-    """Fail closed unless a changed-file path is a safe, repository-relative path."""
+    """Fail closed unless a changed-file path is a safe, repository-relative path.
+
+    Returns:
+        The validated path.
+
+    Raises:
+        LoopError: If `path` is empty, absolute, escapes the repository
+            root, or contains control characters or backslashes.
+    """
     if (
         not path
         or "\\" in path
-        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        or any(
+            ord(character) < ASCII_PRINTABLE_MIN or ord(character) == ASCII_DEL
+            for character in path
+        )
     ):
         raise LoopError(
             EXIT_PRECONDITION,
@@ -1559,14 +1719,18 @@ class ArtifactWriter:
             with contextlib.suppress(FileNotFoundError):
                 temporary.unlink()
 
-    def json(self, path: pathlib.Path, value: Any) -> None:
+    def json(self, path: pathlib.Path, value: JSONValue) -> None:
         """Redact and atomically write a value as pretty-printed JSON."""
         self.text(path, self.json_text(value))
 
-    def json_text(self, value: Any) -> str:
-        """Render a value as redacted, deterministic, pretty-printed JSON text."""
+    def json_text(self, value: JSONValue) -> str:
+        """Render a value as redacted, deterministic, pretty-printed JSON text.
 
-        def scrub(item: Any) -> Any:
+        Returns:
+            The redacted JSON text.
+        """
+
+        def scrub(item: JSONValue) -> JSONValue:
             if isinstance(item, str):
                 return self.runner.redact(item)
             if isinstance(item, list):
@@ -1646,7 +1810,12 @@ class ReviewLoop:
 
     @staticmethod
     def _restrict_private_tree(root: pathlib.Path) -> None:
-        """Tighten freshly created Git control files before accepting the tree."""
+        """Tighten freshly created Git control files before accepting the tree.
+
+        Raises:
+            LoopError: If any path under `root` cannot be inspected or its
+                permissions cannot be restricted.
+        """
         paths = [root, *root.rglob("*")]
         for path in paths:
             try:
@@ -1673,7 +1842,11 @@ class ReviewLoop:
     def _trusted_git_env(
         self, control_repo: pathlib.Path | None = None
     ) -> dict[str, str]:
-        """Build a Git environment that cannot inherit executable path controls."""
+        """Build a Git environment that cannot inherit executable path controls.
+
+        Returns:
+            The sanitized environment to run Git commands with.
+        """
         env = dict(self.base_env)
         for key in tuple(env):
             if key.startswith("GIT_") and key not in {
@@ -1771,12 +1944,20 @@ class ReviewLoop:
         if match is None:
             raise LoopError(EXIT_PRECONDITION, "Git author identity is invalid")
         name, email = match.groups()
-        if any("\x00" in value or len(value) > 1024 for value in (name, email)):
+        if any(
+            "\x00" in value or len(value) > GIT_IDENTITY_FIELD_MAX_LENGTH
+            for value in (name, email)
+        ):
             raise LoopError(EXIT_PRECONDITION, "Git author identity is unsafe")
         return name, email
 
     def _initialize_control_repository(self) -> None:
-        """Create or validate the private bare repository used by Git orchestration."""
+        """Create or validate the private bare repository used by Git orchestration.
+
+        Raises:
+            LoopError: If the author identity is missing or the control
+                repository cannot be initialized.
+        """
         if self._author_identity is None:
             raise LoopError(EXIT_PRECONDITION, "Git author identity is missing")
         if self._control_repo is not None:
@@ -1999,7 +2180,14 @@ class ReviewLoop:
         stdout_callback: Callable[[bytes], None] | None = None,
         redact_stdout: bool = True,
     ) -> CommandResult:
-        """Run a trusted-executable command scoped to the orchestrator's environment."""
+        """Run a trusted-executable command scoped to the orchestrator's environment.
+
+        Returns:
+            The captured result of the completed command.
+
+        Raises:
+            RuntimeError: If the resolved trusted-executable path is empty.
+        """
         argv = list(args)
         child_env: dict[str, str] | None = None
         name = argv[0] if argv else None
@@ -2010,7 +2198,9 @@ class ReviewLoop:
         # selected in place of the real tool (see trusted_executable()).
         resolved = self.runner.trusted_executable(name) if name else None
         if name == "git":
-            assert resolved is not None
+            if resolved is None:
+                msg = "internal invariant violated: resolved is None"
+                raise RuntimeError(msg)
             child_env = dict(env or self.base_env)
             child_env["LOOPR_GIT_CONFIG_EMPTY"] = ""
             child_env["LOOPR_GIT_CONFIG_FALSE"] = "false"
@@ -2088,9 +2278,15 @@ class ReviewLoop:
             ]).stdout
         except CommandError as exc:
             raise LoopError(EXIT_PRECONDITION, str(exc)) from exc
-        assert isinstance(root, str)
-        assert isinstance(origin, str)
-        assert isinstance(push_origin, str)
+        if not isinstance(root, str):
+            msg = f"expected str, got {type(root).__name__}"
+            raise TypeError(msg)
+        if not isinstance(origin, str):
+            msg = f"expected str, got {type(origin).__name__}"
+            raise TypeError(msg)
+        if not isinstance(push_origin, str):
+            msg = f"expected str, got {type(push_origin).__name__}"
+            raise TypeError(msg)
         self.repo_dir = pathlib.Path(root.strip()).resolve()
         origin_remote = origin.strip()
         push_remote = push_origin.strip()
@@ -2165,11 +2361,22 @@ class ReviewLoop:
             input_text=input_text,
             redact_stdout=redact_stdout,
         ).stdout
-        assert isinstance(result, str)
+        if not isinstance(result, str):
+            msg = f"expected str, got {type(result).__name__}"
+            raise TypeError(msg)
         return result
 
     def snapshot(self, *, reviewer: bool = False) -> PullRequest:
-        """Fetch and validate the current, canonical PR snapshot from GitHub."""
+        """Fetch and validate the current, canonical PR snapshot from GitHub.
+
+        Returns:
+            The current pull request snapshot.
+
+        Raises:
+            CommandError: If the GitHub CLI call fails.
+            LoopError: If the returned PR data is invalid or does not
+                identify an unambiguous single pull request.
+        """
         try:
             raw = self._gh(
                 ["pr", "view", self.pr_url, "--json", PR_FIELDS],
@@ -2264,7 +2471,15 @@ class ReviewLoop:
         return pathlib.Path.home() / ".oracle" / "browser-profile"
 
     def precheck(self) -> PullRequest:
-        """Validate dependencies, identity, and permissions before any model call."""
+        """Validate dependencies, identity, and permissions before any model call.
+
+        Returns:
+            The current snapshot of the pull request under review.
+
+        Raises:
+            LoopError: If a required tool is missing or too old, or the
+                caller's GitHub identity or permissions are insufficient.
+        """
         self.versions = {
             "python": sys.version.splitlines()[0],
             "node": self._version("node"),
@@ -2274,7 +2489,7 @@ class ReviewLoop:
             "codex": self._version("codex"),
         }
         node_match = re.search(r"v?(\d+)", self.versions["node"])
-        if not node_match or int(node_match.group(1)) < 24:
+        if not node_match or int(node_match.group(1)) < MIN_NODE_MAJOR_VERSION:
             raise LoopError(EXIT_PRECONDITION, "Node.js 24 or newer is required")
         try:
             oracle_help_result = self.command(
@@ -2398,6 +2613,12 @@ class ReviewLoop:
         by branch policy. That is a known limitation: a policy rejection at
         the real push is surfaced as a failure there rather than caught
         here.
+
+        Raises:
+            LoopError: If the head ref is missing, does not match
+                `pr.head_sha`, or a dry-run push is rejected.
+            TypeError: If a Git command unexpectedly returns bytes instead
+                of text.
         """
         try:
             remote_sha = self._control_command([
@@ -2406,7 +2627,9 @@ class ReviewLoop:
                 self.origin_url,
                 f"refs/heads/{pr.head_ref}",
             ]).stdout
-            assert isinstance(remote_sha, str)
+            if not isinstance(remote_sha, str):
+                msg = f"expected str, got {type(remote_sha).__name__}"
+                raise TypeError(msg)
             observed = remote_sha.split()[0] if remote_sha.split() else ""
             if observed != pr.head_sha:
                 raise LoopError(
@@ -2429,10 +2652,10 @@ class ReviewLoop:
             ) from exc
 
     def transition(
-        self, state: str, iteration: int | None = None, **details: Any
+        self, state: str, iteration: int | None = None, **details: JSONValue
     ) -> None:
         """Append a timestamped state-transition record to the audit log."""
-        event: dict[str, Any] = {
+        event: dict[str, JSONValue] = {
             "state": state,
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
@@ -2453,8 +2676,12 @@ class ReviewLoop:
                 )
 
     def _iteration_dir(self, iteration: int) -> pathlib.Path:
-        assert self.run_dir
-        assert self.writer
+        if self.run_dir is None:
+            msg = "internal invariant violated: run_dir is not initialized"
+            raise RuntimeError(msg)
+        if self.writer is None:
+            msg = "internal invariant violated: writer is not initialized"
+            raise RuntimeError(msg)
         path = self.run_dir / f"iteration-{iteration:02d}"
         path.mkdir(mode=0o700)
         self.writer.json(path / "versions.json", self.versions)
@@ -2469,7 +2696,18 @@ class ReviewLoop:
         return path
 
     def prepare_worktree(self, pr: PullRequest) -> pathlib.Path:
-        """Fetch the PR's exact head into a fresh, race-checked worktree."""
+        """Fetch the PR's exact head into a fresh, race-checked worktree.
+
+        Returns:
+            The path to the prepared worktree.
+
+        Raises:
+            LoopError: If the worktree path would escape the artifacts
+                directory or the PR's head cannot be raced-checked and
+                fetched cleanly.
+            TypeError: If a Git command unexpectedly returns bytes instead
+                of text.
+        """
         ref_root = f"refs/loopr/pr-{self.number}"
         branch = f"loopr/pr-{self.number}"
         worktree = self.artifacts_dir / "worktrees" / f"pr-{self.number}"
@@ -2504,7 +2742,9 @@ class ReviewLoop:
                 "rev-parse",
                 f"{ref_root}/head",
             ]).stdout
-            assert isinstance(fetched, str)
+            if not isinstance(fetched, str):
+                msg = f"expected str, got {type(fetched).__name__}"
+                raise TypeError(msg)
             if fetched.strip() != pr.head_sha:
                 raise LoopError(
                     EXIT_RACE, "remote head changed before worktree preparation"
@@ -2515,7 +2755,9 @@ class ReviewLoop:
                 "list",
                 "--porcelain",
             ]).stdout
-            assert isinstance(listing, str)
+            if not isinstance(listing, str):
+                msg = f"expected str, got {type(listing).__name__}"
+                raise TypeError(msg)
             registered = self._registered_worktrees(listing)
             target = str(worktree.resolve(strict=False))
             matching = [entry for entry in registered if entry[0] == target]
@@ -2539,7 +2781,9 @@ class ReviewLoop:
                     ["git", "status", "--porcelain", "--untracked-files=all"],
                     cwd=worktree,
                 ).stdout
-                assert isinstance(dirty, str)
+                if not isinstance(dirty, str):
+                    msg = f"expected str, got {type(dirty).__name__}"
+                    raise TypeError(msg)
                 if dirty:
                     raise LoopError(EXIT_PRECONDITION, "dedicated worktree is dirty")
                 self.command(["git", "reset", "--hard", pr.head_sha], cwd=worktree)
@@ -2597,7 +2841,10 @@ class ReviewLoop:
         pointer = worktree / ".git"
         try:
             metadata = pointer.lstat()
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > WORKTREE_GIT_CONTROL_FILE_MAX_BYTES
+            ):
                 raise LoopError(error_code, "worktree .git control file is unsafe")
             content = pointer.read_bytes()
         except OSError as exc:
@@ -2674,10 +2921,12 @@ class ReviewLoop:
             raise LoopError(
                 EXIT_PRECONDITION, f"cannot inspect changed file {path}: {exc}"
             ) from exc
-        assert isinstance(result, str)
+        if not isinstance(result, str):
+            msg = f"expected str, got {type(result).__name__}"
+            raise TypeError(msg)
         entry = result.split("\x00", 1)[0]
         fields = entry.split(" ", 2)
-        if len(fields) < 2:
+        if len(fields) < LS_TREE_MIN_FIELDS:
             raise LoopError(
                 EXIT_PRECONDITION, f"changed path {path} is missing from HEAD"
             )
@@ -2692,7 +2941,9 @@ class ReviewLoop:
             raise LoopError(
                 EXIT_PRECONDITION, f"cannot size changed file {path}: {exc}"
             ) from exc
-        assert isinstance(result, str)
+        if not isinstance(result, str):
+            msg = f"expected str, got {type(result).__name__}"
+            raise TypeError(msg)
         text = result.strip()
         if not text.isdigit():
             raise LoopError(
@@ -2752,7 +3003,9 @@ class ReviewLoop:
             raise LoopError(
                 EXIT_PRECONDITION, f"cannot derive changed-file status: {exc}"
             ) from exc
-        assert isinstance(result, str)
+        if not isinstance(result, str):
+            msg = f"expected str, got {type(result).__name__}"
+            raise TypeError(msg)
         fields = result.split("\x00")
         wanted = set(paths)
         statuses: dict[str, str] = {}
@@ -2847,11 +3100,13 @@ class ReviewLoop:
                 "redact review content",
             )
 
-    def collect_bundle(
-        self, pr: PullRequest, worktree: pathlib.Path, iteration_dir: pathlib.Path
-    ) -> ReviewBundle:
-        """Assemble the deterministic, credential-checked bundle sent to Oracle."""
-        assert self.writer
+    def _check_bundle_preconditions(self, pr: PullRequest) -> None:
+        """Confirm the PR is small enough and its snapshot is still current.
+
+        Raises:
+            LoopError: If the PR exceeds the file-count limit or its
+                snapshot is no longer current.
+        """
         if pr.changed_files > MAX_CHANGED_FILES or len(pr.files) > MAX_CHANGED_FILES:
             raise LoopError(
                 EXIT_PRECONDITION, "pull request exceeds the 100-file context limit"
@@ -2863,6 +3118,12 @@ class ReviewLoop:
                 "pull request base or head changed while context was collected",
             )
 
+    def _build_pr_metadata_json(self, pr: PullRequest) -> str:
+        """Render and credential-check the PR metadata attachment.
+
+        Returns:
+            The redacted, pretty-printed PR metadata JSON text.
+        """
         metadata = dict(pr.raw)
         metadata["reviewedHeadSha"] = pr.head_sha
         pr_json = (
@@ -2871,6 +3132,18 @@ class ReviewLoop:
         self._ensure_unredacted_review_content(
             pr_json, "pull request metadata", EXIT_PRECONDITION
         )
+        return pr_json
+
+    @staticmethod
+    def _collect_and_validate_paths(pr: PullRequest) -> list[str]:
+        """Validate and deduplicate the PR's GitHub-reported changed paths.
+
+        Returns:
+            The changed paths, sorted and deduplicated.
+
+        Raises:
+            LoopError: If a path is unsafe or GitHub reported a duplicate.
+        """
         changed = sorted(pr.files, key=lambda item: str(item.get("path", "")))
         paths: list[str] = []
         seen: set[str] = set()
@@ -2883,10 +3156,27 @@ class ReviewLoop:
                 )
             seen.add(path)
             paths.append(path)
-        statuses, removed_sources = self._derive_change_statuses(
-            worktree, pr.base_sha, pr.head_sha, paths
-        )
+        return paths
 
+    def _build_bundle_patch(
+        self,
+        worktree: pathlib.Path,
+        pr: PullRequest,
+        paths: list[str],
+        statuses: dict[str, str],
+        removed_sources: dict[str, str],
+    ) -> str:
+        """Collect the bounded, credential-checked PR patch as text.
+
+        Returns:
+            The decoded patch text (empty if no path needed a patch).
+
+        Raises:
+            LoopError: If the patch cannot be collected, exceeds the size
+                limit, fails a credential safety check, or is not UTF-8.
+            TypeError: If a Git command unexpectedly returns bytes instead
+                of text.
+        """
         patch_paths: list[str] = []
         for path in paths:
             if statuses[path] == "removed":
@@ -2926,7 +3216,9 @@ class ReviewLoop:
                 raise LoopError(
                     EXIT_PRECONDITION, f"cannot collect bounded PR patch: {exc}"
                 ) from exc
-            assert isinstance(patch_result, bytes)
+            if not isinstance(patch_result, bytes):
+                msg = f"expected bytes, got {type(patch_result).__name__}"
+                raise TypeError(msg)
             self._ensure_unredacted_review_content(
                 patch_result, "pull request patch", EXIT_PRECONDITION
             )
@@ -2935,11 +3227,266 @@ class ReviewLoop:
                     EXIT_PRECONDITION, "pull request patch exceeds the 2 MiB limit"
                 )
         try:
-            patch = patch_result.decode("utf-8")
+            return patch_result.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise LoopError(
                 EXIT_PRECONDITION, "pull request patch is not valid UTF-8"
             ) from exc
+
+    @staticmethod
+    def _bundle_removed_entry(
+        path: str, removed_sources: dict[str, str]
+    ) -> tuple[dict[str, Any], str]:
+        """Build the manifest entry and changed-file line for a removed path.
+
+        Returns:
+            The manifest entry and the changed-file line for `path`.
+        """
+        dest = removed_sources.get(path)
+        note = (
+            f"[no current content, renamed to {dest}]"
+            if dest
+            else "[no current content]"
+        )
+        entry = {
+            "path": path,
+            "status": "removed",
+            "attachment": None,
+            "kind": "deleted",
+            **({"renamedTo": dest} if dest else {}),
+        }
+        return entry, f"removed\t{path}\t{note}"
+
+    @staticmethod
+    def _bundle_gitlink_entry(path: str, status: str) -> tuple[dict[str, Any], str]:
+        """Build the manifest entry and changed-file line for a gitlink path.
+
+        Returns:
+            The manifest entry and the changed-file line for `path`.
+        """
+        entry = {
+            "path": path,
+            "status": status,
+            "attachment": None,
+            "kind": "gitlink",
+        }
+        return entry, f"{status}\t{path}\t[gitlink, no attached content]"
+
+    def _stream_bundle_blob(
+        self, worktree: pathlib.Path, path: str, size: int, retain_content: bool
+    ) -> tuple[bytearray | None, bool, bool]:
+        """Stream a blob's content, tracking its safety-relevant properties.
+
+        The incremental UTF-8 check runs over every streamed chunk
+        regardless of retention, so a huge blob that is too large to keep
+        in memory is still correctly classified as binary.
+
+        Returns:
+            A tuple of the retained bytes (None if not retaining), whether a
+            NUL byte was seen, and whether the content is valid UTF-8.
+
+        Raises:
+            LoopError: If the streamed byte count does not match `size` or
+                the content contains a known credential value.
+        """
+        retained = bytearray() if retain_content else None
+        byte_count = 0
+        contains_nul = False
+        valid_utf8 = True
+        secret_found = False
+        secret_tail = b""
+        max_secret_bytes = self.runner.max_secret_bytes()
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
+
+        def inspect_blob_chunk(
+            chunk: bytes,
+            retained_buffer: bytearray | None = retained,
+            blob_decoder: codecs.IncrementalDecoder = decoder,
+            secret_budget: int = max_secret_bytes,
+        ) -> None:
+            nonlocal byte_count, contains_nul, valid_utf8, secret_found, secret_tail
+            byte_count += len(chunk)
+            contains_nul = contains_nul or b"\x00" in chunk
+            if secret_budget:
+                window = secret_tail + chunk
+                secret_found = secret_found or self.runner.contains_secret(window)
+                secret_tail = window[-(secret_budget - 1) :]
+            if retained_buffer is not None:
+                retained_buffer.extend(chunk)
+            if valid_utf8:
+                try:
+                    blob_decoder.decode(chunk, final=False)
+                except UnicodeDecodeError:
+                    valid_utf8 = False
+
+        self._stream_git_blob(worktree, path, inspect_blob_chunk)
+        if byte_count != size:
+            raise LoopError(
+                EXIT_PRECONDITION,
+                f"streamed blob size changed for {path}: expected {size} bytes, "
+                f"received {byte_count}",
+            )
+        if secret_found:
+            raise LoopError(
+                EXIT_PRECONDITION,
+                f"changed file content for {path} contains a known credential "
+                "value; refusing to redact review content",
+            )
+        if valid_utf8:
+            try:
+                decoder.decode(b"", final=True)
+            except UnicodeDecodeError:
+                valid_utf8 = False
+        return retained, contains_nul, valid_utf8
+
+    def _bundle_blob_entry(
+        self,
+        worktree: pathlib.Path,
+        iteration_dir: pathlib.Path,
+        path: str,
+        status: str,
+        index: int,
+        total: int,
+    ) -> tuple[dict[str, Any], str, pathlib.Path | None, int]:
+        """Stream, classify, and (if text) attach a changed blob.
+
+        Returns:
+            The manifest entry, changed-file line, the attached file path
+            (None if binary), and the updated running attachment byte total.
+
+        Raises:
+            LoopError: If the streamed size or content is unsafe, or the
+                attachment total exceeds the context limit.
+            RuntimeError: If called with retained content unexpectedly unset.
+        """
+        size = self._git_blob_size(worktree, path)
+        retain_content = size <= MAX_ATTACHED_TEXT_BYTES - total
+        retained, contains_nul, valid_utf8 = self._stream_bundle_blob(
+            worktree, path, size, retain_content
+        )
+        is_binary = contains_nul or not valid_utf8
+        if is_binary:
+            entry = {
+                "path": path,
+                "status": status,
+                "attachment": None,
+                "kind": "binary",
+            }
+            return entry, f"{status}\t{path}\t[binary {size} bytes]", None, total
+        if not retain_content:
+            raise LoopError(
+                EXIT_PRECONDITION, "attached text exceeds the 20 MiB context limit"
+            )
+        if retained is None:
+            msg = "internal invariant violated: retained is None"
+            raise RuntimeError(msg)
+        try:
+            text = bytes(retained).decode("utf-8")
+        except UnicodeDecodeError:
+            raise LoopError(
+                EXIT_PRECONDITION, f"streamed blob became invalid UTF-8: {path}"
+            ) from None
+        safe_name = iteration_dir / "attachments" / f"{index:03d}.txt"
+        total += len(text.encode())
+        if total > MAX_ATTACHED_TEXT_BYTES:
+            raise LoopError(
+                EXIT_PRECONDITION, "attached text exceeds the 20 MiB context limit"
+            )
+        if self.writer is None:
+            msg = "internal invariant violated: writer is not initialized"
+            raise RuntimeError(msg)
+        self.writer.text(safe_name, text)
+        entry = {
+            "path": path,
+            "status": status,
+            "attachment": str(safe_name.relative_to(iteration_dir)),
+            "kind": "text",
+            "bytes": size,
+        }
+        return entry, f"{status}\t{path}\t[text {size} bytes]", safe_name, total
+
+    def _build_bundle_attachments(
+        self,
+        worktree: pathlib.Path,
+        iteration_dir: pathlib.Path,
+        paths: list[str],
+        statuses: dict[str, str],
+        removed_sources: dict[str, str],
+        total: int,
+    ) -> tuple[list[dict[str, Any]], list[pathlib.Path], str, int]:
+        """Classify and attach every changed, instruction, and removed path.
+
+        Returns:
+            The attachment manifest, the attached file paths, the joined
+            changed-file listing text, and the updated attachment byte total.
+
+        Raises:
+            LoopError: If a changed path is neither a blob nor a gitlink, or
+                an attachment fails a safety check.
+        """
+        manifest: list[dict[str, Any]] = []
+        attached: list[pathlib.Path] = []
+        seen: set[str] = set()
+        instruction_paths = self._instruction_paths(worktree, paths)
+        candidates = [(path, statuses.get(path, "instruction")) for path in paths]
+        candidates.extend(
+            (path, "instruction") for path in instruction_paths if path not in statuses
+        )
+        candidates.extend((source, "removed") for source in removed_sources)
+        changed_lines: list[str] = []
+        for index, (path, status) in enumerate(candidates, start=1):
+            if path in seen:
+                continue
+            seen.add(path)
+            if status == "removed":
+                entry, line = self._bundle_removed_entry(path, removed_sources)
+                manifest.append(entry)
+                changed_lines.append(line)
+                continue
+            object_type = self._git_object_type(worktree, path)
+            if object_type == "commit":
+                entry, line = self._bundle_gitlink_entry(path, status)
+                manifest.append(entry)
+                changed_lines.append(line)
+                continue
+            if object_type != "blob":
+                raise LoopError(
+                    EXIT_PRECONDITION, f"changed path {path} is not a blob or gitlink"
+                )
+            entry, line, attached_path, total = self._bundle_blob_entry(
+                worktree, iteration_dir, path, status, index, total
+            )
+            manifest.append(entry)
+            changed_lines.append(line)
+            if attached_path is not None:
+                attached.append(attached_path)
+        changed_text = "\n".join(changed_lines) + ("\n" if changed_lines else "")
+        return manifest, attached, changed_text, total
+
+    def collect_bundle(
+        self, pr: PullRequest, worktree: pathlib.Path, iteration_dir: pathlib.Path
+    ) -> ReviewBundle:
+        """Assemble the deterministic, credential-checked bundle sent to Oracle.
+
+        Returns:
+            The assembled review bundle.
+
+        Raises:
+            LoopError: If the PR exceeds the file-count limit, its snapshot
+                is no longer current, or an attachment fails a credential
+                safety check.
+            RuntimeError: If called before `self.writer` is initialized.
+        """
+        if self.writer is None:
+            msg = "internal invariant violated: writer is not initialized"
+            raise RuntimeError(msg)
+        self._check_bundle_preconditions(pr)
+        pr_json = self._build_pr_metadata_json(pr)
+        paths = self._collect_and_validate_paths(pr)
+        statuses, removed_sources = self._derive_change_statuses(
+            worktree, pr.base_sha, pr.head_sha, paths
+        )
+        patch = self._build_bundle_patch(worktree, pr, paths, statuses, removed_sources)
 
         context = (
             f"# Pull request review context\n\n"
@@ -2955,149 +3502,15 @@ class ReviewLoop:
             "context.md": context,
             "diff.patch": patch,
         }
-        attachments_dir = iteration_dir / "attachments"
-        manifest: list[dict[str, Any]] = []
-        attached: list[pathlib.Path] = []
         total = sum(len(value.encode()) for value in core.values())
         if total > MAX_ATTACHED_TEXT_BYTES:
             raise LoopError(
                 EXIT_PRECONDITION, "attached text exceeds the 20 MiB context limit"
             )
-        seen: set[str] = set()
 
-        instruction_paths = self._instruction_paths(worktree, paths)
-        candidates = [(path, statuses.get(path, "instruction")) for path in paths]
-        candidates.extend(
-            (path, "instruction") for path in instruction_paths if path not in statuses
+        manifest, attached, changed_text, total = self._build_bundle_attachments(
+            worktree, iteration_dir, paths, statuses, removed_sources, total
         )
-        candidates.extend((source, "removed") for source in removed_sources)
-        changed_lines: list[str] = []
-        for index, (path, status) in enumerate(candidates, start=1):
-            if path in seen:
-                continue
-            seen.add(path)
-            if status == "removed":
-                dest = removed_sources.get(path)
-                note = (
-                    f"[no current content, renamed to {dest}]"
-                    if dest
-                    else "[no current content]"
-                )
-                manifest.append({
-                    "path": path,
-                    "status": status,
-                    "attachment": None,
-                    "kind": "deleted",
-                    **({"renamedTo": dest} if dest else {}),
-                })
-                changed_lines.append(f"{status}\t{path}\t{note}")
-                continue
-            object_type = self._git_object_type(worktree, path)
-            if object_type == "commit":
-                manifest.append({
-                    "path": path,
-                    "status": status,
-                    "attachment": None,
-                    "kind": "gitlink",
-                })
-                changed_lines.append(
-                    f"{status}\t{path}\t[gitlink, no attached content]"
-                )
-                continue
-            if object_type != "blob":
-                raise LoopError(
-                    EXIT_PRECONDITION, f"changed path {path} is not a blob or gitlink"
-                )
-            size = self._git_blob_size(worktree, path)
-            retain_content = size <= MAX_ATTACHED_TEXT_BYTES - total
-            retained = bytearray() if retain_content else None
-            byte_count = 0
-            contains_nul = False
-            valid_utf8 = True
-            secret_found = False
-            secret_tail = b""
-            max_secret_bytes = self.runner.max_secret_bytes()
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
-
-            def inspect_blob_chunk(
-                chunk: bytes,
-                retained_buffer: bytearray | None = retained,
-                blob_decoder: codecs.IncrementalDecoder = decoder,
-                secret_budget: int = max_secret_bytes,
-            ) -> None:
-                nonlocal byte_count, contains_nul, valid_utf8, secret_found, secret_tail
-                byte_count += len(chunk)
-                contains_nul = contains_nul or b"\x00" in chunk
-                if secret_budget:
-                    window = secret_tail + chunk
-                    secret_found = secret_found or self.runner.contains_secret(window)
-                    secret_tail = window[-(secret_budget - 1) :]
-                if retained_buffer is not None:
-                    retained_buffer.extend(chunk)
-                if valid_utf8:
-                    try:
-                        blob_decoder.decode(chunk, final=False)
-                    except UnicodeDecodeError:
-                        valid_utf8 = False
-
-            self._stream_git_blob(worktree, path, inspect_blob_chunk)
-            if byte_count != size:
-                raise LoopError(
-                    EXIT_PRECONDITION,
-                    f"streamed blob size changed for {path}: expected {size} bytes, "
-                    f"received {byte_count}",
-                )
-            if secret_found:
-                raise LoopError(
-                    EXIT_PRECONDITION,
-                    f"changed file content for {path} contains a known credential "
-                    "value; refusing to redact review content",
-                )
-            try:
-                decoder.decode(b"", final=True)
-            except UnicodeDecodeError:
-                valid_utf8 = False
-            is_binary = contains_nul or not valid_utf8
-            text = ""
-            if not is_binary and not retain_content:
-                raise LoopError(
-                    EXIT_PRECONDITION, "attached text exceeds the 20 MiB context limit"
-                )
-            if not is_binary:
-                assert retained is not None
-                try:
-                    text = bytes(retained).decode("utf-8")
-                except UnicodeDecodeError:
-                    raise LoopError(
-                        EXIT_PRECONDITION, f"streamed blob became invalid UTF-8: {path}"
-                    ) from None
-            if is_binary:
-                manifest.append({
-                    "path": path,
-                    "status": status,
-                    "attachment": None,
-                    "kind": "binary",
-                })
-                changed_lines.append(f"{status}\t{path}\t[binary {size} bytes]")
-                continue
-            safe_name = attachments_dir / f"{index:03d}.txt"
-            total += len(text.encode())
-            if total > MAX_ATTACHED_TEXT_BYTES:
-                raise LoopError(
-                    EXIT_PRECONDITION, "attached text exceeds the 20 MiB context limit"
-                )
-            self.writer.text(safe_name, text)
-            attached.append(safe_name)
-            manifest.append({
-                "path": path,
-                "status": status,
-                "attachment": str(safe_name.relative_to(iteration_dir)),
-                "kind": "text",
-                "bytes": size,
-            })
-            changed_lines.append(f"{status}\t{path}\t[text {size} bytes]")
-
-        changed_text = "\n".join(changed_lines) + ("\n" if changed_lines else "")
         manifest_text = (
             json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
         )
@@ -3138,7 +3551,9 @@ class ReviewLoop:
             ).stdout
         except CommandError as exc:
             raise LoopError(EXIT_PRECONDITION, str(exc)) from exc
-        assert isinstance(result, str)
+        if not isinstance(result, str):
+            msg = f"expected str, got {type(result).__name__}"
+            raise TypeError(msg)
         tracked = set(result.splitlines())
         wanted = {
             path
@@ -3155,8 +3570,20 @@ class ReviewLoop:
         return sorted(wanted)
 
     def oracle_review(self, pr: PullRequest, bundle: ReviewBundle) -> OracleReview:
-        """Ask Oracle/ChatGPT for an independent review and parse its verdict."""
-        assert self.writer
+        """Ask Oracle/ChatGPT for an independent review and parse its verdict.
+
+        Returns:
+            The parsed and validated Oracle review.
+
+        Raises:
+            LoopError: If the Oracle CLI fails, its output cannot be parsed
+                as the one allowed JSON verdict, or the verdict fails a
+                safety check (e.g. a leaked credential value).
+            RuntimeError: If called before `self.writer` is initialized.
+        """
+        if self.writer is None:
+            msg = "internal invariant violated: writer is not initialized"
+            raise RuntimeError(msg)
         raw_path = bundle.iteration_dir / "oracle-raw.md"
         slug = f"loopr-pr-{pr.number}-{pr.head_sha[:12]}-{uuid.uuid4().hex[:8]}"
         command = [
@@ -3315,12 +3742,23 @@ class ReviewLoop:
         iteration: int,
         iteration_dir: pathlib.Path,
     ) -> int:
-        """Post the reviewer identity's verdict and return the review ID."""
-        assert self.writer
+        """Post the reviewer identity's verdict and return the review ID.
+
+        Returns:
+            The GitHub review ID of the posted verdict.
+
+        Raises:
+            LoopError: If the review body exceeds GitHub's size limit or the
+                PR snapshot is no longer current.
+            RuntimeError: If called before `self.writer` is initialized.
+        """
+        if self.writer is None:
+            msg = "internal invariant violated: writer is not initialized"
+            raise RuntimeError(msg)
         self._ensure_current_snapshot(pr)
         footer = f"\n\n---\nReviewed head: `{pr.head_sha}`\nIteration: {iteration}\n"
         body = review.review_body + footer
-        if len(body.encode()) > 65_000:
+        if len(body.encode()) > GITHUB_REVIEW_BODY_MAX_BYTES:
             raise LoopError(
                 EXIT_ORACLE, "review plus audit footer exceeds GitHub's body limit"
             )
@@ -3391,7 +3829,13 @@ class ReviewLoop:
     def verify_approval(
         self, expected_head_sha: str, expected_base_sha: str, review_id: int
     ) -> None:
-        """Confirm the posted approval still anchors to the reviewed PR snapshot."""
+        """Confirm the posted approval still anchors to the reviewed PR snapshot.
+
+        Raises:
+            CommandError: If the GitHub CLI call to re-check the PR fails.
+            LoopError: If the PR's base/head moved, it closed or went to
+                draft, or its review decision is not a confirmed approval.
+        """
         try:
             raw = self._gh(
                 [
@@ -3439,7 +3883,9 @@ class ReviewLoop:
             else self.command(["git", "worktree", "list", "--porcelain"])
         )
         listing = listing_result.stdout
-        assert isinstance(listing, str)
+        if not isinstance(listing, str):
+            msg = f"expected str, got {type(listing).__name__}"
+            raise TypeError(msg)
         states: dict[str, str] = {}
         primary = self.repo_dir.resolve()
         if primary != worktree.resolve():
@@ -3447,7 +3893,9 @@ class ReviewLoop:
                 ["git", "status", "--porcelain", "--untracked-files=all"],
                 cwd=primary,
             ).stdout
-            assert isinstance(primary_status, str)
+            if not isinstance(primary_status, str):
+                msg = f"expected str, got {type(primary_status).__name__}"
+                raise TypeError(msg)
             states[str(primary)] = primary_status
         for path, _branch in self._registered_worktrees(listing):
             candidate = pathlib.Path(path)
@@ -3461,7 +3909,9 @@ class ReviewLoop:
             status = self.command(
                 ["git", "status", "--porcelain", "--untracked-files=all"], cwd=candidate
             ).stdout
-            assert isinstance(status, str)
+            if not isinstance(status, str):
+                msg = f"expected str, got {type(status).__name__}"
+                raise TypeError(msg)
             states[path] = status
         return states
 
@@ -3477,7 +3927,7 @@ class ReviewLoop:
             worktree, followlinks=False, onerror=walk_error
         ):
             visited += len(directories) + len(files)
-            if visited > 100_000:
+            if visited > WORKTREE_ENTRY_VALIDATION_LIMIT:
                 raise LoopError(
                     EXIT_CODEX, "worktree entry count exceeds the validation limit"
                 )
@@ -3495,8 +3945,22 @@ class ReviewLoop:
     def run_codex(
         self, review: OracleReview, worktree: pathlib.Path, iteration_dir: pathlib.Path
     ) -> tuple[dict[str, str], set[str]]:
-        """Run Codex against the validated review and audit its scoped environment."""
-        assert self.writer
+        """Run Codex against the validated review and audit its scoped environment.
+
+        Returns:
+            A tuple of the outside-worktree file mtimes captured before the
+            run and the set of nested `.git` entries observed before the
+            run, both used by the caller to detect out-of-scope changes.
+
+        Raises:
+            TypeError: If `review` is not a fully validated `OracleReview`.
+            LoopError: If Codex cannot be run or exits in a way that fails
+                closed.
+            RuntimeError: If called before `self.writer` is initialized.
+        """
+        if self.writer is None:
+            msg = "internal invariant violated: writer is not initialized"
+            raise RuntimeError(msg)
         prompt = CODEX_GUARDRAILS.format(
             implementation_prompt=review.implementation_prompt.strip()
         )
@@ -3544,7 +4008,9 @@ class ReviewLoop:
                 )
             self.writer.text(final_path, partial)
             raise LoopError(EXIT_CODEX, str(exc)) from exc
-        assert isinstance(result.stdout, str)
+        if not isinstance(result.stdout, str):
+            msg = f"expected str, got {type(result.stdout).__name__}"
+            raise TypeError(msg)
         self.writer.text(events_path, result.stdout)
         if not result.stdout.strip():
             raise LoopError(EXIT_CODEX, "Codex JSONL event stream is empty")
@@ -3579,7 +4045,9 @@ class ReviewLoop:
                 timeout=180,
             )
             value = self._control_command(["git", "rev-parse", ref]).stdout
-            assert isinstance(value, str)
+            if not isinstance(value, str):
+                msg = f"expected str, got {type(value).__name__}"
+                raise TypeError(msg)
             return value.strip()
         except CommandError as exc:
             raise LoopError(EXIT_CODEX, str(exc)) from exc
@@ -3595,6 +4063,184 @@ class ReviewLoop:
         fields = str(result).split()
         return fields[0] if fields and SHA_RE.fullmatch(fields[0]) else ""
 
+    def _validate_worktree_untampered(self, worktree: pathlib.Path) -> None:
+        """Confirm Codex did not touch the worktree's control file or Git config.
+
+        Raises:
+            LoopError: If the worktree control file or repository
+                configuration no longer matches what was recorded.
+        """
+        expected_control = self._worktree_controls.get(str(worktree.resolve()))
+        if not expected_control or self._worktree_control(worktree) != expected_control:
+            raise LoopError(EXIT_CODEX, "Codex changed the worktree .git control file")
+        if not self._repository_controls_unchanged(worktree):
+            raise LoopError(EXIT_CODEX, "Codex changed repository Git configuration")
+
+    def _validate_worktree_identity(
+        self, pr: PullRequest, worktree: pathlib.Path
+    ) -> None:
+        """Confirm the worktree is still checked out on its dedicated branch.
+
+        Raises:
+            LoopError: If the worktree's HEAD or branch no longer matches
+                the PR's dedicated worktree branch.
+        """
+        head = self.command(["git", "rev-parse", "HEAD"], cwd=worktree).stdout
+        branch = self.command(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=worktree
+        ).stdout
+        if (
+            str(head).strip() != pr.head_sha
+            or str(branch).strip() != f"loopr/pr-{self.number}"
+        ):
+            raise LoopError(
+                EXIT_CODEX, "Codex changed the dedicated worktree HEAD or branch"
+            )
+
+    def _validate_index_is_clean_and_dirty(self, worktree: pathlib.Path) -> None:
+        """Confirm the index is untouched and Codex left implementation changes.
+
+        Raises:
+            LoopError: If the index is already staged or the worktree has
+                no unstaged changes.
+            TypeError: If a Git command unexpectedly returns bytes instead
+                of text.
+        """
+        cached = self.command(
+            ["git", "diff", "--cached", "--quiet"], cwd=worktree, check=False
+        )
+        if cached.returncode != 0:
+            raise LoopError(
+                EXIT_CODEX,
+                "Codex staged changes; the orchestrator alone owns the index",
+            )
+        status = self.command(
+            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=worktree
+        ).stdout
+        if not isinstance(status, str):
+            msg = f"expected str, got {type(status).__name__}"
+            raise TypeError(msg)
+        if not status.strip():
+            raise LoopError(EXIT_STALLED, "Codex produced no implementation changes")
+
+    def _validate_worktree_isolation(
+        self,
+        worktree: pathlib.Path,
+        outside_before: dict[str, str],
+        nested_before: set[str],
+    ) -> None:
+        """Confirm Codex stayed within its disposable worktree.
+
+        Raises:
+            LoopError: If a path outside the worktree changed or a nested
+                Git repository was introduced.
+        """
+        if self._outside_state(worktree) != outside_before:
+            raise LoopError(
+                EXIT_CODEX, "a worktree outside the disposable workspace changed"
+            )
+        if self._nested_git_entries(worktree) - nested_before:
+            raise LoopError(EXIT_CODEX, "Codex introduced a nested Git repository")
+
+    def _validate_gitmodules_unchanged(self, worktree: pathlib.Path) -> None:
+        """Confirm Codex did not introduce or alter a submodule URL.
+
+        Raises:
+            LoopError: If a `.gitmodules` diff or file contains a URL
+                change, or a new `.gitmodules` file is unsafe.
+            TypeError: If a Git command unexpectedly returns bytes instead
+                of text.
+        """
+        modules = self.command(
+            ["git", "diff", "--", ".gitmodules"], cwd=worktree
+        ).stdout
+        if not isinstance(modules, str):
+            msg = f"expected str, got {type(modules).__name__}"
+            raise TypeError(msg)
+        if any(
+            re.match(r"^[+-]\s*url\s*=", line, re.IGNORECASE)
+            for line in modules.splitlines()
+        ):
+            raise LoopError(EXIT_CODEX, "submodule URL changes are forbidden")
+        modules_path = worktree / ".gitmodules"
+        tracked_modules = self.command(
+            ["git", "ls-files", "--error-unmatch", ".gitmodules"],
+            cwd=worktree,
+            check=False,
+        )
+        if modules and modules_path.is_symlink():
+            raise LoopError(EXIT_CODEX, ".gitmodules cannot be changed into a symlink")
+        if tracked_modules.returncode != 0 and modules_path.exists():
+            if modules_path.is_symlink() or not modules_path.is_file():
+                raise LoopError(EXIT_CODEX, "new .gitmodules must be a regular file")
+            try:
+                if modules_path.stat().st_size > 1024 * 1024:
+                    raise LoopError(
+                        EXIT_CODEX, "new .gitmodules file exceeds the safety limit"
+                    )
+                new_modules = modules_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise LoopError(
+                    EXIT_CODEX, "new .gitmodules is not safe UTF-8 text"
+                ) from exc
+            if re.search(r"^\s*url\s*=", new_modules, re.IGNORECASE | re.MULTILINE):
+                raise LoopError(EXIT_CODEX, "submodule URL changes are forbidden")
+
+    def _validate_no_conflicts_and_remote_race(
+        self, pr: PullRequest, worktree: pathlib.Path
+    ) -> None:
+        """Confirm there are no unresolved conflicts and the remote is unchanged.
+
+        Raises:
+            LoopError: If Codex left unresolved merge conflicts, or the
+                remote base or head moved while Codex was working.
+        """
+        unmerged = self.command(
+            ["git", "diff", "--name-only", "--diff-filter=U"], cwd=worktree
+        ).stdout
+        if str(unmerged).strip():
+            raise LoopError(EXIT_CODEX, "Codex left unresolved merge conflicts")
+        self.command(["git", "diff", "--check"], cwd=worktree)
+        self._check_untracked_whitespace(worktree)
+        if (
+            self._remote_head(pr) != pr.head_sha
+            or self._remote_branch_sha(pr.base_ref) != pr.base_sha
+        ):
+            raise LoopError(
+                EXIT_RACE, "remote base or head changed while Codex was working"
+            )
+
+    def _stage_and_capture_patch(self, worktree: pathlib.Path) -> bytes:
+        """Stage Codex's changes and return the resulting binary patch.
+
+        Returns:
+            The staged, non-empty patch bytes.
+
+        Raises:
+            LoopError: If the staged patch is empty or fails a credential
+                safety check.
+            TypeError: If a Git command unexpectedly returns bytes instead
+                of text.
+        """
+        self.command(["git", "add", "--all", "--"], cwd=worktree)
+        self.command(["git", "diff", "--cached", "--check"], cwd=worktree)
+        patch_result = self.command(
+            ["git", "diff", "--cached", "--binary"],
+            cwd=worktree,
+            max_output_bytes=MAX_ATTACHED_TEXT_BYTES,
+            binary=True,
+            redact_stdout=False,
+        ).stdout
+        if not isinstance(patch_result, bytes):
+            msg = f"expected bytes, got {type(patch_result).__name__}"
+            raise TypeError(msg)
+        if not patch_result:
+            raise LoopError(
+                EXIT_STALLED, "Codex implementation normalized to an empty patch"
+            )
+        self._ensure_unredacted_review_content(patch_result, "staged patch", EXIT_CODEX)
+        return patch_result
+
     def validate_commit_push(
         self,
         pr: PullRequest,
@@ -3604,122 +4250,32 @@ class ReviewLoop:
         outside_before: dict[str, str],
         nested_before: set[str],
     ) -> str:
-        """Validate Codex's worktree changes, commit them, and push under lease."""
-        assert self.writer
-        try:
-            expected_control = self._worktree_controls.get(str(worktree.resolve()))
-            if (
-                not expected_control
-                or self._worktree_control(worktree) != expected_control
-            ):
-                raise LoopError(
-                    EXIT_CODEX, "Codex changed the worktree .git control file"
-                )
-            if not self._repository_controls_unchanged(worktree):
-                raise LoopError(
-                    EXIT_CODEX, "Codex changed repository Git configuration"
-                )
-            head = self.command(["git", "rev-parse", "HEAD"], cwd=worktree).stdout
-            branch = self.command(
-                ["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=worktree
-            ).stdout
-            if (
-                str(head).strip() != pr.head_sha
-                or str(branch).strip() != f"loopr/pr-{self.number}"
-            ):
-                raise LoopError(
-                    EXIT_CODEX, "Codex changed the dedicated worktree HEAD or branch"
-                )
-            cached = self.command(
-                ["git", "diff", "--cached", "--quiet"], cwd=worktree, check=False
-            )
-            if cached.returncode != 0:
-                raise LoopError(
-                    EXIT_CODEX,
-                    "Codex staged changes; the orchestrator alone owns the index",
-                )
-            status = self.command(
-                ["git", "status", "--porcelain", "--untracked-files=all"], cwd=worktree
-            ).stdout
-            assert isinstance(status, str)
-            if not status.strip():
-                raise LoopError(
-                    EXIT_STALLED, "Codex produced no implementation changes"
-                )
-            if self._outside_state(worktree) != outside_before:
-                raise LoopError(
-                    EXIT_CODEX, "a worktree outside the disposable workspace changed"
-                )
-            if self._nested_git_entries(worktree) - nested_before:
-                raise LoopError(EXIT_CODEX, "Codex introduced a nested Git repository")
-            modules = self.command(
-                ["git", "diff", "--", ".gitmodules"], cwd=worktree
-            ).stdout
-            assert isinstance(modules, str)
-            if any(
-                re.match(r"^[+-]\s*url\s*=", line, re.IGNORECASE)
-                for line in modules.splitlines()
-            ):
-                raise LoopError(EXIT_CODEX, "submodule URL changes are forbidden")
-            modules_path = worktree / ".gitmodules"
-            tracked_modules = self.command(
-                ["git", "ls-files", "--error-unmatch", ".gitmodules"],
-                cwd=worktree,
-                check=False,
-            )
-            if modules and modules_path.is_symlink():
-                raise LoopError(
-                    EXIT_CODEX, ".gitmodules cannot be changed into a symlink"
-                )
-            if tracked_modules.returncode != 0 and modules_path.exists():
-                if modules_path.is_symlink() or not modules_path.is_file():
-                    raise LoopError(
-                        EXIT_CODEX, "new .gitmodules must be a regular file"
-                    )
-                try:
-                    if modules_path.stat().st_size > 1024 * 1024:
-                        raise LoopError(
-                            EXIT_CODEX, "new .gitmodules file exceeds the safety limit"
-                        )
-                    new_modules = modules_path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError) as exc:
-                    raise LoopError(
-                        EXIT_CODEX, "new .gitmodules is not safe UTF-8 text"
-                    ) from exc
-                if re.search(r"^\s*url\s*=", new_modules, re.IGNORECASE | re.MULTILINE):
-                    raise LoopError(EXIT_CODEX, "submodule URL changes are forbidden")
-            unmerged = self.command(
-                ["git", "diff", "--name-only", "--diff-filter=U"], cwd=worktree
-            ).stdout
-            if str(unmerged).strip():
-                raise LoopError(EXIT_CODEX, "Codex left unresolved merge conflicts")
-            self.command(["git", "diff", "--check"], cwd=worktree)
-            self._check_untracked_whitespace(worktree)
-            if (
-                self._remote_head(pr) != pr.head_sha
-                or self._remote_branch_sha(pr.base_ref) != pr.base_sha
-            ):
-                raise LoopError(
-                    EXIT_RACE, "remote base or head changed while Codex was working"
-                )
+        """Validate Codex's worktree changes, commit them, and push under lease.
 
-            self.command(["git", "add", "--all", "--"], cwd=worktree)
-            self.command(["git", "diff", "--cached", "--check"], cwd=worktree)
-            patch_result = self.command(
-                ["git", "diff", "--cached", "--binary"],
-                cwd=worktree,
-                max_output_bytes=MAX_ATTACHED_TEXT_BYTES,
-                binary=True,
-                redact_stdout=False,
-            ).stdout
-            assert isinstance(patch_result, bytes)
-            if not patch_result:
-                raise LoopError(
-                    EXIT_STALLED, "Codex implementation normalized to an empty patch"
-                )
-            self._ensure_unredacted_review_content(
-                patch_result, "staged patch", EXIT_CODEX
-            )
+        Returns:
+            The SHA of the commit pushed to the PR head.
+
+        Raises:
+            CommandError: If a Git command needed to validate or push the
+                change fails.
+            LoopError: If Codex's changes violate a containment invariant
+                (e.g. touching the worktree's control file or unrelated
+                paths) or the push lease is lost.
+            RuntimeError: If called before `self.writer` is initialized.
+            TypeError: If a Git command unexpectedly returns bytes instead
+                of text.
+        """
+        if self.writer is None:
+            msg = "internal invariant violated: writer is not initialized"
+            raise RuntimeError(msg)
+        try:
+            self._validate_worktree_untampered(worktree)
+            self._validate_worktree_identity(pr, worktree)
+            self._validate_index_is_clean_and_dirty(worktree)
+            self._validate_worktree_isolation(worktree, outside_before, nested_before)
+            self._validate_gitmodules_unchanged(worktree)
+            self._validate_no_conflicts_and_remote_race(pr, worktree)
+            patch_result = self._stage_and_capture_patch(worktree)
             try:
                 patch = patch_result.decode("utf-8")
             except UnicodeDecodeError as exc:
@@ -3738,7 +4294,9 @@ class ReviewLoop:
                 cwd=worktree,
             )
             commit = self.command(["git", "rev-parse", "HEAD"], cwd=worktree).stdout
-            assert isinstance(commit, str)
+            if not isinstance(commit, str):
+                msg = f"expected str, got {type(commit).__name__}"
+                raise TypeError(msg)
             commit = commit.strip()
             try:
                 self._control_command(
@@ -3771,7 +4329,9 @@ class ReviewLoop:
             cwd=worktree,
             binary=True,
         ).stdout
-        assert isinstance(result, bytes)
+        if not isinstance(result, bytes):
+            msg = f"expected bytes, got {type(result).__name__}"
+            raise TypeError(msg)
         for raw_path in result.split(b"\0"):
             if not raw_path:
                 continue
@@ -3793,7 +4353,12 @@ class ReviewLoop:
                 )
 
     def wait_for_github_head(self, expected_sha: str) -> None:
-        """Poll GitHub until it reports the expected head SHA or times out."""
+        """Poll GitHub until it reports the expected head SHA or times out.
+
+        Raises:
+            LoopError: If GitHub does not report `expected_sha` before the
+                poll deadline.
+        """
         deadline = time.monotonic() + POLL_TIMEOUT
         while time.monotonic() < deadline:
             try:
@@ -3833,7 +4398,15 @@ class ReviewLoop:
                 )
 
     def execute(self) -> int:
-        """Run the review loop end to end and return its process exit code."""
+        """Run the review loop end to end and return its process exit code.
+
+        Returns:
+            The process exit code for the review loop.
+
+        Raises:
+            LoopError: If the current platform lacks fail-closed subprocess
+                containment.
+        """
         if not sys.platform.startswith("linux"):
             raise LoopError(
                 EXIT_PRECONDITION,
@@ -3852,7 +4425,9 @@ class ReviewLoop:
             initial = self.precheck()
             if self.args.dry_run:
                 return EXIT_OK
-            assert self.writer
+            if self.writer is None:
+                msg = "internal invariant violated: writer is not initialized"
+                raise RuntimeError(msg)
             timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             self.artifacts_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             self.run_dir = self.artifacts_dir / "runs" / f"pr-{self.number}-{timestamp}"
@@ -3924,7 +4499,11 @@ class ReviewLoop:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the command-line argument parser for the review loop."""
+    """Build the command-line argument parser for the review loop.
+
+    Returns:
+        The configured argument parser.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Run a fail-closed Oracle/ChatGPT/Codex review loop for one GitHub PR."
@@ -3961,7 +4540,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse arguments and run the review loop, returning its exit code."""
+    """Parse arguments and run the review loop, returning its exit code.
+
+    Returns:
+        The process exit code from running the review loop.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.max_iterations <= 0:
