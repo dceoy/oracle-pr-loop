@@ -13,6 +13,8 @@ import unittest
 from typing import Any
 from unittest import mock
 
+import pytest
+
 import review_loop as loopr
 
 SHA_A = "a" * 40
@@ -88,62 +90,60 @@ def args_for(repo: pathlib.Path, *, maximum: int = 5) -> argparse.Namespace:
 class OracleContractTests(unittest.TestCase):
     def test_valid_approval_fixture(self) -> None:
         parsed = loopr.parse_oracle_review(json.dumps(approval()), SHA_A)
-        self.assertEqual("APPROVE", parsed.verdict)
-        self.assertFalse(parsed.blocking_findings)
+        assert parsed.verdict == "APPROVE"
+        assert not parsed.blocking_findings
 
     def test_valid_request_changes_fixture(self) -> None:
         parsed = loopr.parse_oracle_review(json.dumps(request_changes()), SHA_A)
-        self.assertEqual("REQUEST_CHANGES", parsed.verdict)
-        self.assertTrue(parsed.implementation_prompt)
+        assert parsed.verdict == "REQUEST_CHANGES"
+        assert parsed.implementation_prompt
 
     def test_one_outer_json_fence_is_tolerated(self) -> None:
         raw = "```json\n" + json.dumps(approval()) + "\n```"
-        self.assertEqual("APPROVE", loopr.parse_oracle_review(raw, SHA_A).verdict)
+        assert loopr.parse_oracle_review(raw, SHA_A).verdict == "APPROVE"
 
     def test_malformed_and_trailing_output_fail(self) -> None:
         fixtures = ["not json", json.dumps(approval()) + " trailing", "{}\n{}"]
         for fixture in fixtures:
             with (
                 self.subTest(fixture=fixture),
-                self.assertRaises(loopr.LoopError) as caught,
+                pytest.raises(loopr.LoopError) as caught,
             ):
                 loopr.parse_oracle_review(fixture, SHA_A)
-            self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
+            assert caught.value.code == loopr.EXIT_ORACLE
 
     def test_stale_sha_fails(self) -> None:
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             loopr.parse_oracle_review(json.dumps(approval(SHA_B)), SHA_A)
-        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_ORACLE
 
     def test_verdict_invariants_are_enforced(self) -> None:
         bad = approval()
         bad["implementation_prompt"] = "make changes"
-        with self.assertRaises(loopr.LoopError):
+        with pytest.raises(loopr.LoopError):
             loopr.parse_oracle_review(json.dumps(bad), SHA_A)
         bad = request_changes()
         bad["blocking_findings"] = []
-        with self.assertRaises(loopr.LoopError):
+        with pytest.raises(loopr.LoopError):
             loopr.parse_oracle_review(json.dumps(bad), SHA_A)
 
 
 class InputAndIsolationTests(unittest.TestCase):
     def test_pr_resolution_is_canonical_and_unambiguous(self) -> None:
-        self.assertEqual(
-            ("acme/project", 7, "https://github.com/acme/project/pull/7"),
-            loopr.resolve_pr_target("7", "acme/project"),
+        assert loopr.resolve_pr_target("7", "acme/project") == (
+            "acme/project",
+            7,
+            "https://github.com/acme/project/pull/7",
         )
-        self.assertEqual(
-            ("acme/project", 8, "https://github.com/acme/project/pull/8"),
-            loopr.resolve_pr_target(
-                "https://github.com/acme/project/pull/8", "elsewhere/repo"
-            ),
-        )
+        assert loopr.resolve_pr_target(
+            "https://github.com/acme/project/pull/8", "elsewhere/repo"
+        ) == ("acme/project", 8, "https://github.com/acme/project/pull/8")
         for invalid in (
             "0",
             "https://evil.example/acme/project/pull/7",
             "https://github.com/a/b/pull/7?x=1",
         ):
-            with self.subTest(invalid=invalid), self.assertRaises(loopr.LoopError):
+            with self.subTest(invalid=invalid), pytest.raises(loopr.LoopError):
                 loopr.resolve_pr_target(invalid, "acme/project")
 
     def test_pr_url_comparison_is_case_insensitive(self) -> None:
@@ -163,19 +163,19 @@ class InputAndIsolationTests(unittest.TestCase):
                 "acme/project",
                 make_pr().raw | {"url": "https://github.com/other/project/pull/7"},
             )
-            with self.assertRaises(loopr.LoopError):
+            with pytest.raises(loopr.LoopError):
                 instance._validate_snapshot(mismatched)
 
     def test_remote_normalization_rejects_non_github_hosts(self) -> None:
-        self.assertEqual(
-            "acme/project",
-            loopr.normalize_github_repo("git@github.com:acme/project.git"),
+        assert (
+            loopr.normalize_github_repo("git@github.com:acme/project.git")
+            == "acme/project"
         )
-        self.assertEqual(
-            "acme/project",
-            loopr.normalize_github_repo("https://github.com/acme/project.git"),
+        assert (
+            loopr.normalize_github_repo("https://github.com/acme/project.git")
+            == "acme/project"
         )
-        with self.assertRaises(loopr.LoopError):
+        with pytest.raises(loopr.LoopError):
             loopr.normalize_github_repo("https://github.example/acme/project.git")
 
     def test_non_linux_platform_fails_before_bootstrap_or_subprocess(self) -> None:
@@ -187,10 +187,10 @@ class InputAndIsolationTests(unittest.TestCase):
             with (
                 mock.patch.object(loopr.sys, "platform", "darwin"),
                 mock.patch.object(instance, "_bootstrap") as bootstrap,
-                self.assertRaises(loopr.LoopError) as caught,
+                pytest.raises(loopr.LoopError) as caught,
             ):
                 instance.execute()
-            self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+            assert caught.value.code == loopr.EXIT_PRECONDITION
             bootstrap.assert_not_called()
 
     def test_model_environment_drops_credentials_and_ssh_agent(self) -> None:
@@ -207,17 +207,17 @@ class InputAndIsolationTests(unittest.TestCase):
         }
         env = loopr.CommandRunner(source).model_env()
         for key in source.keys() - {"PATH", "HOME"}:
-            self.assertNotIn(key, env)
+            assert key not in env
 
     def test_reviewer_token_is_scoped_and_redacted(self) -> None:
         runner = loopr.CommandRunner({
             "PATH": "/bin",
             "GH_REVIEW_TOKEN": "review-secret",
         })
-        self.assertNotIn("GH_REVIEW_TOKEN", runner.base_env())
+        assert "GH_REVIEW_TOKEN" not in runner.base_env()
         review_env = runner.reviewer_env("review-secret")
-        self.assertEqual("review-secret", review_env["GH_TOKEN"])
-        self.assertEqual("failure [REDACTED]", runner.redact("failure review-secret"))
+        assert review_env["GH_TOKEN"] == "review-secret"
+        assert runner.redact("failure review-secret") == "failure [REDACTED]"
 
     def test_gh_env_never_allowlists_an_enterprise_host_or_token(self) -> None:
         runner = loopr.CommandRunner({
@@ -225,21 +225,21 @@ class InputAndIsolationTests(unittest.TestCase):
             "GH_HOST": "github.example.com",
             "GH_ENTERPRISE_TOKEN": "enterprise-secret",
         })
-        self.assertNotIn("GH_HOST", runner.gh_env())
-        self.assertNotIn("GH_ENTERPRISE_TOKEN", runner.gh_env())
-        self.assertNotIn("GH_HOST", runner.reviewer_env("review-secret"))
-        self.assertNotIn("GH_ENTERPRISE_TOKEN", runner.reviewer_env("review-secret"))
+        assert "GH_HOST" not in runner.gh_env()
+        assert "GH_ENTERPRISE_TOKEN" not in runner.gh_env()
+        assert "GH_HOST" not in runner.reviewer_env("review-secret")
+        assert "GH_ENTERPRISE_TOKEN" not in runner.reviewer_env("review-secret")
 
     def test_same_pr_lock_rejects_second_process_and_releases(self) -> None:
         first = loopr.PrLock("acme/project", 7)
         second = loopr.PrLock("acme/project", 7)
         with first:
-            with self.assertRaises(loopr.LoopError) as caught:
+            with pytest.raises(loopr.LoopError) as caught:
                 second.__enter__()
-            self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+            assert caught.value.code == loopr.EXIT_PRECONDITION
         with second:
-            self.assertTrue(second.path.exists())
-        self.assertFalse(second.path.exists())
+            assert second.path.exists()
+        assert not second.path.exists()
 
     def test_arbiter_contention_fails_closed_within_bounded_timeout(self) -> None:
         if os.name != "posix":
@@ -259,11 +259,11 @@ class InputAndIsolationTests(unittest.TestCase):
             ):
                 contender = loopr.PrLock("acme/project", 4343)
                 start = time.monotonic()
-                with self.assertRaises(loopr.LoopError) as caught:
+                with pytest.raises(loopr.LoopError) as caught:
                     contender.__enter__()
                 elapsed = time.monotonic() - start
-            self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
-            self.assertLess(elapsed, 2.0)
+            assert caught.value.code == loopr.EXIT_PRECONDITION
+            assert elapsed < 2.0
         finally:
             fcntl.flock(holder_fd, fcntl.LOCK_UN)
             os.close(holder_fd)
@@ -296,15 +296,15 @@ class InputAndIsolationTests(unittest.TestCase):
             thread.join()
 
         successes = [index for index, r in enumerate(results) if r == "ok"]
-        self.assertEqual(1, len(successes))
+        assert len(successes) == 1
         for index, result in enumerate(results):
             if index not in successes:
-                self.assertIsInstance(result, loopr.LoopError)
+                assert isinstance(result, loopr.LoopError)
         winner = locks[successes[0]]
         recorded_lines = winner.path.read_text(encoding="ascii").splitlines()
-        self.assertEqual(str(os.getpid()), recorded_lines[0].strip())
+        assert str(os.getpid()) == recorded_lines[0].strip()
         winner.__exit__(None, None, None)
-        self.assertFalse(winner.path.exists())
+        assert not winner.path.exists()
 
     def test_stale_lock_with_pid_reused_by_a_different_process_is_reclaimed(
         self,
@@ -324,8 +324,8 @@ class InputAndIsolationTests(unittest.TestCase):
             f"{os.getpid()}\n{mismatched_start_time}\n", encoding="ascii"
         )
         with lock:
-            self.assertTrue(lock.path.exists())
-        self.assertFalse(lock.path.exists())
+            assert lock.path.exists()
+        assert not lock.path.exists()
 
     def test_pid_alive_treats_an_unreaped_zombie_as_not_the_lock_holder(
         self,
@@ -347,7 +347,7 @@ class InputAndIsolationTests(unittest.TestCase):
                     break
                 time.sleep(0.02)
             assert fields is not None and fields[0] == "Z", "child never zombified"
-            self.assertFalse(loopr.PrLock._pid_alive(child, fields[19]))
+            assert not loopr.PrLock._pid_alive(child, fields[19])
         finally:
             os.waitpid(child, 0)
 
@@ -364,14 +364,14 @@ class InputAndIsolationTests(unittest.TestCase):
         def recording_unlink(target: pathlib.Path, *args: Any, **kwargs: Any) -> None:
             nonlocal unlink_called
             unlink_called = True
-            with self.assertRaises(OSError):
+            with pytest.raises(OSError, match="Bad file descriptor"):
                 os.fstat(fd)
             original_unlink(target, *args, **kwargs)
 
         with mock.patch.object(pathlib.Path, "unlink", recording_unlink):
             lock.__exit__(None, None, None)
-        self.assertTrue(unlink_called)
-        self.assertFalse(lock.path.exists())
+        assert unlink_called
+        assert not lock.path.exists()
 
     def test_command_wrapper_can_truncate_bounded_stdout_without_raising(self) -> None:
         runner = loopr.CommandRunner({"PATH": os.environ["PATH"]})
@@ -384,8 +384,8 @@ class InputAndIsolationTests(unittest.TestCase):
                 check=False,
                 allow_stdout_truncation=True,
             )
-            self.assertEqual(128, len(result.stdout))
-            with self.assertRaises(loopr.CommandError) as bounded:
+            assert len(result.stdout) == 128
+            with pytest.raises(loopr.CommandError) as bounded:
                 runner.run(
                     [
                         "python3",
@@ -398,7 +398,7 @@ class InputAndIsolationTests(unittest.TestCase):
                     check=False,
                     allow_stdout_truncation=True,
                 )
-            self.assertIn("exceeded", str(bounded.exception))
+            assert "exceeded" in str(bounded.value)
 
     def test_command_wrapper_bounds_and_redacts_diagnostics(self) -> None:
         runner = loopr.CommandRunner({
@@ -411,8 +411,8 @@ class InputAndIsolationTests(unittest.TestCase):
                 cwd=pathlib.Path(temporary),
                 env=runner.base_env(),
             )
-            self.assertEqual("ok\n", result.stdout)
-            with self.assertRaises(loopr.CommandError) as caught:
+            assert result.stdout == "ok\n"
+            with pytest.raises(loopr.CommandError) as caught:
                 runner.run(
                     [
                         "python3",
@@ -422,15 +422,15 @@ class InputAndIsolationTests(unittest.TestCase):
                     cwd=pathlib.Path(temporary),
                     env=runner.base_env(),
                 )
-            self.assertNotIn("hidden-value", str(caught.exception))
-            with self.assertRaises(loopr.CommandError) as bounded:
+            assert "hidden-value" not in str(caught.value)
+            with pytest.raises(loopr.CommandError) as bounded:
                 runner.run(
                     ["python3", "-c", "print('x' * 10000)"],
                     cwd=pathlib.Path(temporary),
                     env=runner.base_env(),
                     max_output_bytes=128,
                 )
-            self.assertIn("exceeded 128 bytes", str(bounded.exception))
+            assert "exceeded 128 bytes" in str(bounded.value)
 
     def test_command_wrapper_kills_a_detached_grandchild_after_success(self) -> None:
         if os.name != "posix":
@@ -460,10 +460,10 @@ class InputAndIsolationTests(unittest.TestCase):
                 cwd=root,
                 env=runner.base_env(),
             )
-            self.assertEqual(0, result.returncode)
-            self.assertFalse(marker.exists())
+            assert result.returncode == 0
+            assert not marker.exists()
             time.sleep(1.5)
-            self.assertFalse(marker.exists())
+            assert not marker.exists()
 
     def test_command_wrapper_kills_a_grandchild_that_leaves_the_process_group(
         self,
@@ -499,10 +499,10 @@ class InputAndIsolationTests(unittest.TestCase):
                 cwd=root,
                 env=runner.base_env(),
             )
-            self.assertEqual(0, result.returncode)
-            self.assertFalse(marker.exists())
+            assert result.returncode == 0
+            assert not marker.exists()
             time.sleep(1.5)
-            self.assertFalse(marker.exists())
+            assert not marker.exists()
 
     def test_command_wrapper_kills_a_fast_double_forked_detached_grandchild(
         self,
@@ -533,10 +533,10 @@ class InputAndIsolationTests(unittest.TestCase):
                 env=runner.base_env(),
                 timeout=10,
             )
-            self.assertEqual(0, result.returncode)
-            self.assertFalse(marker.exists())
+            assert result.returncode == 0
+            assert not marker.exists()
             time.sleep(1.5)
-            self.assertFalse(marker.exists())
+            assert not marker.exists()
 
     def test_linux_supervisor_fails_before_exec_when_subreaper_setup_fails(
         self,
@@ -554,14 +554,14 @@ class InputAndIsolationTests(unittest.TestCase):
                     "_linux_enable_subreaper",
                     side_effect=OSError("forced subreaper failure"),
                 ),
-                self.assertRaises(loopr.CommandError),
+                pytest.raises(loopr.CommandError),
             ):
                 runner.run(
                     [sys.executable, "-c", payload, str(marker)],
                     cwd=root,
                     env=runner.base_env(),
                 )
-            self.assertFalse(marker.exists())
+            assert not marker.exists()
 
     def test_linux_supervisor_fails_before_exec_when_pidfds_are_unavailable(
         self,
@@ -579,14 +579,14 @@ class InputAndIsolationTests(unittest.TestCase):
                     "_linux_pidfd_open",
                     side_effect=OSError("forced pidfd failure"),
                 ),
-                self.assertRaises(loopr.CommandError),
+                pytest.raises(loopr.CommandError),
             ):
                 runner.run(
                     [sys.executable, "-c", payload, str(marker)],
                     cwd=root,
                     env=runner.base_env(),
                 )
-            self.assertFalse(marker.exists())
+            assert not marker.exists()
 
     def test_linux_kill_uses_a_stable_pidfd_handle(self) -> None:
         with (
@@ -598,7 +598,7 @@ class InputAndIsolationTests(unittest.TestCase):
             ) as send_signal,
             mock.patch.object(loopr.os, "close") as close,
         ):
-            self.assertTrue(loopr._linux_kill_pid(1234))
+            assert loopr._linux_kill_pid(1234)
         pidfd_open.assert_called_once_with(1234, 0)
         send_signal.assert_called_once_with(41, loopr.signal.SIGKILL, None, 0)
         close.assert_called_once_with(41)
@@ -617,11 +617,11 @@ class InputAndIsolationTests(unittest.TestCase):
             if write_fd >= 0:
                 os.close(write_fd)
             os.close(read_fd)
-        self.assertLessEqual(len(raw), loopr.LINUX_STATUS_MAX_BYTES)
+        assert len(raw) <= loopr.LINUX_STATUS_MAX_BYTES
         parsed = json.loads(raw)
-        self.assertEqual("error", parsed["type"])
-        self.assertLessEqual(
-            len(parsed["message"].encode("utf-8")), loopr.LINUX_STATUS_ERROR_BYTES + 3
+        assert parsed["type"] == "error"
+        assert (
+            len(parsed["message"].encode("utf-8")) <= loopr.LINUX_STATUS_ERROR_BYTES + 3
         )
 
     def test_run_codex_receives_the_sanitized_environment(self) -> None:
@@ -674,7 +674,7 @@ class InputAndIsolationTests(unittest.TestCase):
                 "NPM_TOKEN",
                 "SSH_AUTH_SOCK",
             ):
-                self.assertNotIn(key, captured)
+                assert key not in captured
 
 
 class ScriptedLoop(loopr.ReviewLoop):
@@ -687,7 +687,7 @@ class ScriptedLoop(loopr.ReviewLoop):
         no_op: bool = False,
         race: bool = False,
         author: str = "author",
-    ):
+    ) -> None:
         runner = loopr.CommandRunner({
             "PATH": os.environ["PATH"],
             "GH_REVIEW_TOKEN": "review-token",
@@ -860,17 +860,17 @@ class AcceptanceStateMachineTests(unittest.TestCase):
 
     def test_request_changes_codex_edit_push_then_approval(self) -> None:
         scripted, code, _ = self.run_script([request_changes(SHA_A), approval(SHA_B)])
-        self.assertEqual(loopr.EXIT_OK, code)
-        self.assertEqual(1, scripted.calls.count("codex"))
-        self.assertEqual(1, scripted.calls.count("push"))
-        self.assertIn("post:REQUEST_CHANGES", scripted.calls)
-        self.assertIn("post:APPROVE", scripted.calls)
+        assert code == loopr.EXIT_OK
+        assert scripted.calls.count("codex") == 1
+        assert scripted.calls.count("push") == 1
+        assert "post:REQUEST_CHANGES" in scripted.calls
+        assert "post:APPROVE" in scripted.calls
 
     def test_approval_exits_zero_without_codex(self) -> None:
         scripted, code, _ = self.run_script([approval()])
-        self.assertEqual(loopr.EXIT_OK, code)
-        self.assertNotIn("codex", scripted.calls)
-        self.assertEqual(1, scripted.calls.count("post:APPROVE"))
+        assert code == loopr.EXIT_OK
+        assert "codex" not in scripted.calls
+        assert scripted.calls.count("post:APPROVE") == 1
 
     def test_dry_run_validates_without_artifacts_models_or_writes(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -879,40 +879,40 @@ class AcceptanceStateMachineTests(unittest.TestCase):
         scripted = ScriptedLoop(root, [approval()])
         scripted.args.dry_run = True
         with mock.patch.object(loopr.sys, "platform", "linux"):
-            self.assertEqual(loopr.EXIT_OK, scripted.execute())
-        self.assertEqual(["precheck"], scripted.calls)
-        self.assertFalse((root / ".pr-review-loop").exists())
+            assert scripted.execute() == loopr.EXIT_OK
+        assert scripted.calls == ["precheck"]
+        assert not (root / ".pr-review-loop").exists()
 
     def test_no_op_codex_is_stalled_without_push(self) -> None:
         scripted, code, _ = self.run_script([request_changes()], no_op=True)
-        self.assertEqual(loopr.EXIT_STALLED, code)
-        self.assertEqual(1, scripted.calls.count("push"))
+        assert code == loopr.EXIT_STALLED
+        assert scripted.calls.count("push") == 1
 
     def test_concurrent_remote_update_aborts(self) -> None:
         _scripted, code, _ = self.run_script([request_changes()], race=True)
-        self.assertEqual(loopr.EXIT_RACE, code)
+        assert code == loopr.EXIT_RACE
 
     def test_malformed_oracle_output_causes_no_write_or_edit(self) -> None:
         malformed = approval()
         del malformed["schema_version"]
         scripted, code, _ = self.run_script([malformed])
-        self.assertEqual(loopr.EXIT_ORACLE, code)
-        self.assertFalse(any(call.startswith("post:") for call in scripted.calls))
-        self.assertNotIn("codex", scripted.calls)
-        self.assertNotIn("push", scripted.calls)
+        assert code == loopr.EXIT_ORACLE
+        assert not any(call.startswith("post:") for call in scripted.calls)
+        assert "codex" not in scripted.calls
+        assert "push" not in scripted.calls
 
     def test_maximum_iteration_is_exact_and_does_not_leave_unreviewed_patch(
         self,
     ) -> None:
         scripted, code, _ = self.run_script([request_changes()], maximum=1)
-        self.assertEqual(loopr.EXIT_STALLED, code)
-        self.assertEqual(1, scripted.calls.count("oracle"))
-        self.assertNotIn("codex", scripted.calls)
-        self.assertNotIn("push", scripted.calls)
+        assert code == loopr.EXIT_STALLED
+        assert scripted.calls.count("oracle") == 1
+        assert "codex" not in scripted.calls
+        assert "push" not in scripted.calls
 
     def test_complete_approval_artifacts_exist(self) -> None:
         scripted, code, _ = self.run_script([approval()])
-        self.assertEqual(loopr.EXIT_OK, code)
+        assert code == loopr.EXIT_OK
         run = scripted.run_dir
         assert run is not None
         iteration = run / "iteration-01"
@@ -932,18 +932,18 @@ class AcceptanceStateMachineTests(unittest.TestCase):
             "pushed-commit.txt",
             "versions.json",
         }
-        self.assertTrue(expected.issubset({path.name for path in iteration.iterdir()}))
-        self.assertTrue((run / "state.json").is_file())
-        self.assertTrue((run / "final.json").is_file())
+        assert expected.issubset({path.name for path in iteration.iterdir()})
+        assert (run / "state.json").is_file()
+        assert (run / "final.json").is_file()
         for path in run.rglob("*"):
             if path.is_file():
-                self.assertNotIn("review-token", path.read_text(encoding="utf-8"))
+                assert "review-token" not in path.read_text(encoding="utf-8")
 
     def test_self_review_rejected_before_posting(self) -> None:
         scripted, code, root = self.run_script([approval()], author="reviewer")
-        self.assertEqual(loopr.EXIT_PRECONDITION, code)
-        self.assertFalse(any(call.startswith("post:") for call in scripted.calls))
-        self.assertFalse((root / ".pr-review-loop").exists())
+        assert code == loopr.EXIT_PRECONDITION
+        assert not any(call.startswith("post:") for call in scripted.calls)
+        assert not (root / ".pr-review-loop").exists()
 
 
 class PatchSafetyTests(unittest.TestCase):
@@ -1013,7 +1013,7 @@ class PatchSafetyTests(unittest.TestCase):
         })
         instance = loopr.ReviewLoop(args_for(unset), runner)
         instance.repo_dir = unset
-        with self.assertRaises(loopr.CommandError):
+        with pytest.raises(loopr.CommandError):
             instance.command(["git", "var", "GIT_AUTHOR_IDENT"], cwd=unset)
         self.git(unset, "config", "user.name", "Loop Test")
         self.git(unset, "config", "user.email", "loop@example.test")
@@ -1034,9 +1034,9 @@ class PatchSafetyTests(unittest.TestCase):
         self.git(other, "add", "other.txt")
         self.git(other, "commit", "-m", "race")
         self.git(other, "push", "origin", "feature")
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop._check_pushable(self.pr)
-        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_PRECONDITION
 
     def test_pushability_precheck_cannot_predict_a_branch_policy_rejection(
         self,
@@ -1063,7 +1063,7 @@ class PatchSafetyTests(unittest.TestCase):
         (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
         iteration = self.loop.artifacts_dir / "policy-rejection"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -1072,7 +1072,7 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop._outside_state(self.worktree),
                 self.loop._nested_git_entries(self.worktree),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_CODEX
 
     def test_patch_validation_commits_with_hooks_disabled_and_pushes_exact_ref(
         self,
@@ -1099,8 +1099,8 @@ class PatchSafetyTests(unittest.TestCase):
         remote_sha = self.git(
             self.primary, "ls-remote", "origin", "refs/heads/feature"
         ).split()[0]
-        self.assertEqual(pushed, remote_sha)
-        self.assertTrue((iteration / "resulting.patch").read_text().strip())
+        assert pushed == remote_sha
+        assert (iteration / "resulting.patch").read_text().strip()
 
     def test_push_does_not_run_a_relative_receive_pack_in_the_worktree(self) -> None:
         # A receive-pack configured before the worktree controls are captured is
@@ -1123,8 +1123,8 @@ class PatchSafetyTests(unittest.TestCase):
             self.loop._outside_state(worktree),
             self.loop._nested_git_entries(worktree),
         )
-        self.assertTrue(pushed)
-        self.assertFalse(marker.exists())
+        assert pushed
+        assert not marker.exists()
 
     def test_authenticated_push_does_not_use_primary_checkout_helpers(self) -> None:
         marker = pathlib.Path(self.temporary.name) / "primary-receive-pack-fired"
@@ -1148,15 +1148,12 @@ class PatchSafetyTests(unittest.TestCase):
             self.loop._outside_state(self.worktree),
             self.loop._nested_git_entries(self.worktree),
         )
-        self.assertTrue(pushed)
-        self.assertFalse(marker.exists())
+        assert pushed
+        assert not marker.exists()
         common = pathlib.Path(self.git(self.primary, "rev-parse", "--git-common-dir"))
         if not common.is_absolute():
             common = self.primary / common
-        self.assertNotEqual(
-            pathlib.Path(self.loop._control_repo or "").resolve(),
-            common.resolve(),
-        )
+        assert pathlib.Path(self.loop._control_repo or "").resolve() != common.resolve()
 
     def test_git_wrapper_ignores_a_tracked_core_fsmonitor_hook(self) -> None:
         # core.hooksPath does not cover core.fsmonitor: it is a distinct
@@ -1168,7 +1165,7 @@ class PatchSafetyTests(unittest.TestCase):
         hook.chmod(0o755)
         self.git(self.worktree, "config", "core.fsmonitor", str(hook))
         self.loop.command(["git", "status"], cwd=self.worktree)
-        self.assertFalse(marker.exists())
+        assert not marker.exists()
 
     def test_git_wrapper_ignores_a_tracked_gitattributes_smudge_filter(self) -> None:
         # A filter.<name>.smudge driver can be configured on the repository
@@ -1192,8 +1189,8 @@ class PatchSafetyTests(unittest.TestCase):
         # wrapped call under test.
         marker.unlink(missing_ok=True)
         self.loop.command(["git", "checkout", "--", "app.py"], cwd=self.worktree)
-        self.assertFalse(marker.exists())
-        self.assertEqual("VALUE = 2\n", (self.worktree / "app.py").read_text())
+        assert not marker.exists()
+        assert (self.worktree / "app.py").read_text() == "VALUE = 2\n"
 
     def test_git_wrapper_ignores_a_tracked_gitattributes_clean_filter(self) -> None:
         # Same escape as the smudge case, but on the staging side: a
@@ -1215,7 +1212,7 @@ class PatchSafetyTests(unittest.TestCase):
         # marker so the assertion below checks only the wrapped call under test.
         marker.unlink(missing_ok=True)
         self.loop.command(["git", "add", "app.py"], cwd=self.worktree)
-        self.assertFalse(marker.exists())
+        assert not marker.exists()
 
     def test_git_wrapper_neutralizes_filters_without_resolving_worktree_cat(
         self,
@@ -1237,14 +1234,14 @@ class PatchSafetyTests(unittest.TestCase):
 
         self.loop.command(["git", "add", "app.py"], cwd=self.worktree)
 
-        self.assertFalse(marker.exists())
+        assert not marker.exists()
         indexed = subprocess.run(
             ["git", "show", ":app.py"],
             cwd=self.worktree,
             check=True,
             capture_output=True,
         ).stdout
-        self.assertEqual(b"VALUE = 9\n", indexed)
+        assert indexed == b"VALUE = 9\n"
 
     def test_command_wrapper_resolves_trusted_git_despite_relative_path_entry(
         self,
@@ -1265,8 +1262,8 @@ class PatchSafetyTests(unittest.TestCase):
 
         result = self.loop.command(["git", "status"], cwd=self.worktree)
 
-        self.assertEqual(0, result.returncode)
-        self.assertFalse(marker.exists())
+        assert result.returncode == 0
+        assert not marker.exists()
 
     def test_command_wrapper_shadow_reproduces_without_trusted_resolution(
         self,
@@ -1293,8 +1290,8 @@ class PatchSafetyTests(unittest.TestCase):
                 ["git", "status"], cwd=self.worktree, check=False
             )
 
-        self.assertEqual(1, result.returncode)
-        self.assertTrue(marker.exists())
+        assert result.returncode == 1
+        assert marker.exists()
 
     def test_command_wrapper_resolves_trusted_codex_despite_relative_path_entry(
         self,
@@ -1320,8 +1317,8 @@ class PatchSafetyTests(unittest.TestCase):
 
         result = self.loop.command(["codex", "--version"], cwd=self.worktree)
 
-        self.assertEqual(0, result.returncode)
-        self.assertFalse(marker.exists())
+        assert result.returncode == 0
+        assert not marker.exists()
 
     def test_trusted_executable_ignores_relative_and_empty_path_entries(self) -> None:
         trusted_dir = pathlib.Path(self.temporary.name) / "trusted-bin-generic"
@@ -1338,15 +1335,15 @@ class PatchSafetyTests(unittest.TestCase):
 
         resolved = runner.trusted_executable("loopr-example-tool")
 
-        self.assertEqual(str(trusted_tool), resolved)
+        assert str(trusted_tool) == resolved
         result = runner.run([resolved], cwd=self.worktree, env={"PATH": ""})
-        self.assertEqual(0, result.returncode)
+        assert result.returncode == 0
 
     def test_trusted_executable_fails_closed_without_an_absolute_path_entry(
         self,
     ) -> None:
         runner = loopr.CommandRunner({"PATH": f".{os.pathsep}"})
-        with self.assertRaises(loopr.CommandError):
+        with pytest.raises(loopr.CommandError):
             runner.trusted_executable("git")
 
     def test_content_filter_overrides_sort_and_deduplicate_dotted_drivers(self) -> None:
@@ -1364,35 +1361,32 @@ class PatchSafetyTests(unittest.TestCase):
         result = loopr.CommandResult(("git", "config"), 0, listing, "")
         with mock.patch.object(self.loop.runner, "run", return_value=result):
             overrides = self.loop._content_filter_overrides(self.worktree)
-        self.assertEqual(
-            [
-                "-c",
-                "filter.a.clean=",
-                "-c",
-                "filter.a.smudge=",
-                "-c",
-                "filter.a.process=",
-                "-c",
-                "filter.a.required=false",
-                "--config-env",
-                "filter.foo=bar.clean=LOOPR_GIT_CONFIG_EMPTY",
-                "--config-env",
-                "filter.foo=bar.smudge=LOOPR_GIT_CONFIG_EMPTY",
-                "--config-env",
-                "filter.foo=bar.process=LOOPR_GIT_CONFIG_EMPTY",
-                "--config-env",
-                "filter.foo=bar.required=LOOPR_GIT_CONFIG_FALSE",
-                "-c",
-                "filter.z.driver.clean=",
-                "-c",
-                "filter.z.driver.smudge=",
-                "-c",
-                "filter.z.driver.process=",
-                "-c",
-                "filter.z.driver.required=false",
-            ],
-            overrides,
-        )
+        assert overrides == [
+            "-c",
+            "filter.a.clean=",
+            "-c",
+            "filter.a.smudge=",
+            "-c",
+            "filter.a.process=",
+            "-c",
+            "filter.a.required=false",
+            "--config-env",
+            "filter.foo=bar.clean=LOOPR_GIT_CONFIG_EMPTY",
+            "--config-env",
+            "filter.foo=bar.smudge=LOOPR_GIT_CONFIG_EMPTY",
+            "--config-env",
+            "filter.foo=bar.process=LOOPR_GIT_CONFIG_EMPTY",
+            "--config-env",
+            "filter.foo=bar.required=LOOPR_GIT_CONFIG_FALSE",
+            "-c",
+            "filter.z.driver.clean=",
+            "-c",
+            "filter.z.driver.smudge=",
+            "-c",
+            "filter.z.driver.process=",
+            "-c",
+            "filter.z.driver.required=false",
+        ]
 
     def test_git_wrapper_ignores_a_clean_filter_with_equals_in_driver_name(
         self,
@@ -1416,15 +1410,15 @@ class PatchSafetyTests(unittest.TestCase):
         marker.unlink(missing_ok=True)
         result = self.loop.command(["git", "add", "app.py"], cwd=self.worktree)
 
-        self.assertEqual(0, result.returncode)
-        self.assertFalse(marker.exists())
+        assert result.returncode == 0
+        assert not marker.exists()
         indexed = subprocess.run(
             ["git", "show", ":app.py"],
             cwd=self.worktree,
             check=True,
             capture_output=True,
         ).stdout
-        self.assertEqual(original, indexed)
+        assert original == indexed
 
     def test_git_wrapper_ignores_a_configured_filter_process_driver(self) -> None:
         # filter.<name>.process takes priority over clean/smudge when defined;
@@ -1445,8 +1439,8 @@ class PatchSafetyTests(unittest.TestCase):
         (self.worktree / "app.py").unlink()
         marker.unlink(missing_ok=True)
         self.loop.command(["git", "checkout", "--", "app.py"], cwd=self.worktree)
-        self.assertFalse(marker.exists())
-        self.assertEqual("VALUE = 2\n", (self.worktree / "app.py").read_text())
+        assert not marker.exists()
+        assert (self.worktree / "app.py").read_text() == "VALUE = 2\n"
 
     def test_git_diff_ignores_a_configured_external_diff_command(self) -> None:
         # diff.external runs for every path with a working-tree change unless
@@ -1456,7 +1450,7 @@ class PatchSafetyTests(unittest.TestCase):
         self.git(self.primary, "config", "diff.external", f"sh -c \"touch '{marker}'\"")
         (self.worktree / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
         self.loop.command(["git", "diff"], cwd=self.worktree)
-        self.assertFalse(marker.exists())
+        assert not marker.exists()
 
     def _install_post_index_change_hook(self) -> pathlib.Path:
         git_dir = pathlib.Path(self.git(self.primary, "rev-parse", "--git-common-dir"))
@@ -1483,34 +1477,31 @@ class PatchSafetyTests(unittest.TestCase):
             self.loop._outside_state(self.worktree),
             self.loop._nested_git_entries(self.worktree),
         )
-        self.assertFalse(marker.exists())
+        assert not marker.exists()
 
     def test_worktree_reset_on_reuse_ignores_an_executable_post_index_change_hook(
         self,
     ) -> None:
         marker = self._install_post_index_change_hook()
         reused = self.loop.prepare_worktree(self.pr)
-        self.assertEqual(self.worktree, reused)
-        self.assertFalse(marker.exists())
+        assert self.worktree == reused
+        assert not marker.exists()
 
     def test_worktree_reuse_is_exact_and_dirty_state_fails_closed(self) -> None:
         primary_before = self.git(
             self.primary, "status", "--porcelain", "--untracked-files=all"
         )
         reused = self.loop.prepare_worktree(self.pr)
-        self.assertEqual(self.worktree, reused)
-        self.assertEqual(self.sha, self.git(reused, "rev-parse", "HEAD"))
-        self.assertFalse(
-            self.git(reused, "status", "--porcelain", "--untracked-files=all")
-        )
-        self.assertEqual(
-            primary_before,
-            self.git(self.primary, "status", "--porcelain", "--untracked-files=all"),
+        assert self.worktree == reused
+        assert self.sha == self.git(reused, "rev-parse", "HEAD")
+        assert not self.git(reused, "status", "--porcelain", "--untracked-files=all")
+        assert primary_before == self.git(
+            self.primary, "status", "--porcelain", "--untracked-files=all"
         )
         (reused / "dirty.txt").write_text("do not carry me\n", encoding="utf-8")
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.prepare_worktree(self.pr)
-        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_PRECONDITION
 
     def test_bundle_contains_complete_text_and_explicit_binary_entries(self) -> None:
         self.git(self.primary, "checkout", "feature")
@@ -1545,13 +1536,13 @@ class PatchSafetyTests(unittest.TestCase):
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("binary", by_path["binary.dat"]["kind"])
+        assert by_path["binary.dat"]["kind"] == "binary"
         agents_attachment = iteration / by_path["AGENTS.md"]["attachment"]
-        self.assertEqual(
-            "Follow focused tests.\n", agents_attachment.read_text(encoding="utf-8")
+        assert (
+            agents_attachment.read_text(encoding="utf-8") == "Follow focused tests.\n"
         )
-        self.assertIn(iteration / "diff.patch", bundle.attachments)
-        self.assertIn("binary 3 bytes", (iteration / "changed-files.txt").read_text())
+        assert iteration / "diff.patch" in bundle.attachments
+        assert "binary 3 bytes" in (iteration / "changed-files.txt").read_text()
 
     def test_bundle_uses_captured_shas_after_a_force_push_back(self) -> None:
         # The remote moves from captured A to B and back to A while context is
@@ -1591,8 +1582,8 @@ class PatchSafetyTests(unittest.TestCase):
             self.loop.collect_bundle(self.pr, self.worktree, iteration)
         patch = (iteration / "diff.patch").read_text(encoding="utf-8")
         gh_call.assert_not_called()
-        self.assertIn("+VALUE = 2", patch)
-        self.assertNotIn("+VALUE = 99", patch)
+        assert "+VALUE = 2" in patch
+        assert "+VALUE = 99" not in patch
 
     def test_bundle_classifies_an_oversized_blob_with_late_invalid_utf8_as_binary_without_full_buffering(
         self,
@@ -1647,17 +1638,17 @@ class PatchSafetyTests(unittest.TestCase):
             mock.patch.object(self.loop, "snapshot", return_value=pr),
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
-        self.assertGreater(len(chunk_sizes), 1)
-        self.assertLessEqual(max(chunk_sizes), loopr.COMMAND_STREAM_CHUNK_BYTES)
+        assert len(chunk_sizes) > 1
+        assert max(chunk_sizes) <= loopr.COMMAND_STREAM_CHUNK_BYTES
         manifest = json.loads(
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("binary", by_path["large.bin"]["kind"])
-        self.assertIsNone(by_path["large.bin"]["attachment"])
-        self.assertIn(
-            f"binary {len(large_binary)} bytes",
-            (iteration / "changed-files.txt").read_text(),
+        assert by_path["large.bin"]["kind"] == "binary"
+        assert by_path["large.bin"]["attachment"] is None
+        assert (
+            f"binary {len(large_binary)} bytes"
+            in (iteration / "changed-files.txt").read_text()
         )
 
     def test_bundle_rejects_oversized_valid_utf8_after_streaming_classification(
@@ -1708,12 +1699,12 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop, "_gh", return_value="diff --git a/large.txt b/large.txt\n"
             ),
             mock.patch.object(self.loop, "snapshot", return_value=pr),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
-        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
-        self.assertGreater(len(chunk_sizes), 1)
-        self.assertLessEqual(max(chunk_sizes), loopr.COMMAND_STREAM_CHUNK_BYTES)
+        assert caught.value.code == loopr.EXIT_PRECONDITION
+        assert len(chunk_sizes) > 1
+        assert max(chunk_sizes) <= loopr.COMMAND_STREAM_CHUNK_BYTES
 
     def test_bundle_does_not_treat_a_split_utf8_codepoint_as_binary(self) -> None:
         self.git(self.primary, "checkout", "feature")
@@ -1742,9 +1733,9 @@ class PatchSafetyTests(unittest.TestCase):
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
         entry = next(item for item in manifest if item["path"] == "split.txt")
-        self.assertEqual("text", entry["kind"])
+        assert entry["kind"] == "text"
         attachment = iteration / entry["attachment"]
-        self.assertEqual(content.decode("utf-8"), attachment.read_text())
+        assert content.decode("utf-8") == attachment.read_text()
 
     def test_bundle_marks_a_deleted_file_from_change_type_without_reading_it(
         self,
@@ -1774,16 +1765,11 @@ class PatchSafetyTests(unittest.TestCase):
         manifest = json.loads(
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
-        self.assertIn(
-            "-VALUE = 1",
-            (iteration / "diff.patch").read_text(encoding="utf-8"),
-        )
+        assert "-VALUE = 1" in (iteration / "diff.patch").read_text(encoding="utf-8")
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("deleted", by_path["app.py"]["kind"])
-        self.assertIsNone(by_path["app.py"]["attachment"])
-        self.assertIn(
-            "no current content", (iteration / "changed-files.txt").read_text()
-        )
+        assert by_path["app.py"]["kind"] == "deleted"
+        assert by_path["app.py"]["attachment"] is None
+        assert "no current content" in (iteration / "changed-files.txt").read_text()
 
     def test_bundle_marks_a_deleted_file_without_a_gh_change_type_field(
         self,
@@ -1811,12 +1797,9 @@ class PatchSafetyTests(unittest.TestCase):
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("deleted", by_path["app.py"]["kind"])
-        self.assertIsNone(by_path["app.py"]["attachment"])
-        self.assertIn(
-            "-VALUE = 1",
-            (iteration / "diff.patch").read_text(encoding="utf-8"),
-        )
+        assert by_path["app.py"]["kind"] == "deleted"
+        assert by_path["app.py"]["attachment"] is None
+        assert "-VALUE = 1" in (iteration / "diff.patch").read_text(encoding="utf-8")
 
     def test_bundle_preserves_the_source_path_of_a_pure_rename(self) -> None:
         # `gh pr view --json files` reports only the current (post-rename)
@@ -1845,22 +1828,19 @@ class PatchSafetyTests(unittest.TestCase):
         with mock.patch.object(self.loop, "snapshot", return_value=pr):
             self.loop.collect_bundle(pr, worktree, iteration)
         patch = (iteration / "diff.patch").read_text(encoding="utf-8")
-        self.assertIn("rename from app.py", patch)
-        self.assertIn("rename to renamed.py", patch)
+        assert "rename from app.py" in patch
+        assert "rename to renamed.py" in patch
         manifest = json.loads(
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("deleted", by_path["app.py"]["kind"])
-        self.assertEqual("renamed.py", by_path["app.py"]["renamedTo"])
-        self.assertEqual(
-            "VALUE = 2\n",
-            (iteration / by_path["renamed.py"]["attachment"]).read_text(),
-        )
+        assert by_path["app.py"]["kind"] == "deleted"
+        assert by_path["app.py"]["renamedTo"] == "renamed.py"
+        assert (
+            iteration / by_path["renamed.py"]["attachment"]
+        ).read_text() == "VALUE = 2\n"
         changed_text = (iteration / "changed-files.txt").read_text()
-        self.assertIn(
-            "app.py\t[no current content, renamed to renamed.py]", changed_text
-        )
+        assert "app.py\t[no current content, renamed to renamed.py]" in changed_text
 
     def test_bundle_preserves_rename_source_below_similarity_threshold(self) -> None:
         # When the rewrite is heavy enough that Git's similarity heuristic
@@ -1889,21 +1869,20 @@ class PatchSafetyTests(unittest.TestCase):
         with mock.patch.object(self.loop, "snapshot", return_value=pr):
             self.loop.collect_bundle(pr, worktree, iteration)
         patch = (iteration / "diff.patch").read_text(encoding="utf-8")
-        self.assertNotIn("rename from", patch)
-        self.assertIn("-VALUE = 2", patch)
-        self.assertIn("+VALUE = 9", patch)
+        assert "rename from" not in patch
+        assert "-VALUE = 2" in patch
+        assert "+VALUE = 9" in patch
         manifest = json.loads(
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("deleted", by_path["app.py"]["kind"])
-        self.assertNotIn("renamedTo", by_path["app.py"])
-        self.assertEqual(
-            "VALUE = 9\n",
-            (iteration / by_path["renamed.py"]["attachment"]).read_text(),
-        )
+        assert by_path["app.py"]["kind"] == "deleted"
+        assert "renamedTo" not in by_path["app.py"]
+        assert (
+            iteration / by_path["renamed.py"]["attachment"]
+        ).read_text() == "VALUE = 9\n"
         changed_text = (iteration / "changed-files.txt").read_text()
-        self.assertIn("app.py\t[no current content]", changed_text)
+        assert "app.py\t[no current content]" in changed_text
 
     def test_bundle_rejects_a_rename_source_with_an_embedded_control_character(
         self,
@@ -1948,10 +1927,10 @@ class PatchSafetyTests(unittest.TestCase):
         iteration.mkdir()
         with (
             mock.patch.object(self.loop, "snapshot", return_value=pr),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
-        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_PRECONDITION
 
     def test_bundle_treats_pathspec_magic_filenames_as_literal(self) -> None:
         # A leading `:(...)` is parsed as a pathspec magic signature, and
@@ -1989,10 +1968,10 @@ class PatchSafetyTests(unittest.TestCase):
         )
         by_path = {entry["path"]: entry for entry in manifest}
         for name in magic_names:
-            self.assertEqual("text", by_path[name]["kind"])
-            self.assertEqual(
-                f"content for {name}\n",
-                (iteration / by_path[name]["attachment"]).read_text(),
+            assert by_path[name]["kind"] == "text"
+            assert (
+                f"content for {name}\n"
+                == (iteration / by_path[name]["attachment"]).read_text()
             )
 
     def test_bundle_does_not_leak_unrelated_changes_via_a_wildcard_filename(
@@ -2030,9 +2009,9 @@ class PatchSafetyTests(unittest.TestCase):
         with mock.patch.object(self.loop, "snapshot", return_value=pr):
             self.loop.collect_bundle(pr, worktree, iteration)
         patch = (iteration / "diff.patch").read_text(encoding="utf-8")
-        self.assertIn("wildcard content", patch)
-        self.assertNotIn("app.py", patch)
-        self.assertNotIn("VALUE = 3", patch)
+        assert "wildcard content" in patch
+        assert "app.py" not in patch
+        assert "VALUE = 3" not in patch
 
     def test_bundle_fails_closed_before_oracle_on_known_credential_in_patch(
         self,
@@ -2053,12 +2032,12 @@ class PatchSafetyTests(unittest.TestCase):
         iteration.mkdir()
         with (
             mock.patch.object(self.loop, "snapshot", return_value=pr),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
-        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
-        self.assertNotIn(secret, str(caught.exception))
-        self.assertFalse((iteration / "diff.patch").exists())
+        assert caught.value.code == loopr.EXIT_PRECONDITION
+        assert secret not in str(caught.value)
+        assert not (iteration / "diff.patch").exists()
 
     def test_bundle_detects_a_credential_split_across_blob_chunks(self) -> None:
         secret = "chunk-boundary-secret"
@@ -2086,7 +2065,7 @@ class PatchSafetyTests(unittest.TestCase):
             return original_control(args, **kwargs)
 
         def split_blob(_worktree: pathlib.Path, path: str, on_chunk: object) -> None:
-            self.assertEqual("app.py", path)
+            assert path == "app.py"
             assert callable(on_chunk)
             on_chunk(secret[:7].encode())
             on_chunk((secret[7:] + "\n").encode())
@@ -2095,11 +2074,11 @@ class PatchSafetyTests(unittest.TestCase):
             mock.patch.object(self.loop, "_control_command", side_effect=fake_control),
             mock.patch.object(self.loop, "_stream_git_blob", side_effect=split_blob),
             mock.patch.object(self.loop, "snapshot", return_value=pr),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.collect_bundle(pr, worktree, iteration)
-        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
-        self.assertNotIn(secret, str(caught.exception))
+        assert caught.value.code == loopr.EXIT_PRECONDITION
+        assert secret not in str(caught.value)
 
     def test_staged_patch_collision_fails_before_commit(self) -> None:
         secret = "staged-collision-secret"
@@ -2108,7 +2087,7 @@ class PatchSafetyTests(unittest.TestCase):
         iteration = self.loop.artifacts_dir / "credential-staged"
         iteration.mkdir()
         before = self.git(self.worktree, "rev-parse", "HEAD")
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2117,10 +2096,10 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop._outside_state(self.worktree),
                 self.loop._nested_git_entries(self.worktree),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
-        self.assertNotIn(secret, str(caught.exception))
-        self.assertEqual(before, self.git(self.worktree, "rev-parse", "HEAD"))
-        self.assertFalse((iteration / "resulting.patch").exists())
+        assert caught.value.code == loopr.EXIT_CODEX
+        assert secret not in str(caught.value)
+        assert before == self.git(self.worktree, "rev-parse", "HEAD")
+        assert not (iteration / "resulting.patch").exists()
 
     def test_oracle_output_collision_is_withheld_without_redaction(self) -> None:
         secret = "oracle-collision-secret"
@@ -2138,15 +2117,15 @@ class PatchSafetyTests(unittest.TestCase):
 
         with (
             mock.patch.object(self.loop, "command", side_effect=fake_oracle),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.oracle_review(
                 self.pr,
                 loopr.ReviewBundle(iteration, ()),
             )
-        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
-        self.assertNotIn(secret, str(caught.exception))
-        self.assertNotIn(secret, (iteration / "oracle-raw.md").read_text())
+        assert caught.value.code == loopr.EXIT_ORACLE
+        assert secret not in str(caught.value)
+        assert secret not in (iteration / "oracle-raw.md").read_text()
 
     def test_failed_oracle_output_collision_is_withheld_without_redaction(self) -> None:
         secret = "oracle-failure-collision-secret"
@@ -2157,19 +2136,20 @@ class PatchSafetyTests(unittest.TestCase):
         def failing_oracle(command: list[str], **kwargs: object) -> loopr.CommandResult:
             output = pathlib.Path(command[command.index("--write-output") + 1])
             output.write_text(f"partial {secret}\n", encoding="utf-8")
-            raise loopr.CommandError("oracle failed")
+            msg = "oracle failed"
+            raise loopr.CommandError(msg)
 
         with (
             mock.patch.object(self.loop, "command", side_effect=failing_oracle),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.oracle_review(
                 self.pr,
                 loopr.ReviewBundle(iteration, ()),
             )
-        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
-        self.assertNotIn(secret, str(caught.exception))
-        self.assertNotIn(secret, (iteration / "oracle-raw.md").read_text())
+        assert caught.value.code == loopr.EXIT_ORACLE
+        assert secret not in str(caught.value)
+        assert secret not in (iteration / "oracle-raw.md").read_text()
 
     def test_oracle_stdout_collision_is_withheld_without_redaction(self) -> None:
         secret = "oracle-stdout-collision-secret"
@@ -2182,15 +2162,15 @@ class PatchSafetyTests(unittest.TestCase):
 
         with (
             mock.patch.object(self.loop, "command", side_effect=noisy_oracle),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.oracle_review(
                 self.pr,
                 loopr.ReviewBundle(iteration, ()),
             )
-        self.assertEqual(loopr.EXIT_ORACLE, caught.exception.code)
-        self.assertNotIn(secret, str(caught.exception))
-        self.assertNotIn(secret, (iteration / "oracle-raw.md").read_text())
+        assert caught.value.code == loopr.EXIT_ORACLE
+        assert secret not in str(caught.value)
+        assert secret not in (iteration / "oracle-raw.md").read_text()
 
     def test_bundle_marks_a_submodule_gitlink_without_attaching_content(self) -> None:
         root = pathlib.Path(self.temporary.name)
@@ -2241,8 +2221,8 @@ class PatchSafetyTests(unittest.TestCase):
             (iteration / "attachments.json").read_text(encoding="utf-8")
         )
         by_path = {entry["path"]: entry for entry in manifest}
-        self.assertEqual("gitlink", by_path["vendor/lib"]["kind"])
-        self.assertIsNone(by_path["vendor/lib"]["attachment"])
+        assert by_path["vendor/lib"]["kind"] == "gitlink"
+        assert by_path["vendor/lib"]["attachment"] is None
 
     def test_bundle_rejects_more_than_one_hundred_files_before_diff(self) -> None:
         raw = dict(self.pr.raw)
@@ -2253,10 +2233,10 @@ class PatchSafetyTests(unittest.TestCase):
         iteration.mkdir()
         with (
             mock.patch.object(self.loop, "_gh") as gh_call,
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.collect_bundle(oversized, self.worktree, iteration)
-        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_PRECONDITION
         gh_call.assert_not_called()
 
     def test_real_remote_race_is_detected_before_staging_or_commit(self) -> None:
@@ -2275,7 +2255,7 @@ class PatchSafetyTests(unittest.TestCase):
         iteration = self.loop.artifacts_dir / "iteration"
         iteration.mkdir()
         before = self.git(self.worktree, "rev-parse", "HEAD")
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2284,15 +2264,15 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop._outside_state(self.worktree),
                 self.loop._nested_git_entries(self.worktree),
             )
-        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
-        self.assertEqual(before, self.git(self.worktree, "rev-parse", "HEAD"))
-        self.assertFalse(self.git(self.worktree, "diff", "--name-only", "--cached"))
+        assert caught.value.code == loopr.EXIT_RACE
+        assert before == self.git(self.worktree, "rev-parse", "HEAD")
+        assert not self.git(self.worktree, "diff", "--name-only", "--cached")
 
     def test_whitespace_errors_fail(self) -> None:
         (self.worktree / "bad.txt").write_text("trailing space \n", encoding="utf-8")
         iteration = self.loop.artifacts_dir / "iteration-a"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2301,7 +2281,7 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop._outside_state(self.worktree),
                 self.loop._nested_git_entries(self.worktree),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_CODEX
 
     def test_new_nested_repository_fails(self) -> None:
         (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
@@ -2309,7 +2289,7 @@ class PatchSafetyTests(unittest.TestCase):
         nested.mkdir(parents=True)
         iteration = self.loop.artifacts_dir / "iteration-b"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2318,7 +2298,7 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop._outside_state(self.worktree),
                 set(),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_CODEX
 
     def test_new_submodule_url_fails(self) -> None:
         (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
@@ -2328,7 +2308,7 @@ class PatchSafetyTests(unittest.TestCase):
         )
         iteration = self.loop.artifacts_dir / "iteration-c"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2337,14 +2317,14 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop._outside_state(self.worktree),
                 self.loop._nested_git_entries(self.worktree),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_CODEX
 
     def test_codex_cannot_change_head_or_pre_stage_files(self) -> None:
         (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
         self.git(self.worktree, "add", "app.py")
         iteration = self.loop.artifacts_dir / "iteration-d"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2353,7 +2333,7 @@ class PatchSafetyTests(unittest.TestCase):
                 self.loop._outside_state(self.worktree),
                 self.loop._nested_git_entries(self.worktree),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_CODEX
 
     def test_codex_cannot_change_the_worktree_git_pointer(self) -> None:
         (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
@@ -2362,7 +2342,7 @@ class PatchSafetyTests(unittest.TestCase):
         )
         iteration = self.loop.artifacts_dir / "iteration-e"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2371,7 +2351,7 @@ class PatchSafetyTests(unittest.TestCase):
                 {},
                 set(),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_CODEX
 
     def test_codex_cannot_change_repository_git_configuration(self) -> None:
         (self.worktree / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
@@ -2383,7 +2363,7 @@ class PatchSafetyTests(unittest.TestCase):
         )
         iteration = self.loop.artifacts_dir / "iteration-f"
         iteration.mkdir()
-        with self.assertRaises(loopr.LoopError) as caught:
+        with pytest.raises(loopr.LoopError) as caught:
             self.loop.validate_commit_push(
                 self.pr,
                 self.worktree,
@@ -2392,7 +2372,7 @@ class PatchSafetyTests(unittest.TestCase):
                 {},
                 set(),
             )
-        self.assertEqual(loopr.EXIT_CODEX, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_CODEX
 
     def test_post_review_anchors_the_submission_to_the_reviewed_commit(self) -> None:
         review = loopr.parse_oracle_review(
@@ -2407,23 +2387,20 @@ class PatchSafetyTests(unittest.TestCase):
         ):
             self.loop.post_review(self.pr, review, 1, iteration)
         args, kwargs = gh_call.call_args
-        self.assertEqual(
-            [
-                "api",
-                "--hostname",
-                "github.com",
-                "repos/acme/project/pulls/7/reviews",
-                "--method",
-                "POST",
-                "--input",
-                "-",
-            ],
-            args[0],
-        )
-        self.assertTrue(kwargs["reviewer"])
+        assert args[0] == [
+            "api",
+            "--hostname",
+            "github.com",
+            "repos/acme/project/pulls/7/reviews",
+            "--method",
+            "POST",
+            "--input",
+            "-",
+        ]
+        assert kwargs["reviewer"]
         payload = json.loads(kwargs["input_text"])
-        self.assertEqual(self.pr.head_sha, payload["commit_id"])
-        self.assertEqual("APPROVE", payload["event"])
+        assert self.pr.head_sha == payload["commit_id"]
+        assert payload["event"] == "APPROVE"
 
     def test_post_review_rejects_a_response_anchored_to_the_wrong_commit(self) -> None:
         review = loopr.parse_oracle_review(
@@ -2440,10 +2417,10 @@ class PatchSafetyTests(unittest.TestCase):
             mock.patch.object(
                 self.loop, "_gh", side_effect=lambda *args, **kwargs: next(responses)
             ),
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.post_review(self.pr, review, 1, iteration)
-        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
+        assert caught.value.code == loopr.EXIT_RACE
 
     def test_post_review_dismisses_when_only_the_base_moves(self) -> None:
         review = loopr.parse_oracle_review(
@@ -2464,16 +2441,14 @@ class PatchSafetyTests(unittest.TestCase):
             mock.patch.object(
                 self.loop, "_gh", side_effect=lambda *args, **kwargs: next(responses)
             ) as gh_call,
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.post_review(self.pr, review, 1, iteration)
-        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
-        self.assertEqual(2, gh_call.call_count)
-        self.assertTrue(
-            any("/reviews" in value for value in gh_call.call_args_list[0].args[0])
-        )
-        self.assertTrue(
-            any("/dismissals" in value for value in gh_call.call_args_list[1].args[0])
+        assert caught.value.code == loopr.EXIT_RACE
+        assert gh_call.call_count == 2
+        assert any("/reviews" in value for value in gh_call.call_args_list[0].args[0])
+        assert any(
+            "/dismissals" in value for value in gh_call.call_args_list[1].args[0]
         )
 
     def test_verify_approval_dismisses_when_base_moves_after_post(self) -> None:
@@ -2491,12 +2466,12 @@ class PatchSafetyTests(unittest.TestCase):
             mock.patch.object(
                 self.loop, "_gh", side_effect=lambda *args, **kwargs: next(responses)
             ) as gh_call,
-            self.assertRaises(loopr.LoopError) as caught,
+            pytest.raises(loopr.LoopError) as caught,
         ):
             self.loop.verify_approval(self.pr.head_sha, self.pr.base_sha, 13)
-        self.assertEqual(loopr.EXIT_RACE, caught.exception.code)
-        self.assertTrue(
-            any("/dismissals" in value for value in gh_call.call_args_list[1].args[0])
+        assert caught.value.code == loopr.EXIT_RACE
+        assert any(
+            "/dismissals" in value for value in gh_call.call_args_list[1].args[0]
         )
 
 

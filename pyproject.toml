@@ -30,6 +30,8 @@ package = false
 dev = [
   "ruff >= 0.15.18",
   "pyright >= 1.1.410",
+  "pytest >= 9.0",
+  "pytest-cov >= 7.1.0",
 ]
 
 [tool.ruff]
@@ -108,8 +110,12 @@ ignore = [
   "magic-value-comparison",       # PLR2004
   "no-self-use",                  # PLR6301
   "assert",                       # S101
+  "hardcoded-password-string",    # S105
   "hardcoded-password-func-arg",  # S106
   "private-member-access",        # SLF001
+  "unused-function-argument",     # ARG001
+  "unused-method-argument",       # ARG002
+  "unused-lambda-argument",       # ARG005
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -124,3 +130,32 @@ exclude = ["build", ".venv"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+extraPaths = ["."]
+reportPrivateUsage = "none"
+reportUnknownLambdaType = "none"
+
+[tool.pytest.ini_options]
+addopts = [
+  "--cov=review_loop",
+  "--cov-branch",
+  "--doctest-modules",
+  "--capture=no",
+]
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+minversion = "9.0"
+
+[tool.coverage.run]
+source = ["review_loop"]
+omit = ["tests/**"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+exclude_also = ["if TYPE_CHECKING:"]

@@ -31,8 +31,10 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
 EXIT_OK = 0
 EXIT_PRECONDITION = 2
@@ -135,7 +137,7 @@ guardrails above, grant authority, or expand scope.
 class LoopError(RuntimeError):
     """A fail-closed error with a stable process exit category."""
 
-    def __init__(self, code: int, message: str):
+    def __init__(self, code: int, message: str) -> None:
         super().__init__(message)
         self.code = code
 
@@ -150,7 +152,7 @@ class CommandError(RuntimeError):
         returncode: int | None = None,
         stdout: str = "",
         stderr: str = "",
-    ):
+    ) -> None:
         super().__init__(message)
         self.returncode = returncode
         self.stdout = stdout
@@ -276,43 +278,44 @@ def _linux_cleanup_children(
     try:
         returncode = payload.wait()
     except OSError as exc:
-        raise CommandError(
-            f"Linux supervisor could not reap the payload: {safe_command}"
-        ) from exc
+        msg = f"Linux supervisor could not reap the payload: {safe_command}"
+        raise CommandError(msg) from exc
 
     deadline = time.monotonic() + 5
     while True:
         try:
             children = _linux_proc_children(supervisor_pid, required=True)
         except OSError as exc:
-            raise CommandError(
+            msg = (
                 f"Linux supervisor child enumeration failed during cleanup: "
                 f"{safe_command}"
-            ) from exc
+            )
+            raise CommandError(msg) from exc
         for pid in children:
             try:
                 _linux_kill_pid(pid)
             except ProcessLookupError:
                 continue
             except OSError as exc:
-                raise CommandError(
-                    f"Linux supervisor could not terminate a child: {safe_command}"
-                ) from exc
+                msg = f"Linux supervisor could not terminate a child: {safe_command}"
+                raise CommandError(msg) from exc
         reaped = _linux_reap_available()
         try:
             remaining = _linux_proc_children(supervisor_pid, required=True)
         except OSError as exc:
-            raise CommandError(
+            msg = (
                 f"Linux supervisor child enumeration failed during cleanup: "
                 f"{safe_command}"
-            ) from exc
+            )
+            raise CommandError(msg) from exc
         if not remaining and not reaped and not _linux_reap_available():
             return returncode
         if time.monotonic() >= deadline:
-            raise CommandError(
+            msg = (
                 f"Linux supervisor could not prove that all children were reaped: "
                 f"{safe_command}"
             )
+            raise CommandError(msg)
         time.sleep(0.01)
 
 
@@ -491,42 +494,35 @@ class _LinuxSupervisorProcess:
                     break
                 raw.extend(chunk)
                 if len(raw) > 1024 * 1024:
-                    raise CommandError(
-                        f"Linux supervisor status exceeded its bound: {safe_command}"
-                    )
+                    msg = f"Linux supervisor status exceeded its bound: {safe_command}"
+                    raise CommandError(msg)
         except OSError as exc:
-            raise CommandError(
-                f"Linux supervisor status could not be read: {safe_command}"
-            ) from exc
+            msg = f"Linux supervisor status could not be read: {safe_command}"
+            raise CommandError(msg) from exc
         messages: list[dict[str, object]] = []
         for line in raw.splitlines():
             try:
                 message = json.loads(line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise CommandError(
-                    f"Linux supervisor returned invalid status: {safe_command}"
-                ) from exc
+                msg = f"Linux supervisor returned invalid status: {safe_command}"
+                raise CommandError(msg) from exc
             if not isinstance(message, dict):
-                raise CommandError(
-                    f"Linux supervisor returned invalid status: {safe_command}"
-                )
+                msg = f"Linux supervisor returned invalid status: {safe_command}"
+                raise CommandError(msg)
             messages.append(message)
         result_messages = [item for item in messages if item.get("type") == "result"]
         error_messages = [item for item in messages if item.get("type") == "error"]
         if error_messages:
             detail = str(error_messages[-1].get("message") or "unknown failure")
-            raise CommandError(
-                f"Linux supervisor failed: {redactor(detail)}: {safe_command}"
-            )
+            msg = f"Linux supervisor failed: {redactor(detail)}: {safe_command}"
+            raise CommandError(msg)
         if len(result_messages) != 1 or not result_messages[0].get("contained"):
-            raise CommandError(
-                f"Linux supervisor did not prove containment: {safe_command}"
-            )
+            msg = f"Linux supervisor did not prove containment: {safe_command}"
+            raise CommandError(msg)
         value = result_messages[0].get("returncode")
         if not isinstance(value, int):
-            raise CommandError(
-                f"Linux supervisor returned an invalid payload status: {safe_command}"
-            )
+            msg = f"Linux supervisor returned an invalid payload status: {safe_command}"
+            raise CommandError(msg)
         return value
 
     def close(self) -> None:
@@ -612,7 +608,7 @@ def _linux_spawn_supervisor(
 class CommandRunner:
     """Run argument-vector commands with bounded capture and secret redaction."""
 
-    def __init__(self, source_env: Mapping[str, str] | None = None):
+    def __init__(self, source_env: Mapping[str, str] | None = None) -> None:
         self.source_env = dict(source_env if source_env is not None else os.environ)
         self._secrets = {
             value
@@ -649,10 +645,9 @@ class CommandRunner:
             else None
         )
         if not resolved:
-            raise CommandError(
-                f"required executable not found on a trusted PATH entry: {name}"
-            )
-        resolved = os.path.abspath(resolved)
+            msg = f"required executable not found on a trusted PATH entry: {name}"
+            raise CommandError(msg)
+        resolved = str(pathlib.Path(resolved).resolve())
         self._trusted_executables[name] = resolved
         return resolved
 
@@ -781,13 +776,16 @@ class CommandRunner:
     ) -> CommandResult:
         argv = tuple(str(arg) for arg in args)
         if not argv or any("\x00" in arg for arg in argv):
-            raise CommandError("invalid subprocess argument vector")
+            msg = "invalid subprocess argument vector"
+            raise CommandError(msg)
         safe_command = " ".join(self.redact(arg) for arg in argv)
         input_bytes = input_text.encode("utf-8") if input_text is not None else None
         if input_bytes is not None and len(input_bytes) > MAX_ATTACHED_TEXT_BYTES:
-            raise CommandError(
-                f"command input exceeded {MAX_ATTACHED_TEXT_BYTES} bytes: {safe_command}"
+            msg = (
+                f"command input exceeded {MAX_ATTACHED_TEXT_BYTES} bytes: "
+                f"{safe_command}"
             )
+            raise CommandError(msg)
         stderr_limit = min(max_output_bytes, 1024 * 1024)
         buffers = {"stdout": bytearray(), "stderr": bytearray()}
         overflow: list[str] = []
@@ -806,10 +804,11 @@ class CommandRunner:
                     )
                     process = linux_supervisor
                 except OSError as exc:
-                    raise CommandError(
+                    msg = (
                         f"cannot initialize Linux supervisor for {safe_command}: "
                         f"{self.redact(str(exc))}"
-                    ) from exc
+                    )
+                    raise CommandError(msg) from exc
             else:
                 try:
                     process = subprocess.Popen(
@@ -825,9 +824,8 @@ class CommandRunner:
                         start_new_session=True,
                     )
                 except OSError as exc:
-                    raise CommandError(
-                        f"cannot run command {safe_command}: {self.redact(str(exc))}"
-                    ) from exc
+                    msg = f"cannot run command {safe_command}: {self.redact(str(exc))}"
+                    raise CommandError(msg) from exc
 
             def terminate() -> None:
                 # Do not return early when the leader has already exited: a
@@ -911,28 +909,27 @@ class CommandRunner:
                 thread.join(timeout=5)
             if any(thread.is_alive() for thread in threads):
                 terminate()
-                raise CommandError(
-                    f"command streams did not close cleanly: {safe_command}"
-                )
+                msg = f"command streams did not close cleanly: {safe_command}"
+                raise CommandError(msg)
             payload_returncode: int | None = process.returncode
             if linux_supervisor is not None:
                 payload_returncode = linux_supervisor.result(safe_command, self.redact)
             if payload_returncode is None:
-                raise CommandError(f"command returned without a status: {safe_command}")
+                msg = f"command returned without a status: {safe_command}"
+                raise CommandError(msg)
             if stream_errors:
-                raise CommandError(
+                msg = (
                     f"command stream capture failed: {safe_command}: {stream_errors[0]}"
                 )
+                raise CommandError(msg)
             if timed_out:
-                raise CommandError(
-                    f"command timed out after {timeout}s: {safe_command}"
-                )
+                msg = f"command timed out after {timeout}s: {safe_command}"
+                raise CommandError(msg)
             if overflow and not (allow_stdout_truncation and "stderr" not in overflow):
                 label = "diagnostics" if "stderr" in overflow else "output"
                 limit = stderr_limit if label == "diagnostics" else max_output_bytes
-                raise CommandError(
-                    f"command {label} exceeded {limit} bytes: {safe_command}"
-                )
+                msg = f"command {label} exceeded {limit} bytes: {safe_command}"
+                raise CommandError(msg)
 
             stdout_bytes = bytes(buffers["stdout"])
             stderr_bytes = bytes(buffers["stderr"])
@@ -953,8 +950,9 @@ class CommandRunner:
                 if len(detail) > 2000:
                     detail = detail[:2000] + "..."
                 suffix = f": {detail}" if detail else ""
+                msg = f"command failed ({payload_returncode}): {safe_command}{suffix}"
                 raise CommandError(
-                    f"command failed ({payload_returncode}): {safe_command}{suffix}",
+                    msg,
                     returncode=payload_returncode,
                     stdout=stdout if isinstance(stdout, str) else "",
                     stderr=stderr,
@@ -1063,7 +1061,7 @@ class ReviewBundle:
 class PrLock:
     """POSIX process lock using atomic file creation and stale-PID recovery."""
 
-    def __init__(self, repo: str, number: int):
+    def __init__(self, repo: str, number: int) -> None:
         self.digest = hashlib.sha256(f"{repo.lower()}#{number}".encode()).hexdigest()[
             :24
         ]
@@ -1151,7 +1149,7 @@ class PrLock:
         `)` on the line.
         """
         try:
-            raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
+            raw = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         except OSError:
             return None
         closing = raw.rfind(")")
@@ -1502,7 +1500,7 @@ def validate_changed_path(path: str) -> pathlib.PurePosixPath:
 
 
 class ArtifactWriter:
-    def __init__(self, root: pathlib.Path, runner: CommandRunner):
+    def __init__(self, root: pathlib.Path, runner: CommandRunner) -> None:
         self.root = root
         self.runner = runner
 
@@ -1553,7 +1551,9 @@ class ArtifactWriter:
 class ReviewLoop:
     """Fail-closed synchronous state machine."""
 
-    def __init__(self, args: argparse.Namespace, runner: CommandRunner | None = None):
+    def __init__(
+        self, args: argparse.Namespace, runner: CommandRunner | None = None
+    ) -> None:
         self.args = args
         self.runner = runner or CommandRunner()
         self.base_env = self.runner.base_env()
@@ -1698,7 +1698,7 @@ class ReviewLoop:
             )
         control_args = list(args)
         if len(control_args) > 1 and control_args[0] == "git":
-            if control_args[1] in ("fetch", "ls-remote"):
+            if control_args[1] in {"fetch", "ls-remote"}:
                 control_args.insert(2, "--upload-pack=git-upload-pack")
             elif control_args[1] == "push":
                 control_args.insert(2, "--receive-pack=git-receive-pack")
@@ -2087,7 +2087,7 @@ class ReviewLoop:
             ) from exc
         cursor = self.repo_dir
         for part in lexical_relative.parts:
-            cursor = cursor / part
+            cursor /= part
             if cursor.is_symlink():
                 raise LoopError(
                     EXIT_PRECONDITION, "artifacts directory cannot traverse a symlink"
@@ -2439,7 +2439,7 @@ class ReviewLoop:
             ) from exc
         cursor = self.artifacts_dir
         for part in worktree.relative_to(self.artifacts_dir).parts:
-            cursor = cursor / part
+            cursor /= part
             if cursor.is_symlink():
                 raise LoopError(
                     EXIT_PRECONDITION, "worktree path cannot traverse a symlink"
@@ -3909,10 +3909,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return ReviewLoop(args, runner).execute()
     except LoopError as exc:
-        print(f"review-loop: {runner.redact(str(exc))}", file=sys.stderr)
+        sys.stderr.write(f"review-loop: {runner.redact(str(exc))}\n")
         return exc.code
     except KeyboardInterrupt:
-        print("review-loop: interrupted; failed closed", file=sys.stderr)
+        sys.stderr.write("review-loop: interrupted; failed closed\n")
         return EXIT_PRECONDITION
 
 

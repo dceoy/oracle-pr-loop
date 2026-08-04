@@ -27,21 +27,12 @@ jobs:
       package-path: .
       python-version: "3.12"
   python-test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
-      - name: Compile
-        run: python -m compileall -q review_loop.py tests
+    permissions:
+      contents: read
+    uses: dceoy/gha-for-devops/.github/workflows/python-package-test.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      package-path: .
+      python-version: "3.12"
   github-codeql-analysis:
     permissions:
       contents: read
