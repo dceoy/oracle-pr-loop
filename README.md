@@ -68,6 +68,8 @@ python3 loopr.py --pr 123 --dry-run
 
 The loop fails closed on malformed reviews, credential collisions, unsafe patches, context limits, stale approvals, concurrent head changes, or failed pushes. It does not automatically merge, support forks, remediate CI, resolve human review threads, or run as a daemon.
 
+CI status is not an approval gate; failing or missing checks do not prevent approval.
+
 Each run writes permission-restricted audit artifacts under `.pr-loopr/runs/`, including the PR snapshot, review inputs and outputs, state transitions, resulting patch, and pushed commit SHA.
 
 ## Tests
