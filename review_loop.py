@@ -1996,6 +1996,13 @@ class ReviewLoop:
             child_env = dict(env or self.base_env)
             child_env["LOOPR_GIT_CONFIG_EMPTY"] = ""
             child_env["LOOPR_GIT_CONFIG_FALSE"] = "false"
+            # GitHub-provided changed-file paths are passed to Git as pathspecs
+            # (e.g. after `--`) without ever being sanitized for pathspec magic.
+            # A PR-controlled filename such as `literal*.txt` or `:(icase)x`
+            # would otherwise be interpreted as a glob or magic signature
+            # instead of the exact path GitHub reported, letting a rename or
+            # crafted filename select or omit unintended objects.
+            child_env["GIT_LITERAL_PATHSPECS"] = "1"
             # Every git invocation here targets either the primary checkout or a
             # disposable per-PR worktree; a repository-configured core.hooksPath
             # or core.fsmonitor hook (including one Codex-controlled content can
@@ -2657,16 +2664,40 @@ class ReviewLoop:
             )
         return int(text)
 
+    @staticmethod
+    def _next_name_status_record(
+        fields: Sequence[str], index: int
+    ) -> tuple[int, str | None, tuple[str, ...]]:
+        code = fields[index]
+        if not code:
+            return index + 1, None, ()
+        # An `R`/`C` (rename/copy) record has a source and a dest path;
+        # every other record has a single path.
+        width = 3 if code[0] in "RC" else 2
+        if index + width - 1 >= len(fields):
+            return len(fields), None, ()
+        record = tuple(fields[index + 1 : index + width])
+        next_index = index + width
+        if not all(record):
+            return next_index, None, ()
+        return next_index, code, record
+
     def _derive_change_statuses(
         self, worktree: pathlib.Path, base_sha: str, head_sha: str, paths: Sequence[str]
-    ) -> dict[str, str]:
+    ) -> tuple[dict[str, str], dict[str, str | None]]:
         # `gh pr view --json files` only exposes a `changeType`/`status` field on
         # GitHub CLI >= 2.88.0. Trusting it (or its absence) would default every
         # deletion to "modified" on older installations and misclassify a path
         # that no longer exists at HEAD. The base/head diff is always available
         # and is the authoritative source, independent of the installed gh version.
         if not paths:
-            return {}
+            return {}, {}
+        # This diff is intentionally unscoped (no `-- <paths>` pathspec) and has
+        # rename detection enabled. `gh pr view --json files` reports only the
+        # current (post-rename) path, so scoping to that path with renames
+        # disabled hides the source side of a rename entirely: the diff, the
+        # changed-file manifest, and the patch would show it as a brand-new
+        # file and never reveal that a tracked path was removed.
         try:
             result = self._control_command(
                 [
@@ -2675,10 +2706,8 @@ class ReviewLoop:
                     "diff",
                     "--name-status",
                     "-z",
-                    "--no-renames",
+                    "--find-renames",
                     f"{base_sha}...{head_sha}",
-                    "--",
-                    *paths,
                 ],
                 max_output_bytes=MAX_PATCH_BYTES,
                 redact_stdout=False,
@@ -2689,21 +2718,51 @@ class ReviewLoop:
             ) from exc
         assert isinstance(result, str)
         fields = result.split("\x00")
+        wanted = set(paths)
         statuses: dict[str, str] = {}
+        # Paths whose removal must be surfaced even though GitHub's reported
+        # `paths` never mentions them: confirmed rename sources (keyed to the
+        # destination they were paired with), and any other deletion that
+        # local git's similarity heuristic did not pair with a rename at all.
+        # A rename is only reported by Git as a single `R` record when the
+        # old and new content are similar enough (score-dependent); an edit
+        # heavy enough to fall below that threshold instead produces
+        # independent `D`/`A` records, and the `D` side would otherwise be
+        # silently dropped for referring to a path outside `wanted`. Either
+        # way, the source path's content actually disappeared and must not
+        # be hidden from the reviewer.
+        removed_sources: dict[str, str | None] = {}
         index = 0
-        while index + 1 < len(fields):
-            code, git_path = fields[index], fields[index + 1]
-            index += 2
-            if not code or not git_path:
+        while index < len(fields):
+            index, code, record = self._next_name_status_record(fields, index)
+            if code is None:
                 continue
-            statuses[git_path] = "removed" if code[0] == "D" else "modified"
+            if code[0] in "RC":
+                source_path, dest_path = record
+                if dest_path in wanted:
+                    # `source_path` comes from Git's own diff output, not
+                    # GitHub's reported `paths`, so it has never passed
+                    # through validate_changed_path(); it is written verbatim
+                    # into changed-files.txt and the attachment manifest
+                    # below, which are line-oriented and untrusted-review
+                    # data that Oracle reads as-is.
+                    validate_changed_path(source_path)
+                    statuses[dest_path] = "modified"
+                    removed_sources[source_path] = dest_path
+            else:
+                (git_path,) = record
+                if git_path in wanted:
+                    statuses[git_path] = "removed" if code[0] == "D" else "modified"
+                elif code[0] == "D":
+                    validate_changed_path(git_path)
+                    removed_sources.setdefault(git_path, None)
         missing = [path for path in paths if path not in statuses]
         if missing:
             raise LoopError(
                 EXIT_PRECONDITION,
                 f"changed path {missing[0]} is absent from the base/head diff",
             )
-        return statuses
+        return statuses, removed_sources
 
     def _stream_git_blob(
         self,
@@ -2787,7 +2846,7 @@ class ReviewLoop:
                 )
             seen.add(path)
             paths.append(path)
-        statuses = self._derive_change_statuses(
+        statuses, removed_sources = self._derive_change_statuses(
             worktree, pr.base_sha, pr.head_sha, paths
         )
 
@@ -2803,6 +2862,11 @@ class ReviewLoop:
             ):
                 continue
             patch_paths.append(path)
+        # A rename's source path is never in `paths` (GitHub only reports the
+        # current path), so it must be added explicitly or the deletion side
+        # of the rename is silently absent from the diff shown to the reviewer.
+        removed_source_paths = sorted(set(removed_sources) - set(patch_paths))
+        patch_paths.extend(removed_source_paths)
         patch_result = b""
         if patch_paths:
             try:
@@ -2812,6 +2876,7 @@ class ReviewLoop:
                         f"--work-tree={worktree}",
                         "diff",
                         "--full-index",
+                        "--find-renames",
                         f"{pr.base_sha}...{pr.head_sha}",
                         "--",
                         *patch_paths,
@@ -2867,21 +2932,29 @@ class ReviewLoop:
         candidates.extend(
             (path, "instruction") for path in instruction_paths if path not in statuses
         )
+        candidates.extend((source, "removed") for source in removed_sources)
         changed_lines: list[str] = []
         for index, (path, status) in enumerate(candidates, start=1):
             if path in seen:
                 continue
             seen.add(path)
             if status == "removed":
+                dest = removed_sources.get(path)
+                note = (
+                    f"[no current content, renamed to {dest}]"
+                    if dest
+                    else "[no current content]"
+                )
                 manifest.append(
                     {
                         "path": path,
                         "status": status,
                         "attachment": None,
                         "kind": "deleted",
+                        **({"renamedTo": dest} if dest else {}),
                     }
                 )
-                changed_lines.append(f"{status}\t{path}\t[no current content]")
+                changed_lines.append(f"{status}\t{path}\t{note}")
                 continue
             object_type = self._git_object_type(worktree, path)
             if object_type == "commit":

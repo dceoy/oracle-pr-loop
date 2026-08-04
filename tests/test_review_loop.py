@@ -1256,9 +1256,7 @@ class PatchSafetyTests(unittest.TestCase):
         # already changed to that worktree.
         marker = pathlib.Path(self.temporary.name) / "worktree-git-fired"
         fake_git = self.worktree / "git"
-        fake_git.write_text(
-            f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8"
-        )
+        fake_git.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
         fake_git.chmod(0o755)
         self.loop.runner._trusted_executables.pop("git", None)
         poisoned_path = f".{os.pathsep}{os.environ['PATH']}"
@@ -1280,9 +1278,7 @@ class PatchSafetyTests(unittest.TestCase):
         # than an unrelated side effect.
         marker = pathlib.Path(self.temporary.name) / "worktree-git-fired-unguarded"
         fake_git = self.worktree / "git"
-        fake_git.write_text(
-            f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8"
-        )
+        fake_git.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n", encoding="utf-8")
         fake_git.chmod(0o755)
         # This is the env actually handed to the child at exec time (see
         # command()'s `child_env = dict(env or self.base_env)`); the
@@ -1821,6 +1817,222 @@ class PatchSafetyTests(unittest.TestCase):
             "-VALUE = 1",
             (iteration / "diff.patch").read_text(encoding="utf-8"),
         )
+
+    def test_bundle_preserves_the_source_path_of_a_pure_rename(self) -> None:
+        # `gh pr view --json files` reports only the current (post-rename)
+        # path. Without preserving the source side of the rename, the old
+        # path's removal is invisible everywhere in the bundle and Oracle is
+        # shown what looks like a brand-new file instead of a move. The base
+        # is pinned to the commit immediately before the rename so the only
+        # difference in range is the rename itself, which keeps Git's
+        # similarity score high enough to emit a single `R` record and
+        # exercise that code path deterministically.
+        self.git(self.primary, "checkout", "feature")
+        pre_rename_sha = self.git(self.primary, "rev-parse", "HEAD")
+        self.git(self.primary, "mv", "app.py", "renamed.py")
+        self.git(self.primary, "commit", "-m", "rename app file")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["baseRefOid"] = pre_rename_sha
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": "renamed.py", "changeType": "RENAMED"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "pure-rename-bundle"
+        iteration.mkdir()
+        with mock.patch.object(self.loop, "snapshot", return_value=pr):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        patch = (iteration / "diff.patch").read_text(encoding="utf-8")
+        self.assertIn("rename from app.py", patch)
+        self.assertIn("rename to renamed.py", patch)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        self.assertEqual("deleted", by_path["app.py"]["kind"])
+        self.assertEqual("renamed.py", by_path["app.py"]["renamedTo"])
+        self.assertEqual(
+            "VALUE = 2\n",
+            (iteration / by_path["renamed.py"]["attachment"]).read_text(),
+        )
+        changed_text = (iteration / "changed-files.txt").read_text()
+        self.assertIn(
+            "app.py\t[no current content, renamed to renamed.py]", changed_text
+        )
+
+    def test_bundle_preserves_rename_source_below_similarity_threshold(self) -> None:
+        # When the rewrite is heavy enough that Git's similarity heuristic
+        # does not pair the rename into a single `R` record, it instead
+        # emits independent `D` (old path) and `A` (new path) records. The
+        # `D` side refers to a path GitHub's reported `paths` never
+        # mentions, so it must still be surfaced through the same fallback
+        # collect_bundle uses for confirmed rename sources, or the old
+        # content's disappearance goes unreported.
+        self.git(self.primary, "checkout", "feature")
+        pre_rename_sha = self.git(self.primary, "rev-parse", "HEAD")
+        self.git(self.primary, "mv", "app.py", "renamed.py")
+        (self.primary / "renamed.py").write_text("VALUE = 9\n", encoding="utf-8")
+        self.git(self.primary, "commit", "-am", "rename and rewrite app file")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["baseRefOid"] = pre_rename_sha
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": "renamed.py", "changeType": "RENAMED"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "renamed-edited-bundle"
+        iteration.mkdir()
+        with mock.patch.object(self.loop, "snapshot", return_value=pr):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        patch = (iteration / "diff.patch").read_text(encoding="utf-8")
+        self.assertNotIn("rename from", patch)
+        self.assertIn("-VALUE = 2", patch)
+        self.assertIn("+VALUE = 9", patch)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        self.assertEqual("deleted", by_path["app.py"]["kind"])
+        self.assertNotIn("renamedTo", by_path["app.py"])
+        self.assertEqual(
+            "VALUE = 9\n",
+            (iteration / by_path["renamed.py"]["attachment"]).read_text(),
+        )
+        changed_text = (iteration / "changed-files.txt").read_text()
+        self.assertIn("app.py\t[no current content]", changed_text)
+
+    def test_bundle_rejects_a_rename_source_with_an_embedded_control_character(
+        self,
+    ) -> None:
+        # A rename source path comes from Git's own `-z` diff output, not
+        # from GitHub's already-validated `paths`, so it must be run through
+        # the same validate_changed_path() fail-closed check before it is
+        # ever written into changed-files.txt or the attachment manifest.
+        # Otherwise a tracked path with an embedded tab or newline could
+        # inject a fabricated line into review content Oracle reads as-is.
+        # The base is pinned to right after the file is first renamed to the
+        # control-character name, so that name is the direct rename source
+        # in the base/head diff range rather than an invisible intermediate
+        # step of repository history.
+        self.git(self.primary, "checkout", "feature")
+        evil_name = "evil\tname.txt"
+        subprocess.run(
+            ["git", "mv", "app.py", evil_name],
+            cwd=self.primary,
+            check=True,
+            env=os.environ | {"GIT_LITERAL_PATHSPECS": "1"},
+        )
+        self.git(self.primary, "commit", "-m", "rename to a control-character path")
+        pre_second_rename_sha = self.git(self.primary, "rev-parse", "HEAD")
+        subprocess.run(
+            ["git", "mv", evil_name, "renamed.py"],
+            cwd=self.primary,
+            check=True,
+            env=os.environ | {"GIT_LITERAL_PATHSPECS": "1"},
+        )
+        self.git(self.primary, "commit", "-m", "rename away from it again")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["baseRefOid"] = pre_second_rename_sha
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": "renamed.py", "changeType": "RENAMED"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "malicious-rename-source-bundle"
+        iteration.mkdir()
+        with (
+            mock.patch.object(self.loop, "snapshot", return_value=pr),
+            self.assertRaises(loopr.LoopError) as caught,
+        ):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        self.assertEqual(loopr.EXIT_PRECONDITION, caught.exception.code)
+
+    def test_bundle_treats_pathspec_magic_filenames_as_literal(self) -> None:
+        # A leading `:(...)` is parsed as a pathspec magic signature, and
+        # `*`/`?`/`[...]` are glob wildcards, unless literal pathspec
+        # handling is enabled. Without it, Git commands that receive these
+        # exact GitHub-reported filenames either fail outright or resolve a
+        # different set of objects than the single literal path intended.
+        self.git(self.primary, "checkout", "feature")
+        magic_names = [":(icase)notes.txt", "weird[1].txt", "what?.txt"]
+        for name in magic_names:
+            (self.primary / name).write_text(f"content for {name}\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", *magic_names],
+            cwd=self.primary,
+            check=True,
+            env=os.environ | {"GIT_LITERAL_PATHSPECS": "1"},
+        )
+        self.git(self.primary, "commit", "-m", "add magic-named files")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1 + len(magic_names)
+        raw["files"] = [{"path": "app.py", "status": "modified"}] + [
+            {"path": name, "status": "added"} for name in magic_names
+        ]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "magic-pathspec-bundle"
+        iteration.mkdir()
+        with mock.patch.object(self.loop, "snapshot", return_value=pr):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        manifest = json.loads(
+            (iteration / "attachments.json").read_text(encoding="utf-8")
+        )
+        by_path = {entry["path"]: entry for entry in manifest}
+        for name in magic_names:
+            self.assertEqual("text", by_path[name]["kind"])
+            self.assertEqual(
+                f"content for {name}\n",
+                (iteration / by_path[name]["attachment"]).read_text(),
+            )
+
+    def test_bundle_does_not_leak_unrelated_changes_via_a_wildcard_filename(
+        self,
+    ) -> None:
+        # A pathspec restricted to a GitHub-reported filename containing `*`
+        # must select exactly that file. Without literal pathspec handling,
+        # the glob also matches `app.py`, which was changed in the same
+        # commit but was never reported by GitHub, and its diff would leak
+        # into the bundle scoped to a single unrelated file.
+        self.git(self.primary, "checkout", "feature")
+        wildcard_name = "app*"
+        (self.primary / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
+        (self.primary / wildcard_name).write_text(
+            "wildcard content\n", encoding="utf-8"
+        )
+        self.git(self.primary, "add", "app.py")
+        subprocess.run(
+            ["git", "add", wildcard_name],
+            cwd=self.primary,
+            check=True,
+            env=os.environ | {"GIT_LITERAL_PATHSPECS": "1"},
+        )
+        self.git(self.primary, "commit", "-m", "touch app.py and add wildcard file")
+        self.git(self.primary, "push", "origin", "feature")
+        sha = self.git(self.primary, "rev-parse", "HEAD")
+        raw = dict(self.pr.raw)
+        raw["headRefOid"] = sha
+        raw["changedFiles"] = 1
+        raw["files"] = [{"path": wildcard_name, "status": "added"}]
+        pr = loopr.PullRequest.from_json("acme/project", raw)
+        worktree = self.loop.prepare_worktree(pr)
+        iteration = self.loop.artifacts_dir / "wildcard-bundle"
+        iteration.mkdir()
+        with mock.patch.object(self.loop, "snapshot", return_value=pr):
+            self.loop.collect_bundle(pr, worktree, iteration)
+        patch = (iteration / "diff.patch").read_text(encoding="utf-8")
+        self.assertIn("wildcard content", patch)
+        self.assertNotIn("app.py", patch)
+        self.assertNotIn("VALUE = 3", patch)
 
     def test_bundle_fails_closed_before_oracle_on_known_credential_in_patch(
         self,
