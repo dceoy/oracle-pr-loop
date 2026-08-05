@@ -5,16 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "scripts"
 
-from .models import EXIT_PRECONDITION, JsonObject, LooprError  # noqa: E402
-from .process import CommandRunner  # noqa: E402
-from .review import execute_review  # noqa: E402
+from .models import EXIT_PRECONDITION, JsonObject, LooprError
+from .process import CommandRunner
+from .review import execute_review
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class StructuredArgumentParser(argparse.ArgumentParser):
@@ -81,7 +84,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit_error("interrupted", message)
         sys.stderr.write(f"loopr review: {message}\n")
         return EXIT_PRECONDITION
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         message = runner.redact(f"{type(exc).__name__}: {exc}")
         _emit_error("internal", message)
         sys.stderr.write(f"loopr review: {message}\n")
