@@ -84,9 +84,26 @@ class ArtifactWriter:
     def json(self, relative: str, value: JsonValue) -> Path:
         """Write canonical indented JSON as a private artifact."""
         serialized = json.dumps(
-            value,
+            self._redact(value),
             sort_keys=True,
             indent=2,
             ensure_ascii=False,
         )
         return self.text(relative, f"{serialized}\n")
+
+    def _redact(self, value: JsonValue) -> JsonValue:
+        """Recursively redact secrets from strings before JSON escaping.
+
+        `text()` redacts the fully serialized JSON string, but `json.dumps()`
+        escapes quotes, backslashes, and control characters first, so a
+        secret containing one of those characters no longer matches the
+        known secret value by the time `text()` scans it. Redacting each
+        string leaf before serialization catches it while it is still exact.
+        """
+        if isinstance(value, str):
+            return self.runner.redact(value)
+        if isinstance(value, list):
+            return [self._redact(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._redact(item) for key, item in value.items()}
+        return value

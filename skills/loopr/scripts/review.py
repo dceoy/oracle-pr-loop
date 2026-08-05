@@ -127,11 +127,21 @@ def _trusted_runs_root(repo_dir: Path, artifacts_dir: Path) -> Path:
     and the checked-out pull request controls its own repository contents, so a
     malicious head could plant a symlink there to redirect artifact writes
     outside the intended root. Each path component is created fresh or
-    verified to already be a real directory before descending into it.
+    verified to already be a real directory before descending into it, and
+    this applies to every component of `artifacts_dir` itself (not just a
+    `runs` child) so an absolute path, or a symlink anywhere in its ancestry,
+    cannot redirect the run root either. `..` components are rejected outright
+    because they could otherwise walk the trusted anchor back out of it.
     """
+    if ".." in artifacts_dir.parts:
+        raise LooprError(
+            EXIT_RACE,
+            "artifacts",
+            "artifact directory path may not contain '..'",
+        )
     if artifacts_dir.is_absolute():
-        anchor = artifacts_dir
-        parts: tuple[str, ...] = ("runs",)
+        anchor = Path(artifacts_dir.parts[0])
+        parts = (*artifacts_dir.parts[1:], "runs")
     else:
         anchor = repo_dir.resolve()
         parts = (*artifacts_dir.parts, "runs")

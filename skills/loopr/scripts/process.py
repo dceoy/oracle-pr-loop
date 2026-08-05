@@ -231,6 +231,15 @@ class CommandRunner:
                     watch_path,
                 )
                 self._terminate_group(proc)
+                self._enforce_output_bounds(
+                    proc,
+                    stdout_file,
+                    stderr_file,
+                    max_output,
+                    stderr_limit,
+                    argv,
+                    watch_path,
+                )
                 stdout = self._read_spool(stdout_file, max_output)
                 stderr_bytes = self._read_spool(stderr_file, stderr_limit)
             except BaseException:

@@ -340,6 +340,19 @@ def test_redactor_matches_legacy_credential_aliases() -> None:
         assert runner.redact(f"leaked: {secret}") == "leaked: [REDACTED]"
 
 
+def test_artifact_json_redacts_secret_before_escaping(tmp_path: Path) -> None:
+    """A credential containing a quote or backslash is redacted before JSON escaping."""
+    secret = 'abc"def\\ghi'
+    runner = CommandRunner({"SSH_PRIVATE_KEY": secret})
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+
+    path = writer.json("snapshot.json", {"token": secret, "nested": [secret]})
+
+    written = path.read_text(encoding="utf-8")
+    assert secret not in written
+    assert "[REDACTED]" in written
+
+
 def test_bundle_rejects_patch_with_legacy_alias_credential(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -426,6 +439,48 @@ def test_runner_reaps_descendants_after_leader_exits(tmp_path: Path) -> None:
     assert result.returncode == 0
     child_pid = int(marker.read_text())
     assert not _pid_is_running(child_pid)
+
+
+def test_runner_detects_overflow_from_descendant_during_termination_grace(
+    tmp_path: Path,
+) -> None:
+    """An overflow from a SIGTERM-ignoring descendant during grace is caught."""
+    runner = CommandRunner({"PATH": os.environ["PATH"]})
+    watch_path = tmp_path / "watched.bin"
+    watch_path.write_bytes(b"")
+    ready_path = tmp_path / "child.ready"
+    child_script = tmp_path / "child.py"
+    child_script.write_text(
+        "import signal, time, pathlib\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path({str(ready_path)!r}).write_text('ready')\n"
+        f"path = pathlib.Path({str(watch_path)!r})\n"
+        "for _ in range(400):\n"
+        "    with path.open('ab') as handle:\n"
+        "        handle.write(b'x' * 64)\n"
+        "    time.sleep(0.01)\n",
+        encoding="utf-8",
+    )
+    leader_script = (
+        "import pathlib, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
+        f"ready = pathlib.Path({str(ready_path)!r})\n"
+        "deadline = time.monotonic() + 5\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.005)\n"
+        "sys.exit(0)\n"
+    )
+    command = [sys.executable, "-c", leader_script]
+
+    with pytest.raises(CommandError, match="output exceeded bound"):
+        runner.run(
+            command,
+            cwd=tmp_path,
+            env=runner.base_env(),
+            timeout=5,
+            max_output=1024,
+            watch_path=watch_path,
+        )
 
 
 def test_runner_terminates_process_group_on_interrupt(
@@ -602,6 +657,46 @@ def test_run_directory_rejects_symlinked_runs_component(tmp_path: Path) -> None:
 
     assert captured.value.category == "artifacts"
     assert not list(outside.iterdir())
+
+
+def test_run_directory_rejects_symlinked_absolute_artifacts_dir(
+    tmp_path: Path,
+) -> None:
+    """An absolute `--artifacts-dir` that is itself a symlink is rejected."""
+    pull_request = sample_pr()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(LooprError) as captured:
+        review_module._run_directory(tmp_path, artifacts_dir, pull_request)
+
+    assert captured.value.category == "artifacts"
+    assert not list(outside.iterdir())
+
+
+def test_run_directory_creates_new_absolute_artifacts_dir(tmp_path: Path) -> None:
+    """A nonexistent absolute `--artifacts-dir` is created component by component."""
+    pull_request = sample_pr()
+    artifacts_dir = tmp_path / "does" / "not" / "exist" / "yet"
+
+    result = review_module._run_directory(tmp_path, artifacts_dir, pull_request)
+
+    assert result.is_dir()
+    assert result.is_relative_to(artifacts_dir)
+
+
+def test_run_directory_rejects_relative_artifacts_dir_traversal(
+    tmp_path: Path,
+) -> None:
+    """A relative `--artifacts-dir` containing `..` cannot escape the checkout."""
+    pull_request = sample_pr()
+
+    with pytest.raises(LooprError) as captured:
+        review_module._run_directory(tmp_path, Path("../escape"), pull_request)
+
+    assert captured.value.category == "artifacts"
 
 
 class FakeGitHubClient:
