@@ -292,13 +292,32 @@ class CommandRunner:
         return handle.read(limit)
 
     @staticmethod
-    def _terminate_group(proc: subprocess.Popen[bytes]) -> None:
-        """Terminate and reap the complete subprocess group.
+    def _group_exists(pgid: int) -> bool:
+        """Return whether the isolated process group still has any members."""
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    @classmethod
+    def _wait_for_group_exit(cls, pgid: int, timeout: float) -> bool:
+        """Poll until the isolated process group is gone or the bound expires."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not cls._group_exists(pgid):
+                return True
+            time.sleep(POLL_INTERVAL_SECONDS)
+        return not cls._group_exists(pgid)
+
+    @classmethod
+    def _terminate_group(cls, proc: subprocess.Popen[bytes]) -> None:
+        """Terminate and prove exit of the complete subprocess group.
 
         The group leader exiting does not imply the group is empty: a
         same-session descendant can outlive it. Signal the whole process
-        group by pgid regardless of the leader's state, then poll the group
-        itself (not just the leader) until no member remains.
+        group by pgid regardless of the leader's state, then fail closed unless
+        the group is confirmed absent after the final SIGKILL.
         """
         pgid = proc.pid
         if proc.poll() is None:
@@ -314,12 +333,10 @@ class CommandRunner:
             with suppress(ProcessLookupError):
                 os.killpg(pgid, signal.SIGTERM)
 
-        deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                return
-            time.sleep(POLL_INTERVAL_SECONDS)
+        if cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS):
+            return
         with suppress(ProcessLookupError):
             os.killpg(pgid, signal.SIGKILL)
+        if cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS):
+            return
+        raise CommandError("could not prove subprocess group termination")
