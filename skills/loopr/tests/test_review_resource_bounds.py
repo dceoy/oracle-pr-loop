@@ -58,8 +58,7 @@ class _TooManyInstructionsGitHub:
     def tracked_paths(self, _pull_request: PullRequest) -> tuple[str, ...]:
         """Return more instruction files than the bundle contract allows."""
         return tuple(
-            f"docs/{index}/AGENTS.md"
-            for index in range(MAX_INSTRUCTION_FILES + 1)
+            f"docs/{index}/AGENTS.md" for index in range(MAX_INSTRUCTION_FILES + 1)
         )
 
     def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
@@ -92,8 +91,7 @@ def test_oracle_review_rejects_excessive_attachment_count(tmp_path: Path) -> Non
     github = GitHubClient(runner, tmp_path, "token")
     oracle = OracleClient(runner, github, writer, "heavy")
     attachments = tuple(
-        Path(f"attachment-{index}.txt")
-        for index in range(MAX_ORACLE_ATTACHMENTS + 1)
+        Path(f"attachment-{index}.txt") for index in range(MAX_ORACLE_ATTACHMENTS + 1)
     )
 
     with pytest.raises(LooprError) as captured:
