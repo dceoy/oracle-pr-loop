@@ -395,18 +395,34 @@ class OracleClient:
                 env=self.runner.oracle_env(),
                 timeout=3600,
                 max_output=MAX_ORACLE_OUTPUT,
+                watch_path=raw_path,
             )
         except CommandError as exc:
             raise LooprError(EXIT_ORACLE, "oracle", str(exc)) from exc
         try:
-            raw = raw_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
+            with raw_path.open("rb") as handle:
+                raw_bytes = handle.read(MAX_ORACLE_OUTPUT + 1)
+        except OSError as exc:
             raise LooprError(
                 EXIT_ORACLE,
                 "oracle",
                 "Oracle output is missing or invalid UTF-8",
             ) from exc
-        if len(raw.encode()) > MAX_ORACLE_OUTPUT or self.runner.contains_secret(raw):
+        if len(raw_bytes) > MAX_ORACLE_OUTPUT:
+            raise LooprError(
+                EXIT_ORACLE,
+                "oracle",
+                "Oracle output exceeded bounds or contained a credential",
+            )
+        try:
+            raw = raw_bytes.decode("utf-8", "strict")
+        except UnicodeDecodeError as exc:
+            raise LooprError(
+                EXIT_ORACLE,
+                "oracle",
+                "Oracle output is missing or invalid UTF-8",
+            ) from exc
+        if self.runner.contains_secret(raw):
             raise LooprError(
                 EXIT_ORACLE,
                 "oracle",

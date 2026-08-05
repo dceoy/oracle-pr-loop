@@ -157,8 +157,16 @@ class CommandRunner:
         input_text: str | None = None,
         check: bool = True,
         max_output: int = MAX_OUTPUT,
+        watch_path: Path | None = None,
     ) -> CommandResult:
-        """Run a command while enforcing bounds before data reaches memory."""
+        """Run a command while enforcing bounds before data reaches memory.
+
+        When `watch_path` is given, its on-disk size is polled alongside the
+        stdout/stderr spools so a process that writes its real payload to a
+        side file (rather than stdout) cannot exhaust disk during a long
+        timeout window; the process group is terminated as soon as it grows
+        past `max_output`.
+        """
         argv = tuple(str(value) for value in args)
         if not argv or any("\0" in value for value in argv):
             raise CommandError("invalid subprocess argument vector")
@@ -197,6 +205,7 @@ class CommandRunner:
                     max_output,
                     stderr_limit,
                     argv,
+                    watch_path,
                 )
                 if time.monotonic() >= deadline:
                     self._terminate_group(proc)
@@ -212,6 +221,7 @@ class CommandRunner:
                 max_output,
                 stderr_limit,
                 argv,
+                watch_path,
             )
             stdout = self._read_spool(stdout_file, max_output)
             stderr_bytes = self._read_spool(stderr_file, stderr_limit)
@@ -235,11 +245,20 @@ class CommandRunner:
         stdout_limit: int,
         stderr_limit: int,
         argv: tuple[str, ...],
+        watch_path: Path | None = None,
     ) -> None:
         """Terminate the process group as soon as a spool exceeds its bound."""
         stdout_size = os.fstat(stdout_file.fileno()).st_size
         stderr_size = os.fstat(stderr_file.fileno()).st_size
-        if stdout_size <= stdout_limit and stderr_size <= stderr_limit:
+        watch_size = 0
+        if watch_path is not None:
+            with suppress(OSError):
+                watch_size = watch_path.stat().st_size
+        if (
+            stdout_size <= stdout_limit
+            and stderr_size <= stderr_limit
+            and watch_size <= stdout_limit
+        ):
             return
         self._terminate_group(proc)
         command = self.redact(" ".join(argv))

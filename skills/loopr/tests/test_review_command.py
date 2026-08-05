@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar, TypeVar
 
 import pytest
@@ -23,8 +25,13 @@ from scripts.models import (
     PullRequest,
     ReviewResult,
 )
-from scripts.oracle import MAX_CHANGED_FILES, OracleClient, parse_review
-from scripts.process import CommandError, CommandRunner
+from scripts.oracle import (
+    MAX_CHANGED_FILES,
+    MAX_ORACLE_OUTPUT,
+    OracleClient,
+    parse_review,
+)
+from scripts.process import CommandError, CommandResult, CommandRunner
 from scripts.review import execute_review
 
 SHA_A = "a" * 40
@@ -236,6 +243,80 @@ def test_runner_terminates_on_output_overflow(tmp_path: Path) -> None:
             timeout=5,
             max_output=1024,
         )
+
+
+def test_runner_terminates_on_watched_file_overflow(tmp_path: Path) -> None:
+    """A watched side-effect file growing past bound terminates the process."""
+    runner = CommandRunner({"PATH": os.environ["PATH"]})
+    watch_path = tmp_path / "watched.bin"
+    script = (
+        "import pathlib, time\n"
+        f"pathlib.Path({str(watch_path)!r}).write_bytes(b'x' * 65536)\n"
+        "time.sleep(5)\n"
+    )
+    command = [sys.executable, "-c", script]
+    with pytest.raises(CommandError, match="output exceeded bound"):
+        runner.run(
+            command,
+            cwd=tmp_path,
+            env=runner.base_env(),
+            timeout=5,
+            max_output=1024,
+            watch_path=watch_path,
+        )
+
+
+def test_oracle_review_rejects_oversized_write_output_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An oversized `--write-output` payload is rejected via a bounded read."""
+    pull_request = sample_pr()
+    runner = CommandRunner()
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    github = GitHubClient(runner, tmp_path, "token")
+    oracle = OracleClient(runner, github, writer, "heavy")
+
+    def fake_run(command: list[str], **_kwargs: object) -> CommandResult:
+        """Simulate Oracle writing an oversized verdict to --write-output."""
+        raw_path = Path(command[command.index("--write-output") + 1])
+        raw_path.write_bytes(b"x" * (MAX_ORACLE_OUTPUT + 1))
+        return CommandResult(tuple(command), 0, b"", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    with pytest.raises(LooprError) as captured:
+        oracle.review(pull_request, ())
+    assert captured.value.category == "oracle"
+
+
+def test_run_directory_retries_on_collision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A colliding candidate run directory is retried with a fresh suffix."""
+    pull_request = sample_pr()
+
+    class _FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
+            return cls(2026, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(review_module.dt, "datetime", _FixedDateTime)
+    tokens = iter(["aaaaaaaa", "bbbbbbbb"])
+    monkeypatch.setattr(
+        review_module.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex=next(tokens)),
+    )
+    stamp = "20260101T000000Z"
+    prefix = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}"
+    colliding = tmp_path / "artifacts" / "runs" / f"{prefix}-{stamp}-aaaaaaaa"
+    colliding.mkdir(parents=True)
+
+    result = review_module._run_directory(tmp_path, Path("artifacts"), pull_request)
+
+    assert result.name == f"{prefix}-{stamp}-bbbbbbbb"
+    assert result.is_dir()
 
 
 class FakeGitHubClient:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -89,20 +90,34 @@ def execute_review(
     return result
 
 
+_RUN_DIRECTORY_ATTEMPTS = 8
+
+
 def _run_directory(
     repo_dir: Path,
     artifacts_dir: Path,
     pull_request: PullRequest,
 ) -> Path:
-    """Return a unique deterministic-prefix run directory."""
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    """Atomically claim a collision-resistant, unique run directory."""
     root = (
         artifacts_dir
         if artifacts_dir.is_absolute()
         else repo_dir.resolve() / artifacts_dir
+    ) / "runs"
+    prefix = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}"
+    for _ in range(_RUN_DIRECTORY_ATTEMPTS):
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        candidate = root / f"{prefix}-{stamp}-{uuid.uuid4().hex}"
+        try:
+            candidate.mkdir(mode=0o700, parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        return candidate
+    raise LooprError(
+        EXIT_RACE,
+        "artifacts",
+        "could not allocate a unique review run directory",
     )
-    name = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}-{stamp}"
-    return root / "runs" / name
 
 
 def _dismiss_stale(
