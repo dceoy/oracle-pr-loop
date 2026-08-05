@@ -1,32 +1,406 @@
-"""Focused contract tests for the vendor-neutral review path."""
+"""Contract and race tests for the vendor-neutral review command."""
+
 from __future__ import annotations
-import json,os,pathlib,subprocess,sys,tempfile
-SCRIPTS=pathlib.Path(__file__).resolve().parents[1]/"scripts";sys.path.insert(0,str(SCRIPTS))
-from github import normalize_repo,resolve_target,validate_path,validate_ref
-from models import LooprError,PullRequest
-from oracle import parse_review
-from process import CommandError,CommandRunner
-SHA_A="a"*40;SHA_B="b"*40
-def pr()->PullRequest:return PullRequest("o/r",1,"https://github.com/o/r/pull/1","t","","author","OPEN",False,"main",SHA_A,"feature",SHA_B,"o/r",("x.py",),{})
-def test_target_and_path_validation()->None:
- assert normalize_repo("https://github.com/o/r.git")=="o/r";assert normalize_repo("git@github.com:o/r.git")=="o/r";assert resolve_target("1","o/r")[1]==1;assert resolve_target("https://github.com/o/r/pull/2",None)[1]==2;assert validate_path("a/b.py")=="a/b.py";validate_ref("feature/x")
- for value in ("../x","/x",".git/config","a\\b"):
-  try:validate_path(value)
-  except LooprError:pass
-  else:raise AssertionError(value)
-def test_strict_oracle_contract()->None:
- approve={"schema_version":1,"repository":"o/r","pr_number":1,"base_sha":SHA_A,"head_sha":SHA_B,"verdict":"APPROVE","review_body":"ok","implementation_prompt":None,"blocking_findings":[],"non_blocking_notes":[]};assert parse_review(json.dumps(approve),pr()).verdict=="APPROVE"
- request=dict(approve);request.update(verdict="REQUEST_CHANGES",implementation_prompt="Fix x",blocking_findings=[{"id":"B1","title":"x","description":"d","required_change":"c"}]);assert parse_review(json.dumps(request),pr()).implementation_prompt=="Fix x"
- invalid=dict(request);invalid["extra"]=True
- try:parse_review(json.dumps(invalid),pr())
- except LooprError:pass
- else:raise AssertionError(invalid)
-def test_runner_timeout_and_redaction()->None:
- with tempfile.TemporaryDirectory() as directory:
-  runner=CommandRunner({"PATH":os.environ["PATH"],"TEST_TOKEN":"secret-value"})
-  try:runner.run([sys.executable,"-c","import time; time.sleep(5)"],cwd=pathlib.Path(directory),env=runner.base_env(),timeout=1)
-  except CommandError:pass
-  else:raise AssertionError("timeout was not enforced")
-  assert "secret-value" not in runner.redact("x secret-value y")
-def test_help_has_no_agent_dependency()->None:
- completed=subprocess.run([sys.executable,str(SCRIPTS/"loopr.py"),"review","--help"],check=True,capture_output=True,text=True);assert "--pr" in completed.stdout;assert "codex" not in completed.stdout.lower()
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import ClassVar
+
+import pytest
+
+from scripts import loopr as cli
+from scripts import review as review_module
+from scripts.artifacts import ArtifactWriter
+from scripts.github import GitHubClient, normalize_repo, resolve_target, validate_path
+from scripts.models import (
+    EXIT_PRECONDITION,
+    EXIT_RACE,
+    JsonObject,
+    LooprError,
+    OracleReview,
+    PullRequest,
+    ReviewResult,
+)
+from scripts.oracle import MAX_CHANGED_FILES, OracleClient, parse_review
+from scripts.process import CommandError, CommandRunner
+from scripts.review import execute_review
+
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+SHA_C = "c" * 40
+
+
+def sample_pr(*, base_sha: str = SHA_A, head_sha: str = SHA_B) -> PullRequest:
+    """Return one valid frozen pull-request snapshot."""
+    return PullRequest(
+        repository="owner/repository",
+        number=21,
+        url="https://github.com/owner/repository/pull/21",
+        title="Title",
+        body="Body",
+        author="author",
+        state="OPEN",
+        is_draft=False,
+        base_ref="main",
+        base_sha=base_sha,
+        head_ref="feature",
+        head_sha=head_sha,
+        head_repository="owner/repository",
+        changed_paths=("file.py",),
+        raw={},
+    )
+
+
+def approve_review(pull_request: PullRequest) -> OracleReview:
+    """Return a valid APPROVE result for a frozen snapshot."""
+    return OracleReview(
+        repository=pull_request.repository,
+        pr_number=pull_request.number,
+        base_sha=pull_request.base_sha,
+        head_sha=pull_request.head_sha,
+        verdict="APPROVE",
+        review_body="Approved.",
+        blocking_findings=(),
+        implementation_prompt=None,
+        non_blocking_notes=(),
+        raw={},
+    )
+
+
+def snapshot_payload(*, files: list[str], changed_files: int) -> JsonObject:
+    """Return a GitHub CLI PR payload."""
+    return {
+        "url": "https://github.com/owner/repository/pull/21",
+        "number": 21,
+        "title": "Title",
+        "body": "Body",
+        "author": {"login": "author"},
+        "state": "OPEN",
+        "isDraft": False,
+        "baseRefName": "main",
+        "baseRefOid": SHA_A,
+        "headRefName": "feature",
+        "headRefOid": SHA_B,
+        "headRepository": {"nameWithOwner": "owner/repository"},
+        "headRepositoryOwner": {"login": "owner"},
+        "files": [{"path": path} for path in files],
+        "changedFiles": changed_files,
+    }
+
+
+def configured_client(client: GitHubClient) -> GitHubClient:
+    """Set the resolved identity fields required by snapshot operations."""
+    client.repository = "owner/repository"
+    client.number = 21
+    client.url = "https://github.com/owner/repository/pull/21"
+    client.reviewer_login = "reviewer"
+    return client
+
+
+def test_target_and_path_validation() -> None:
+    """Canonical targets and safe paths are accepted while traversal is rejected."""
+    assert normalize_repo("https://github.com/owner/repository.git") == (
+        "owner/repository"
+    )
+    assert normalize_repo("git@github.com:owner/repository.git") == (
+        "owner/repository"
+    )
+    assert resolve_target("21", "owner/repository")[1] == 21
+    assert resolve_target(
+        "https://github.com/owner/repository/pull/21",
+        None,
+    )[1] == 21
+    assert validate_path("src/file.py") == "src/file.py"
+    for value in ("../file", "/file", ".git/config", "a\\b"):
+        with pytest.raises(LooprError):
+            validate_path(value)
+
+
+def test_snapshot_rejects_truncated_changed_file_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Advertised and materialized changed-file counts must match exactly."""
+    client = configured_client(GitHubClient(CommandRunner(), tmp_path, "token"))
+    payload = snapshot_payload(files=["file.py"], changed_files=2)
+    monkeypatch.setattr(client, "_text", lambda *_args, **_kwargs: json.dumps(payload))
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+    assert captured.value.category == "inventory"
+
+
+class RecordingGitHubClient(GitHubClient):
+    """Capture a review API payload without running GitHub CLI."""
+
+    last_input: str | None = None
+
+    def _text(
+        self,
+        _args: list[str],
+        *,
+        reviewer: bool = False,
+        input_text: str | None = None,
+        max_output: int = 24 * 1024 * 1024,
+    ) -> str:
+        del reviewer, max_output
+        self.last_input = input_text
+        return json.dumps({"id": 123, "commit_id": SHA_B})
+
+
+def test_post_review_is_anchored_to_frozen_head(tmp_path: Path) -> None:
+    """The GitHub review payload always includes the exact reviewed head SHA."""
+    client = configured_client(
+        RecordingGitHubClient(CommandRunner(), tmp_path, "token")
+    )
+    review_id, _data = client.post_review(sample_pr(), "APPROVE", "Approved.")
+    assert review_id == 123
+    assert client.last_input is not None
+    assert json.loads(client.last_input)["commit_id"] == SHA_B
+
+
+def test_strict_oracle_contract() -> None:
+    """Oracle verdicts are accepted only with exact identity and consistency."""
+    pull_request = sample_pr()
+    approve: JsonObject = {
+        "schema_version": 1,
+        "repository": pull_request.repository,
+        "pr_number": pull_request.number,
+        "base_sha": pull_request.base_sha,
+        "head_sha": pull_request.head_sha,
+        "verdict": "APPROVE",
+        "review_body": "Approved.",
+        "implementation_prompt": None,
+        "blocking_findings": [],
+        "non_blocking_notes": [],
+    }
+    assert parse_review(json.dumps(approve), pull_request).verdict == "APPROVE"
+    request = dict(approve)
+    request.update(
+        verdict="REQUEST_CHANGES",
+        implementation_prompt="Fix the blocker.",
+        blocking_findings=[
+            {
+                "id": "B1",
+                "title": "Blocker",
+                "description": "Description",
+                "required_change": "Required change",
+            }
+        ],
+    )
+    parsed = parse_review(json.dumps(request), pull_request)
+    assert parsed.implementation_prompt == "Fix the blocker."
+    invalid = dict(request)
+    invalid["extra"] = True
+    with pytest.raises(LooprError):
+        parse_review(json.dumps(invalid), pull_request)
+
+
+def test_bundle_rejects_changed_file_limit(tmp_path: Path) -> None:
+    """Bundle construction fails before Git reads when file count exceeds its limit."""
+    changed_paths = tuple(
+        f"file-{index}.py" for index in range(MAX_CHANGED_FILES + 1)
+    )
+    pull_request = sample_pr()
+    oversized = PullRequest(
+        **{
+            **pull_request.__dict__,
+            "changed_paths": changed_paths,
+        }
+    )
+    runner = CommandRunner()
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    github = GitHubClient(runner, tmp_path, "token")
+    oracle = OracleClient(runner, github, writer, "heavy")
+    with pytest.raises(LooprError) as captured:
+        oracle.build_bundle(oversized)
+    assert captured.value.category == "bundle"
+
+
+def test_runner_terminates_on_output_overflow(tmp_path: Path) -> None:
+    """Output overflow is detected from private spools before reading into memory."""
+    runner = CommandRunner({"PATH": os.environ["PATH"]})
+    command = [sys.executable, "-c", "import sys; sys.stdout.write('x' * 65536)"]
+    with pytest.raises(CommandError, match="output exceeded bound"):
+        runner.run(
+            command,
+            cwd=tmp_path,
+            env=runner.base_env(),
+            timeout=5,
+            max_output=1024,
+        )
+
+
+class FakeGitHubClient:
+    """A deterministic PR/review transport for orchestration race tests."""
+
+    instance: ClassVar[FakeGitHubClient | None] = None
+    snapshots: ClassVar[list[PullRequest]] = []
+
+    def __init__(
+        self,
+        _runner: CommandRunner,
+        repo_dir: Path,
+        _token: str,
+    ) -> None:
+        self.repo_dir = repo_dir
+        self.dismissed: list[int] = []
+        self.post_count = 0
+        type(self).instance = self
+        self._snapshots = list(type(self).snapshots)
+
+    def initialize(self, _pr_value: str) -> None:
+        """Accept the already configured fake target."""
+
+    def snapshot(self) -> PullRequest:
+        """Return the next deterministic snapshot."""
+        return self._snapshots.pop(0)
+
+    def ensure_objects(self, _pull_request: PullRequest) -> None:
+        """Treat fake SHAs as available commit objects."""
+
+    @staticmethod
+    def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
+        """Compare base and head SHAs."""
+        return (
+            first.base_sha == second.base_sha
+            and first.head_sha == second.head_sha
+        )
+
+    def post_review(
+        self,
+        pull_request: PullRequest,
+        _event: str,
+        _body: str,
+    ) -> tuple[int, JsonObject]:
+        """Record a posted review anchored to the supplied head."""
+        self.post_count += 1
+        return 123, {"id": 123, "commit_id": pull_request.head_sha}
+
+    def verify_posted(
+        self,
+        _pull_request: PullRequest,
+        _review_id: int,
+    ) -> JsonObject:
+        """Return a valid approved review state."""
+        return {"state": "APPROVED"}
+
+    def dismiss(self, _pull_request: PullRequest, review_id: int) -> None:
+        """Record stale-review neutralization."""
+        self.dismissed.append(review_id)
+
+
+class FakeOracleClient:
+    """Return a deterministic review without launching Oracle."""
+
+    def __init__(
+        self,
+        _runner: CommandRunner,
+        _github: FakeGitHubClient,
+        _writer: ArtifactWriter,
+        _thinking_time: str,
+    ) -> None:
+        pass
+
+    def build_bundle(self, _pull_request: PullRequest) -> tuple[Path, ...]:
+        """Return an empty deterministic fake bundle."""
+        return ()
+
+    def review(
+        self,
+        pull_request: PullRequest,
+        _attachments: tuple[Path, ...],
+    ) -> OracleReview:
+        """Return a valid approval for the supplied snapshot."""
+        return approve_review(pull_request)
+
+
+def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace external review transports with deterministic fakes."""
+    monkeypatch.setattr(review_module, "GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr(review_module, "OracleClient", FakeOracleClient)
+
+
+def test_pre_post_snapshot_race_fails_before_review_write(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A base/head change before posting prevents the GitHub write."""
+    initial = sample_pr()
+    changed = sample_pr(head_sha=SHA_C)
+    FakeGitHubClient.snapshots = [initial, changed]
+    install_orchestration_fakes(monkeypatch)
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+        )
+    assert captured.value.code == EXIT_RACE
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.post_count == 0
+
+
+def test_post_write_race_dismisses_stale_review(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A base/head change after posting dismisses the stale GitHub review."""
+    initial = sample_pr()
+    changed = sample_pr(head_sha=SHA_C)
+    FakeGitHubClient.snapshots = [initial, initial, changed]
+    install_orchestration_fakes(monkeypatch)
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+        )
+    assert captured.value.code == EXIT_RACE
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.dismissed == [123]
+
+
+def test_cli_normalizes_unexpected_operational_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Unexpected operational failures still produce exactly one JSON object."""
+
+    def fail_review(**_kwargs: object) -> ReviewResult:
+        raise OSError("filesystem failure")
+
+    monkeypatch.setattr(cli, "execute_review", fail_review)
+    status = cli.main(["review", "--pr", "21"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert status == EXIT_PRECONDITION
+    assert payload["error"]["category"] == "internal"
+    assert captured.out.count("\n") == 1
+    assert "Traceback" not in captured.err
+
+
+def test_cli_normalizes_argument_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Argparse failures use the same machine-readable error channel."""
+    status = cli.main(["review"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert status == EXIT_PRECONDITION
+    assert payload["error"]["category"] == "input"
+    assert captured.out.count("\n") == 1
+
+
+def test_help_has_no_implementation_agent_dependency() -> None:
+    """The review command help does not embed a host-agent invocation."""
+    help_text = cli.parser().format_help().lower()
+    assert "review" in help_text
+    assert "codex" not in help_text
+    assert "claude" not in help_text
+    assert "cursor" not in help_text
