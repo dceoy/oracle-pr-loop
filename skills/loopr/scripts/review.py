@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import stat
+import sys
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactWriter
 from .github import GitHubClient
-from .models import EXIT_ORACLE, EXIT_RACE, LooprError, ReviewResult
+from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
 from .oracle import OracleClient
 from .process import CommandRunner
 
@@ -63,7 +65,7 @@ def execute_review(
         )
     event = "APPROVE" if verdict.verdict == "APPROVE" else "REQUEST_CHANGES"
     review_id, posted = github.post_review(initial, event, body)
-    writer.json("github-review.json", posted)
+    _persist_best_effort(writer, "github-review.json", posted)
 
     try:
         after_post = github.snapshot()
@@ -92,12 +94,62 @@ def execute_review(
         implementation_prompt=verdict.implementation_prompt,
         artifacts_dir=str(writer.root),
     )
-    writer.json("result.json", result.as_json())
+    _persist_best_effort(writer, "result.json", result.as_json())
     return result
+
+
+def _persist_best_effort(
+    writer: ArtifactWriter, relative: str, value: JsonValue
+) -> None:
+    """Persist an audit artifact without failing an already-verified GitHub review.
+
+    Every write here runs after `post_review()` has mutated GitHub state, so a
+    local artifact-write failure (disk full, permission error) must not be
+    reported as a command failure: that would make a host retry re-post a
+    duplicate review without ever learning the first review's ID.
+    """
+    try:
+        writer.json(relative, value)
+    except LooprError as exc:
+        sys.stderr.write(
+            f"loopr review: warning: failed to persist artifact {relative}: {exc}\n"
+        )
 
 
 MAX_POSTED_BODY_BYTES = 65_000
 _RUN_DIRECTORY_ATTEMPTS = 8
+
+
+def _trusted_runs_root(repo_dir: Path, artifacts_dir: Path) -> Path:
+    """Descend to the run root from a trusted anchor without following symlinks.
+
+    `artifacts_dir` is typically a repository-relative path (e.g. `.pr-loopr`),
+    and the checked-out pull request controls its own repository contents, so a
+    malicious head could plant a symlink there to redirect artifact writes
+    outside the intended root. Each path component is created fresh or
+    verified to already be a real directory before descending into it.
+    """
+    if artifacts_dir.is_absolute():
+        anchor = artifacts_dir
+        parts: tuple[str, ...] = ("runs",)
+    else:
+        anchor = repo_dir.resolve()
+        parts = (*artifacts_dir.parts, "runs")
+    current = anchor
+    for part in parts:
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            current.mkdir(mode=0o700)
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            raise LooprError(
+                EXIT_RACE,
+                "artifacts",
+                "artifact directory path contains a non-directory or symlink",
+            )
+    return current
 
 
 def _run_directory(
@@ -106,17 +158,13 @@ def _run_directory(
     pull_request: PullRequest,
 ) -> Path:
     """Atomically claim a collision-resistant, unique run directory."""
-    root = (
-        artifacts_dir
-        if artifacts_dir.is_absolute()
-        else repo_dir.resolve() / artifacts_dir
-    ) / "runs"
+    root = _trusted_runs_root(repo_dir, artifacts_dir)
     prefix = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}"
     for _ in range(_RUN_DIRECTORY_ATTEMPTS):
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         candidate = root / f"{prefix}-{stamp}-{uuid.uuid4().hex}"
         try:
-            candidate.mkdir(mode=0o700, parents=True, exist_ok=False)
+            candidate.mkdir(mode=0o700)
         except FileExistsError:
             continue
         return candidate

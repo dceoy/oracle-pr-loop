@@ -497,6 +497,54 @@ def test_oracle_review_rejects_oversized_write_output_file(
     assert captured.value.category == "oracle"
 
 
+def test_oracle_review_rejects_fifo_write_output_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A FIFO left at `--write-output` is rejected instead of blocking forever."""
+    pull_request = sample_pr()
+    runner = CommandRunner()
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    github = GitHubClient(runner, tmp_path, "token")
+    oracle = OracleClient(runner, github, writer, "heavy")
+
+    def fake_run(command: list[str], **_kwargs: object) -> CommandResult:
+        """Simulate Oracle leaving a FIFO instead of a regular file."""
+        raw_path = Path(command[command.index("--write-output") + 1])
+        os.mkfifo(raw_path)
+        return CommandResult(tuple(command), 0, b"", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    with pytest.raises(LooprError) as captured:
+        oracle.review(pull_request, ())
+    assert captured.value.category == "oracle"
+
+
+def test_oracle_review_rejects_symlinked_write_output_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A symlink left at `--write-output` is rejected without being followed."""
+    pull_request = sample_pr()
+    runner = CommandRunner()
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    github = GitHubClient(runner, tmp_path, "token")
+    oracle = OracleClient(runner, github, writer, "heavy")
+    outside = tmp_path / "outside.json"
+    outside.write_text("secret")
+
+    def fake_run(command: list[str], **_kwargs: object) -> CommandResult:
+        """Simulate Oracle leaving a symlink instead of writing a real file."""
+        raw_path = Path(command[command.index("--write-output") + 1])
+        raw_path.symlink_to(outside)
+        return CommandResult(tuple(command), 0, b"", "")
+
+    monkeypatch.setattr(runner, "run", fake_run)
+    with pytest.raises(LooprError) as captured:
+        oracle.review(pull_request, ())
+    assert captured.value.category == "oracle"
+
+
 def test_run_directory_retries_on_collision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -525,6 +573,35 @@ def test_run_directory_retries_on_collision(
 
     assert result.name == f"{prefix}-{stamp}-bbbbbbbb"
     assert result.is_dir()
+
+
+def test_run_directory_rejects_symlinked_artifacts_component(tmp_path: Path) -> None:
+    """A repository-controlled symlink in the artifacts path is rejected."""
+    pull_request = sample_pr()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "artifacts").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(LooprError) as captured:
+        review_module._run_directory(tmp_path, Path("artifacts"), pull_request)
+
+    assert captured.value.category == "artifacts"
+    assert not list(outside.iterdir())
+
+
+def test_run_directory_rejects_symlinked_runs_component(tmp_path: Path) -> None:
+    """A repository-controlled symlink for the `runs` directory is rejected."""
+    pull_request = sample_pr()
+    (tmp_path / "artifacts").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "artifacts" / "runs").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(LooprError) as captured:
+        review_module._run_directory(tmp_path, Path("artifacts"), pull_request)
+
+    assert captured.value.category == "artifacts"
+    assert not list(outside.iterdir())
 
 
 class FakeGitHubClient:
@@ -687,8 +764,38 @@ def test_execute_review_rejects_oversized_posted_body(
         )
     assert captured.value.code == EXIT_ORACLE
     assert captured.value.category == "oracle_schema"
+
+
+def test_execute_review_survives_post_write_artifact_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An artifact write failure after a verified post does not fail the command."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    install_orchestration_fakes(monkeypatch)
+
+    original_json = ArtifactWriter.json
+
+    def failing_json(self: ArtifactWriter, relative: str, value: JsonObject) -> Path:
+        """Fail only the post-POST audit writes to simulate a disk-full error."""
+        if relative in {"github-review.json", "result.json"}:
+            raise LooprError(EXIT_PRECONDITION, "artifacts", "disk full")
+        return original_json(self, relative, value)
+
+    monkeypatch.setattr(ArtifactWriter, "json", failing_json)
+
+    result = execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        artifacts_dir=Path("artifacts"),
+        thinking_time="heavy",
+        runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+    )
+
+    assert result.github_review_id == 123
     assert FakeGitHubClient.instance is not None
-    assert FakeGitHubClient.instance.post_count == 0
+    assert FakeGitHubClient.instance.dismissed == []
 
 
 def test_cli_normalizes_unexpected_operational_failure(

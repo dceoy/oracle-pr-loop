@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
@@ -406,8 +408,16 @@ class OracleClient:
             )
         except CommandError as exc:
             raise LooprError(EXIT_ORACLE, "oracle", str(exc)) from exc
+        descriptor: int | None = None
         try:
-            with raw_path.open("rb") as handle:
+            descriptor = os.open(
+                raw_path,
+                os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
+            )
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError("Oracle output path is not a regular file")
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = None
                 raw_bytes = handle.read(MAX_ORACLE_OUTPUT + 1)
         except OSError as exc:
             raise LooprError(
@@ -415,6 +425,9 @@ class OracleClient:
                 "oracle",
                 "Oracle output is missing or invalid UTF-8",
             ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         if len(raw_bytes) > MAX_ORACLE_OUTPUT:
             raise LooprError(
                 EXIT_ORACLE,
