@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise it directly
 import sys
 import time
@@ -184,6 +185,57 @@ def test_post_review_is_anchored_to_frozen_head(tmp_path: Path) -> None:
     assert json.loads(client.last_input)["commit_id"] == SHA_B
 
 
+def _run_git(git: str, args: list[str], *, cwd: Path) -> str:
+    """Run one trusted git command and return its captured stdout."""
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed, trusted argv
+        [git, *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def test_patch_disables_external_diff_and_textconv(tmp_path: Path) -> None:
+    """`patch()` ignores GIT_EXTERNAL_DIFF and textconv drivers from the environment."""
+    git = shutil.which("git")
+    assert git is not None
+    marker = tmp_path / "external-diff-invoked"
+    spy_script = tmp_path / "spy-diff.sh"
+    spy_script.write_text(f"#!/bin/sh\ntouch {marker!s}\nexit 0\n")
+    spy_script.chmod(0o755)
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _run_git(git, ["init", "-q"], cwd=repo_dir)
+    _run_git(git, ["config", "user.email", "test@example.com"], cwd=repo_dir)
+    _run_git(git, ["config", "user.name", "Test"], cwd=repo_dir)
+
+    tracked_file = repo_dir / "file.py"
+    tracked_file.write_text("original\n")
+    _run_git(git, ["add", "file.py"], cwd=repo_dir)
+    _run_git(git, ["commit", "-q", "-m", "base"], cwd=repo_dir)
+    base_sha = _run_git(git, ["rev-parse", "HEAD"], cwd=repo_dir).strip()
+
+    tracked_file.write_text("changed\n")
+    _run_git(git, ["commit", "-q", "-am", "head"], cwd=repo_dir)
+    head_sha = _run_git(git, ["rev-parse", "HEAD"], cwd=repo_dir).strip()
+
+    runner = CommandRunner({
+        **os.environ,
+        "GIT_EXTERNAL_DIFF": str(spy_script),
+    })
+    github = GitHubClient(runner, repo_dir, "token")
+    pull_request = sample_pr(base_sha=base_sha, head_sha=head_sha)
+
+    patch_bytes = github.patch(pull_request, max_output=1024 * 1024)
+
+    assert not marker.exists()
+    assert b"-original" in patch_bytes
+    assert b"+changed" in patch_bytes
+
+
 def test_strict_oracle_contract() -> None:
     """Oracle verdicts are accepted only with exact identity and consistency."""
     pull_request = sample_pr()
@@ -343,6 +395,37 @@ def test_runner_terminates_on_watched_file_overflow(tmp_path: Path) -> None:
             max_output=1024,
             watch_path=watch_path,
         )
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Return whether pid names a live, non-zombie process."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    return "State:\tZ" not in status
+
+
+def test_runner_reaps_descendants_after_leader_exits(tmp_path: Path) -> None:
+    """A same-session descendant left behind by an exited leader is reaped."""
+    runner = CommandRunner({"PATH": os.environ["PATH"]})
+    marker = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys\n"
+        f"marker = {str(marker)!r}\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(30)']\n"
+        ")\n"
+        "with open(marker, 'w') as handle:\n"
+        "    handle.write(str(child.pid))\n"
+        "sys.exit(0)\n"
+    )
+    command = [sys.executable, "-c", script]
+    result = runner.run(command, cwd=tmp_path, env=runner.base_env(), timeout=5)
+
+    assert result.returncode == 0
+    child_pid = int(marker.read_text())
+    assert not _pid_is_running(child_pid)
 
 
 def test_runner_terminates_process_group_on_interrupt(

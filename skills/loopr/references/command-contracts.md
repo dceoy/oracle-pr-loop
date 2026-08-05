@@ -13,7 +13,19 @@ Optional arguments are `--repo-dir`, `--artifacts-dir`, and `--oracle-thinking-t
 Exit status is `0` for either valid verdict:
 
 ```json
-{"schema_version":1,"command":"review","repository":"owner/repository","pr_number":123,"base_sha":"40-character SHA","head_sha":"40-character SHA","verdict":"APPROVE","github_review_id":123456789,"blocking_findings":[],"implementation_prompt":null,"artifacts_dir":"/private/path"}
+{
+  "schema_version": 1,
+  "command": "review",
+  "repository": "owner/repository",
+  "pr_number": 123,
+  "base_sha": "40-character SHA",
+  "head_sha": "40-character SHA",
+  "verdict": "APPROVE",
+  "github_review_id": 123456789,
+  "blocking_findings": [],
+  "implementation_prompt": null,
+  "artifacts_dir": "/private/path"
+}
 ```
 
 For `REQUEST_CHANGES`, `blocking_findings` is a non-empty array of objects with exactly `id`, `title`, `description`, and `required_change`; `implementation_prompt` is a non-empty string for the invoking host agent. The command never launches an implementation agent.
@@ -23,7 +35,14 @@ For `REQUEST_CHANGES`, `blocking_findings` is a non-empty array of objects with 
 Operational and contract failures exit non-zero and emit:
 
 ```json
-{"schema_version":1,"command":"review","error":{"category":"stale_state","message":"bounded redacted diagnostic"}}
+{
+  "schema_version": 1,
+  "command": "review",
+  "error": {
+    "category": "stale_state",
+    "message": "bounded redacted diagnostic"
+  }
+}
 ```
 
 Detailed diagnostics go to stderr. Stable exit classes are precondition/input `2`, Oracle/schema `3`, GitHub/write `4`, and stale base/head state `6`.

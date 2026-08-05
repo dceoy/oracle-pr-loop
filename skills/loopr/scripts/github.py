@@ -447,6 +447,8 @@ class GitHubClient:
         return self.git_bytes(
             [
                 "diff",
+                "--no-ext-diff",
+                "--no-textconv",
                 "--full-index",
                 "--find-renames",
                 f"{pull_request.base_sha}...{pull_request.head_sha}",

@@ -230,6 +230,7 @@ class CommandRunner:
                     argv,
                     watch_path,
                 )
+                self._terminate_group(proc)
                 stdout = self._read_spool(stdout_file, max_output)
                 stderr_bytes = self._read_spool(stderr_file, stderr_limit)
             except BaseException:
@@ -283,14 +284,33 @@ class CommandRunner:
 
     @staticmethod
     def _terminate_group(proc: subprocess.Popen[bytes]) -> None:
-        """Terminate and reap the complete subprocess group."""
-        if proc.poll() is not None:
-            return
-        with suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(timeout=TERMINATION_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
+        """Terminate and reap the complete subprocess group.
+
+        The group leader exiting does not imply the group is empty: a
+        same-session descendant can outlive it. Signal the whole process
+        group by pgid regardless of the leader's state, then poll the group
+        itself (not just the leader) until no member remains.
+        """
+        pgid = proc.pid
+        if proc.poll() is None:
             with suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+                os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=TERMINATION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                with suppress(ProcessLookupError):
+                    os.killpg(pgid, signal.SIGKILL)
+                proc.wait()
+        else:
+            with suppress(ProcessLookupError):
+                os.killpg(pgid, signal.SIGTERM)
+
+        deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(POLL_INTERVAL_SECONDS)
+        with suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
