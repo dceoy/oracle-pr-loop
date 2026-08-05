@@ -105,5 +105,8 @@ class ArtifactWriter:
         if isinstance(value, list):
             return [self._redact(item) for item in value]
         if isinstance(value, dict):
-            return {key: self._redact(item) for key, item in value.items()}
+            return {
+                self.runner.redact(key): self._redact(item)
+                for key, item in value.items()
+            }
         return value

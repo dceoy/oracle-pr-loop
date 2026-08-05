@@ -349,7 +349,22 @@ def test_artifact_json_redacts_secret_before_escaping(tmp_path: Path) -> None:
     path = writer.json("snapshot.json", {"token": secret, "nested": [secret]})
 
     written = path.read_text(encoding="utf-8")
-    assert secret not in written
+    escaped_secret = json.dumps(secret)[1:-1]
+    assert escaped_secret not in written
+    assert written.count("[REDACTED]") == 2
+
+
+def test_artifact_json_redacts_secret_in_dict_key(tmp_path: Path) -> None:
+    """A credential used as a JSON object key is also redacted."""
+    secret = 'abc"def\\ghi'
+    runner = CommandRunner({"SSH_PRIVATE_KEY": secret})
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+
+    path = writer.json("snapshot.json", {secret: "value"})
+
+    written = path.read_text(encoding="utf-8")
+    escaped_secret = json.dumps(secret)[1:-1]
+    assert escaped_secret not in written
     assert "[REDACTED]" in written
 
 
@@ -452,13 +467,15 @@ def test_runner_detects_overflow_from_descendant_during_termination_grace(
     child_script = tmp_path / "child.py"
     child_script.write_text(
         "import signal, time, pathlib\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        f"pathlib.Path({str(ready_path)!r}).write_text('ready')\n"
         f"path = pathlib.Path({str(watch_path)!r})\n"
-        "for _ in range(400):\n"
-        "    with path.open('ab') as handle:\n"
-        "        handle.write(b'x' * 64)\n"
-        "    time.sleep(0.01)\n",
+        "def on_term(*_args):\n"
+        "    for _ in range(400):\n"
+        "        with path.open('ab') as handle:\n"
+        "            handle.write(b'x' * 64)\n"
+        "        time.sleep(0.005)\n"
+        "signal.signal(signal.SIGTERM, on_term)\n"
+        f"pathlib.Path({str(ready_path)!r}).write_text('ready')\n"
+        "time.sleep(30)\n",
         encoding="utf-8",
     )
     leader_script = (
@@ -668,6 +685,24 @@ def test_run_directory_rejects_symlinked_absolute_artifacts_dir(
     outside.mkdir()
     artifacts_dir = tmp_path / "artifacts"
     artifacts_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(LooprError) as captured:
+        review_module._run_directory(tmp_path, artifacts_dir, pull_request)
+
+    assert captured.value.category == "artifacts"
+    assert not list(outside.iterdir())
+
+
+def test_run_directory_rejects_symlinked_ancestor_of_absolute_artifacts_dir(
+    tmp_path: Path,
+) -> None:
+    """A symlink in an ancestor of an absolute `--artifacts-dir` is rejected."""
+    pull_request = sample_pr()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    artifacts_dir = link / "artifacts"
 
     with pytest.raises(LooprError) as captured:
         review_module._run_directory(tmp_path, artifacts_dir, pull_request)
