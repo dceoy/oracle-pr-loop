@@ -10,8 +10,7 @@ from typing import ClassVar
 
 import pytest
 
-from scripts import loopr as cli
-from scripts import review as review_module
+from scripts import loopr as cli, review as review_module
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient, normalize_repo, resolve_target, validate_path
 from scripts.models import (
@@ -104,14 +103,15 @@ def test_target_and_path_validation() -> None:
     assert normalize_repo("https://github.com/owner/repository.git") == (
         "owner/repository"
     )
-    assert normalize_repo("git@github.com:owner/repository.git") == (
-        "owner/repository"
-    )
+    assert normalize_repo("git@github.com:owner/repository.git") == ("owner/repository")
     assert resolve_target("21", "owner/repository")[1] == 21
-    assert resolve_target(
-        "https://github.com/owner/repository/pull/21",
-        None,
-    )[1] == 21
+    assert (
+        resolve_target(
+            "https://github.com/owner/repository/pull/21",
+            None,
+        )[1]
+        == 21
+    )
     assert validate_path("src/file.py") == "src/file.py"
     for value in ("../file", "/file", ".git/config", "a\\b"):
         with pytest.raises(LooprError):
@@ -199,16 +199,12 @@ def test_strict_oracle_contract() -> None:
 
 def test_bundle_rejects_changed_file_limit(tmp_path: Path) -> None:
     """Bundle construction fails before Git reads when file count exceeds its limit."""
-    changed_paths = tuple(
-        f"file-{index}.py" for index in range(MAX_CHANGED_FILES + 1)
-    )
+    changed_paths = tuple(f"file-{index}.py" for index in range(MAX_CHANGED_FILES + 1))
     pull_request = sample_pr()
-    oversized = PullRequest(
-        **{
-            **pull_request.__dict__,
-            "changed_paths": changed_paths,
-        }
-    )
+    oversized = PullRequest(**{
+        **pull_request.__dict__,
+        "changed_paths": changed_paths,
+    })
     runner = CommandRunner()
     writer = ArtifactWriter(tmp_path / "artifacts", runner)
     github = GitHubClient(runner, tmp_path, "token")
@@ -263,10 +259,7 @@ class FakeGitHubClient:
     @staticmethod
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
         """Compare base and head SHAs."""
-        return (
-            first.base_sha == second.base_sha
-            and first.head_sha == second.head_sha
-        )
+        return first.base_sha == second.base_sha and first.head_sha == second.head_sha
 
     def post_review(
         self,
@@ -371,7 +364,6 @@ def test_cli_normalizes_unexpected_operational_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Unexpected operational failures still produce exactly one JSON object."""
-
     def fail_review(**_kwargs: object) -> ReviewResult:
         raise OSError("filesystem failure")
 
