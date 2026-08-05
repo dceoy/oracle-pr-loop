@@ -5,15 +5,17 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise it directly
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar, TypeVar
+from typing import ClassVar, TypeVar, cast
 
 import pytest
 
-from scripts import loopr as cli, review as review_module
+from scripts import loopr as cli, process as process_module, review as review_module
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient, normalize_repo, resolve_target, validate_path
 from scripts.models import (
@@ -264,6 +266,52 @@ def test_runner_terminates_on_watched_file_overflow(tmp_path: Path) -> None:
             max_output=1024,
             watch_path=watch_path,
         )
+
+
+def test_runner_terminates_process_group_on_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A KeyboardInterrupt while monitoring still reaps the detached child."""
+    runner = CommandRunner({"PATH": os.environ["PATH"]})
+    command = [sys.executable, "-c", "import time; time.sleep(30)"]
+    pids: list[int] = []
+
+    def recording_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        proc = cast(
+            "subprocess.Popen[bytes]",
+            subprocess.Popen(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed test-controlled argv
+                *args,  # type: ignore[arg-type]
+                **kwargs,
+            ),
+        )
+        pids.append(proc.pid)
+        return proc
+
+    def raise_interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        process_module,
+        "subprocess",
+        SimpleNamespace(
+            Popen=recording_popen,
+            DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
+    monkeypatch.setattr(
+        process_module,
+        "time",
+        SimpleNamespace(monotonic=time.monotonic, sleep=raise_interrupt),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.run(command, cwd=tmp_path, env=runner.base_env(), timeout=5)
+
+    assert pids
+    with pytest.raises(ProcessLookupError):
+        os.kill(pids[0], 0)
 
 
 def test_oracle_review_rejects_oversized_write_output_file(

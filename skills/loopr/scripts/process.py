@@ -165,7 +165,10 @@ class CommandRunner:
         stdout/stderr spools so a process that writes its real payload to a
         side file (rather than stdout) cannot exhaust disk during a long
         timeout window; the process group is terminated as soon as it grows
-        past `max_output`.
+        past `max_output`. Because the child runs in its own session, a
+        `KeyboardInterrupt` raised anywhere during monitoring is caught to
+        terminate and reap the child before propagating, so an interrupt
+        cannot leave it running past the command's lifetime.
         """
         argv = tuple(str(value) for value in args)
         if not argv or any("\0" in value for value in argv):
@@ -195,9 +198,26 @@ class CommandRunner:
                 start_new_session=True,
                 shell=False,
             )
-            deadline = time.monotonic() + timeout
-            stderr_limit = min(max_output, MAX_STDERR)
-            while proc.poll() is None:
+            try:
+                deadline = time.monotonic() + timeout
+                stderr_limit = min(max_output, MAX_STDERR)
+                while proc.poll() is None:
+                    self._enforce_output_bounds(
+                        proc,
+                        stdout_file,
+                        stderr_file,
+                        max_output,
+                        stderr_limit,
+                        argv,
+                        watch_path,
+                    )
+                    if time.monotonic() >= deadline:
+                        self._terminate_group(proc)
+                        command = self.redact(" ".join(argv))
+                        message = f"command timed out after {timeout}s: {command}"
+                        raise CommandError(message)
+                    time.sleep(POLL_INTERVAL_SECONDS)
+
                 self._enforce_output_bounds(
                     proc,
                     stdout_file,
@@ -207,24 +227,11 @@ class CommandRunner:
                     argv,
                     watch_path,
                 )
-                if time.monotonic() >= deadline:
-                    self._terminate_group(proc)
-                    command = self.redact(" ".join(argv))
-                    message = f"command timed out after {timeout}s: {command}"
-                    raise CommandError(message)
-                time.sleep(POLL_INTERVAL_SECONDS)
-
-            self._enforce_output_bounds(
-                proc,
-                stdout_file,
-                stderr_file,
-                max_output,
-                stderr_limit,
-                argv,
-                watch_path,
-            )
-            stdout = self._read_spool(stdout_file, max_output)
-            stderr_bytes = self._read_spool(stderr_file, stderr_limit)
+                stdout = self._read_spool(stdout_file, max_output)
+                stderr_bytes = self._read_spool(stderr_file, stderr_limit)
+            except BaseException:
+                self._terminate_group(proc)
+                raise
 
         stderr = self.redact(stderr_bytes.decode("utf-8", "replace"))
         result = CommandResult(argv, proc.returncode, stdout, stderr)
