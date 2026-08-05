@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import signal
-import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests model Popen state
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -22,6 +20,9 @@ from scripts.oracle import (
     OracleClient,
 )
 from scripts.process import CommandError, CommandRunner
+
+if TYPE_CHECKING:
+    import subprocess
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
