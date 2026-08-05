@@ -120,17 +120,15 @@ class CommandRunner:
 
     def gh_env(self, reviewer_token: str | None = None) -> dict[str, str]:
         """Return the GitHub CLI environment for read or review operations."""
-        env = self.allowlisted_env(
-            {
-                "GH_TOKEN",
-                "GITHUB_TOKEN",
-                "GH_CONFIG_DIR",
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "NO_PROXY",
-            }
-        )
+        env = self.allowlisted_env({
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_CONFIG_DIR",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+        })
         if reviewer_token is not None:
             env.pop("GITHUB_TOKEN", None)
             env["GH_TOKEN"] = reviewer_token
@@ -139,17 +137,15 @@ class CommandRunner:
 
     def oracle_env(self) -> dict[str, str]:
         """Return the minimal browser environment supplied to Oracle."""
-        return self.allowlisted_env(
-            {
-                "CHROME_PATH",
-                "DISPLAY",
-                "WAYLAND_DISPLAY",
-                "XAUTHORITY",
-                "DBUS_SESSION_BUS_ADDRESS",
-                "ORACLE_BROWSER_PROFILE_DIR",
-                "ORACLE_CHATGPT_ACCOUNT_EMAIL",
-            }
-        )
+        return self.allowlisted_env({
+            "CHROME_PATH",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "ORACLE_BROWSER_PROFILE_DIR",
+            "ORACLE_CHATGPT_ACCOUNT_EMAIL",
+        })
 
     def run(
         self,
@@ -223,9 +219,9 @@ class CommandRunner:
         stderr = self.redact(stderr_bytes.decode("utf-8", "replace"))
         result = CommandResult(argv, proc.returncode, stdout, stderr)
         if check and proc.returncode != 0:
-            detail = stderr.strip() or self.redact(
-                stdout.decode("utf-8", "replace")
-            ).strip()
+            detail = (
+                stderr.strip() or self.redact(stdout.decode("utf-8", "replace")).strip()
+            )
             command = self.redact(" ".join(argv))
             message = f"command failed ({proc.returncode}): {command}: {detail[:2000]}"
             raise CommandError(message)
