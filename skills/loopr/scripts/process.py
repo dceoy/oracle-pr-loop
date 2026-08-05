@@ -52,7 +52,10 @@ class CommandRunner:
                     "TOKEN",
                     "SECRET",
                     "PASSWORD",
+                    "PASSWD",
                     "API_KEY",
+                    "ACCESS_KEY",
+                    "PRIVATE_KEY",
                     "CREDENTIAL",
                 )
             )

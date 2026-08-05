@@ -28,6 +28,7 @@ MAX_PATCH_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_ATTACHMENTS_BYTES = 20 * 1024 * 1024
 MAX_ORACLE_OUTPUT = 4 * 1024 * 1024
+MAX_REVIEW_BODY_BYTES = 60_000
 TOP_KEYS = {
     "schema_version",
     "repository",
@@ -154,6 +155,12 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
             "invalid Oracle verdict",
         )
     review_body = _string(value.get("review_body"), field="review_body")
+    if len(review_body.encode("utf-8")) > MAX_REVIEW_BODY_BYTES:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle_schema",
+            "Oracle review_body exceeds the GitHub review body bound",
+        )
     blockers = _blocking_findings(value.get("blocking_findings"))
     notes = _notes(value.get("non_blocking_notes"))
     prompt_value = value.get("implementation_prompt")

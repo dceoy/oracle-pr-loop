@@ -19,6 +19,7 @@ from scripts import loopr as cli, process as process_module, review as review_mo
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient, normalize_repo, resolve_target, validate_path
 from scripts.models import (
+    EXIT_ORACLE,
     EXIT_PRECONDITION,
     EXIT_RACE,
     JsonObject,
@@ -30,6 +31,7 @@ from scripts.models import (
 from scripts.oracle import (
     MAX_CHANGED_FILES,
     MAX_ORACLE_OUTPUT,
+    MAX_REVIEW_BODY_BYTES,
     OracleClient,
     parse_review,
 )
@@ -219,6 +221,43 @@ def test_strict_oracle_contract() -> None:
         parse_review(json.dumps(invalid), pull_request)
 
 
+def _review_payload(pull_request: PullRequest, *, review_body: str) -> JsonObject:
+    """Return a minimal valid APPROVE payload with the given review_body."""
+    return {
+        "schema_version": 1,
+        "repository": pull_request.repository,
+        "pr_number": pull_request.number,
+        "base_sha": pull_request.base_sha,
+        "head_sha": pull_request.head_sha,
+        "verdict": "APPROVE",
+        "review_body": review_body,
+        "implementation_prompt": None,
+        "blocking_findings": [],
+        "non_blocking_notes": [],
+    }
+
+
+def test_oracle_review_rejects_oversized_review_body() -> None:
+    """The bound is enforced on encoded UTF-8 bytes, not character count."""
+    pull_request = sample_pr()
+    # "é" is 2 bytes in UTF-8: a char-count check would wrongly accept this.
+    at_bound = "é" * (MAX_REVIEW_BODY_BYTES // 2)
+    assert len(at_bound.encode("utf-8")) == MAX_REVIEW_BODY_BYTES
+    accepted = parse_review(
+        json.dumps(_review_payload(pull_request, review_body=at_bound)),
+        pull_request,
+    )
+    assert accepted.review_body == at_bound
+
+    over_bound = at_bound + "é"
+    with pytest.raises(LooprError) as captured:
+        parse_review(
+            json.dumps(_review_payload(pull_request, review_body=over_bound)),
+            pull_request,
+        )
+    assert captured.value.category == "oracle_schema"
+
+
 def test_bundle_rejects_changed_file_limit(tmp_path: Path) -> None:
     """Bundle construction fails before Git reads when file count exceeds its limit."""
     changed_paths = tuple(f"file-{index}.py" for index in range(MAX_CHANGED_FILES + 1))
@@ -230,6 +269,44 @@ def test_bundle_rejects_changed_file_limit(tmp_path: Path) -> None:
     oracle = OracleClient(runner, github, writer, "heavy")
     with pytest.raises(LooprError) as captured:
         oracle.build_bundle(oversized)
+    assert captured.value.category == "bundle"
+
+
+def test_redactor_matches_legacy_credential_aliases() -> None:
+    """PASSWD, ACCESS_KEY, and PRIVATE_KEY variables register as secrets."""
+    runner = CommandRunner({
+        "SSH_PRIVATE_KEY": "private-key-secret",
+        "DB_PASSWD": "passwd-secret-value",
+        "AWS_ACCESS_KEY_ID": "access-key-secret",
+    })
+    for secret in (
+        "private-key-secret",
+        "passwd-secret-value",
+        "access-key-secret",
+    ):
+        assert runner.contains_secret(secret)
+        assert runner.redact(f"leaked: {secret}") == "leaked: [REDACTED]"
+
+
+def test_bundle_rejects_patch_with_legacy_alias_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A patch leaking a PASSWD/ACCESS_KEY/PRIVATE_KEY value is refused as evidence."""
+    pull_request = sample_pr()
+    runner = CommandRunner({"SSH_PRIVATE_KEY": "private-key-secret"})
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    github = GitHubClient(runner, tmp_path, "token")
+    oracle = OracleClient(runner, github, writer, "heavy")
+
+    def fake_patch(_pull_request: PullRequest, *, max_output: int) -> bytes:
+        """Simulate a patch that leaks a legacy-alias credential value."""
+        del max_output
+        return b"diff --git leaked private-key-secret"
+
+    monkeypatch.setattr(github, "patch", fake_patch)
+    with pytest.raises(LooprError) as captured:
+        oracle.build_bundle(pull_request)
     assert captured.value.category == "bundle"
 
 
@@ -496,6 +573,39 @@ def test_post_write_race_dismisses_stale_review(
     assert captured.value.code == EXIT_RACE
     assert FakeGitHubClient.instance is not None
     assert FakeGitHubClient.instance.dismissed == [123]
+
+
+def test_execute_review_rejects_oversized_posted_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The review body plus audit footer is bounded before the GitHub write."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial]
+    install_orchestration_fakes(monkeypatch)
+
+    class OversizedOracleClient(FakeOracleClient):
+        def review(
+            self,
+            pull_request: PullRequest,
+            _attachments: tuple[Path, ...],
+        ) -> OracleReview:
+            """Return an approval whose body overflows the posted-body bound."""
+            return replace(approve_review(pull_request), review_body="x" * 70_000)
+
+    monkeypatch.setattr(review_module, "OracleClient", OversizedOracleClient)
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+        )
+    assert captured.value.code == EXIT_ORACLE
+    assert captured.value.category == "oracle_schema"
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.post_count == 0
 
 
 def test_cli_normalizes_unexpected_operational_failure(

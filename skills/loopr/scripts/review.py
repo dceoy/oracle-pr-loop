@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactWriter
 from .github import GitHubClient
-from .models import EXIT_RACE, LooprError, ReviewResult
+from .models import EXIT_ORACLE, EXIT_RACE, LooprError, ReviewResult
 from .oracle import OracleClient
 from .process import CommandRunner
 
@@ -55,6 +55,12 @@ def execute_review(
         f"Reviewed base: `{initial.base_sha}`\n"
         f"Reviewed head: `{initial.head_sha}`\n"
     )
+    if len(body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle_schema",
+            "review body with audit footer exceeds GitHub's body limit",
+        )
     event = "APPROVE" if verdict.verdict == "APPROVE" else "REQUEST_CHANGES"
     review_id, posted = github.post_review(initial, event, body)
     writer.json("github-review.json", posted)
@@ -90,6 +96,7 @@ def execute_review(
     return result
 
 
+MAX_POSTED_BODY_BYTES = 65_000
 _RUN_DIRECTORY_ATTEMPTS = 8
 
 
