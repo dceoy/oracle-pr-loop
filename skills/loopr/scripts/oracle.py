@@ -297,13 +297,12 @@ class OracleClient:
         current_total: int,
     ) -> tuple[JsonObject, tuple[Path, int] | None]:
         """Create one bounded text attachment or an explicit omission record."""
-        try:
-            data = self.github.changed_file_bytes(
-                pull_request,
-                path,
-                max_output=MAX_FILE_BYTES,
-            )
-        except LooprError:
+        data = self.github.changed_file_bytes(
+            pull_request,
+            path,
+            max_output=MAX_FILE_BYTES,
+        )
+        if data is None:
             return (
                 {
                     "path": path,
