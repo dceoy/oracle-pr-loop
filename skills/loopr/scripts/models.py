@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 EXIT_PRECONDITION = 2
 EXIT_ORACLE = 3
@@ -78,16 +78,19 @@ class ReviewResult:
 
     def as_json(self) -> JsonObject:
         """Return the stable command result schema."""
-        return {
-            "schema_version": 1,
-            "command": "review",
-            "repository": self.repository,
-            "pr_number": self.pr_number,
-            "base_sha": self.base_sha,
-            "head_sha": self.head_sha,
-            "verdict": self.verdict,
-            "github_review_id": self.github_review_id,
-            "blocking_findings": list(self.blocking_findings),
-            "implementation_prompt": self.implementation_prompt,
-            "artifacts_dir": self.artifacts_dir,
-        }
+        return cast(
+            JsonObject,
+            {
+                "schema_version": 1,
+                "command": "review",
+                "repository": self.repository,
+                "pr_number": self.pr_number,
+                "base_sha": self.base_sha,
+                "head_sha": self.head_sha,
+                "verdict": self.verdict,
+                "github_review_id": self.github_review_id,
+                "blocking_findings": list(self.blocking_findings),
+                "implementation_prompt": self.implementation_prompt,
+                "artifacts_dir": self.artifacts_dir,
+            },
+        )
