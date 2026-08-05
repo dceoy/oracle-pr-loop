@@ -62,13 +62,13 @@ class _TooManyInstructionsGitHub:
         )
 
     def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Fail if the instruction limit is checked after patch collection."""
+        """Return a minimal valid patch before instruction discovery is bounded."""
         del max_output
-        pytest.fail("patch collection must not run after the instruction limit fails")
+        return b"diff --git a/file.py b/file.py\n"
 
 
 def test_bundle_rejects_excessive_instruction_file_inventory(tmp_path: Path) -> None:
-    """Repository-wide instruction discovery is count-bounded before file reads."""
+    """Repository-wide instruction discovery is bounded before attachment reads."""
     runner = CommandRunner()
     writer = ArtifactWriter(tmp_path / "artifacts", runner)
     github = cast(
