@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 class StructuredArgumentParser(argparse.ArgumentParser):
     """Raise structured command errors instead of terminating with prose."""
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         """Convert argparse validation failures into LooprError."""
         raise LooprError(EXIT_PRECONDITION, "input", message)
 
