@@ -181,7 +181,7 @@ class CommandRunner:
         ):
             stdin_file.write(input_bytes)
             stdin_file.seek(0)
-            proc = subprocess.Popen(  # noqa: S603
+            proc = subprocess.Popen(
                 argv,
                 cwd=cwd,
                 env=dict(env),
