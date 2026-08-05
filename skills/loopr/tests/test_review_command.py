@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, TypeVar
 
 import pytest
 
@@ -29,6 +30,7 @@ from scripts.review import execute_review
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
+ClientT = TypeVar("ClientT", bound=GitHubClient)
 
 
 def sample_pr(*, base_sha: str = SHA_A, head_sha: str = SHA_B) -> PullRequest:
@@ -89,7 +91,7 @@ def snapshot_payload(*, files: list[str], changed_files: int) -> JsonObject:
     }
 
 
-def configured_client(client: GitHubClient) -> GitHubClient:
+def configured_client(client: ClientT) -> ClientT:
     """Set the resolved identity fields required by snapshot operations."""
     client.repository = "owner/repository"
     client.number = 21
@@ -125,7 +127,18 @@ def test_snapshot_rejects_truncated_changed_file_inventory(
     """Advertised and materialized changed-file counts must match exactly."""
     client = configured_client(GitHubClient(CommandRunner(), tmp_path, "token"))
     payload = snapshot_payload(files=["file.py"], changed_files=2)
-    monkeypatch.setattr(client, "_text", lambda *_args, **_kwargs: json.dumps(payload))
+
+    def fake_text(
+        args: list[str],
+        *,
+        reviewer: bool = False,
+        input_text: str | None = None,
+        max_output: int = 24 * 1024 * 1024,
+    ) -> str:
+        del args, reviewer, input_text, max_output
+        return json.dumps(payload)
+
+    monkeypatch.setattr(client, "_text", fake_text)
     with pytest.raises(LooprError) as captured:
         client.snapshot()
     assert captured.value.category == "inventory"
@@ -138,13 +151,13 @@ class RecordingGitHubClient(GitHubClient):
 
     def _text(
         self,
-        _args: list[str],
+        args: list[str],
         *,
         reviewer: bool = False,
         input_text: str | None = None,
         max_output: int = 24 * 1024 * 1024,
     ) -> str:
-        del reviewer, max_output
+        del args, reviewer, max_output
         self.last_input = input_text
         return json.dumps({"id": 123, "commit_id": SHA_B})
 
@@ -201,10 +214,7 @@ def test_bundle_rejects_changed_file_limit(tmp_path: Path) -> None:
     """Bundle construction fails before Git reads when file count exceeds its limit."""
     changed_paths = tuple(f"file-{index}.py" for index in range(MAX_CHANGED_FILES + 1))
     pull_request = sample_pr()
-    oversized = PullRequest(**{
-        **pull_request.__dict__,
-        "changed_paths": changed_paths,
-    })
+    oversized = replace(pull_request, changed_paths=changed_paths)
     runner = CommandRunner()
     writer = ArtifactWriter(tmp_path / "artifacts", runner)
     github = GitHubClient(runner, tmp_path, "token")
