@@ -121,6 +121,21 @@ ignore = [
   "unused-method-argument",       # ARG002
   "unused-lambda-argument",       # ARG005
 ]
+"skills/loopr/tests/**/*.py" = [
+  "docstring-missing-returns",    # DOC201
+  "docstring-missing-exception",  # DOC501
+  "import-private-name",          # PLC2701
+  "too-many-public-methods",      # PLR0904
+  "magic-value-comparison",       # PLR2004
+  "no-self-use",                  # PLR6301
+  "assert",                       # S101
+  "hardcoded-password-string",    # S105
+  "hardcoded-password-func-arg",  # S106
+  "private-member-access",        # SLF001
+  "unused-function-argument",     # ARG001
+  "unused-method-argument",       # ARG002
+  "unused-lambda-argument",       # ARG005
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -141,6 +156,12 @@ extraPaths = ["."]
 reportPrivateUsage = "none"
 reportUnknownLambdaType = "none"
 
+[[tool.pyright.executionEnvironments]]
+root = "skills/loopr"
+extraPaths = ["skills/loopr"]
+reportPrivateUsage = "none"
+reportUnknownLambdaType = "none"
+
 [tool.pytest.ini_options]
 addopts = [
   "--cov=loopr",
@@ -148,8 +169,8 @@ addopts = [
   "--doctest-modules",
   "--capture=no",
 ]
-pythonpath = ["."]
-testpaths = ["tests"]
+pythonpath = [".", "skills/loopr"]
+testpaths = ["tests", "skills/loopr/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -157,7 +178,7 @@ minversion = "9.0"
 
 [tool.coverage.run]
 source = ["loopr"]
-omit = ["tests/**"]
+omit = ["tests/**", "skills/loopr/tests/**"]
 
 [tool.coverage.report]
 show_missing = true
