@@ -1,6 +1,7 @@
 # loopr
 
-`loopr` runs a synchronous review-and-fix loop for one GitHub pull request:
+The current root `loopr.py` executable runs a synchronous
+Oracle-ChatGPT-Codex review-and-fix loop for one GitHub pull request:
 
 1. Snapshot the exact PR head.
 2. Ask ChatGPT through Oracle for an independent review.
@@ -8,7 +9,28 @@
 4. Let Codex fix validated blockers in a disposable worktree.
 5. Validate, commit, and lease-protect the push before reviewing again.
 
-The orchestrator owns GitHub access and Git operations. Codex receives neither GitHub credentials nor push authority.
+The legacy orchestrator owns GitHub access and Git operations. Codex receives
+neither GitHub credentials nor push authority.
+
+## Agent skill transition
+
+`skills/loopr/` is the canonical location for the vendor-neutral agent skill.
+Compatible hosts discover the same directory through:
+
+- `.agents/skills/loopr` for Codex CLI, Cursor CLI, and compatible clients;
+- `.claude/skills/loopr` for Claude Code.
+
+The host agent plans, edits, and runs repository validation. Oracle/ChatGPT
+independently reviews the exact pull-request head and returns a structured
+verdict. Deterministic skill scripts will inspect the pull request, transport
+reviews, validate patches, create commits, and push with an explicit lease.
+GitHub and Git remain the sources of pull-request identity, commit state,
+reviews, and remote branch updates.
+
+The documented `review` and `submit` command boundaries are not implemented
+yet. Issue #16 will implement `review`, and issue #17 will implement `submit`.
+Until those migrations land, use the root `loopr.py` executable described
+below; its current behavior is unchanged by the structural skill layout.
 
 ## Requirements
 
@@ -19,10 +41,13 @@ The orchestrator owns GitHub access and Git operations. Codex receives neither G
 - [GitHub CLI](https://cli.github.com/) authenticated for read access
 - [Oracle](https://github.com/steipete/oracle) with Chrome or Chromium
 - [Codex CLI](https://github.com/openai/codex) with `codex login` completed
-- A dedicated reviewer account, different from the PR author, with repository administrator access
-- A reviewer token in `GH_REVIEW_TOKEN` with pull-request review write permission
+- A dedicated reviewer account, different from the PR author, with repository
+  administrator access
+- A reviewer token in `GH_REVIEW_TOKEN` with pull-request review write
+  permission
 
-Only open, non-draft, same-repository GitHub.com pull requests are supported. The local user must be able to push the PR head branch.
+Only open, non-draft, same-repository GitHub.com pull requests are supported.
+The local user must be able to push the PR head branch.
 
 ## Oracle login
 
@@ -33,7 +58,8 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-The default profile is `~/.oracle/browser-profile`. Use `ORACLE_BROWSER_PROFILE_DIR` to select another location.
+The default profile is `~/.oracle/browser-profile`. Use
+`ORACLE_BROWSER_PROFILE_DIR` to select another location.
 
 ## Usage
 
@@ -58,19 +84,29 @@ python3 loopr.py --pr 123 --dry-run
 
 - `--repo-dir DIR`: local checkout; defaults to the current directory.
 - `--max-iterations N`: maximum Oracle reviews; defaults to `5`.
-- `--oracle-thinking-time LEVEL`: `light`, `standard`, `extended`, or `heavy`; defaults to `heavy`.
+- `--oracle-thinking-time LEVEL`: `light`, `standard`, `extended`, or `heavy`;
+  defaults to `heavy`.
 - `--artifacts-dir DIR`: audit directory; defaults to `.pr-loopr`.
 - `--dry-run`: run preflight validation only.
 
 ## Safety model
 
-`loopr` is intended for trusted internal repositories. Pull-request content and model output are treated as untrusted data, but Codex's workspace sandbox does not prevent reads outside the worktree. Run it only where the PR may safely read files available to the operator account.
+`loopr` is intended for trusted internal repositories. Pull-request content and
+model output are treated as untrusted data, but Codex's workspace sandbox does
+not prevent reads outside the worktree. Run it only where the PR may safely read
+files available to the operator account.
 
-The loop fails closed on malformed reviews, credential collisions, unsafe patches, context limits, stale approvals, concurrent head changes, or failed pushes. It does not automatically merge, support forks, remediate CI, resolve human review threads, or run as a daemon.
+The loop fails closed on malformed reviews, credential collisions, unsafe
+patches, context limits, stale approvals, concurrent head changes, or failed
+pushes. It does not automatically merge, support forks, remediate CI, resolve
+human review threads, or run as a daemon.
 
-CI status is not an approval gate; failing or missing checks do not prevent approval.
+CI status is not an approval gate; failing or missing checks do not prevent
+approval.
 
-Each run writes permission-restricted audit artifacts under `.pr-loopr/runs/`, including the PR snapshot, review inputs and outputs, state transitions, resulting patch, and pushed commit SHA.
+Each run writes permission-restricted audit artifacts under `.pr-loopr/runs/`,
+including the PR snapshot, review inputs and outputs, state transitions,
+resulting patch, and pushed commit SHA.
 
 ## Tests
 
