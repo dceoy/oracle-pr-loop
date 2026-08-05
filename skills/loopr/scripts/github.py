@@ -24,25 +24,23 @@ if TYPE_CHECKING:
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
-PR_FIELDS = ",".join(
-    (
-        "url",
-        "number",
-        "title",
-        "body",
-        "author",
-        "state",
-        "isDraft",
-        "baseRefName",
-        "baseRefOid",
-        "headRefName",
-        "headRefOid",
-        "headRepository",
-        "headRepositoryOwner",
-        "files",
-        "changedFiles",
-    )
-)
+PR_FIELDS = ",".join((
+    "url",
+    "number",
+    "title",
+    "body",
+    "author",
+    "state",
+    "isDraft",
+    "baseRefName",
+    "baseRefOid",
+    "headRefName",
+    "headRefOid",
+    "headRepository",
+    "headRepositoryOwner",
+    "files",
+    "changedFiles",
+))
 
 
 def normalize_repo(remote: str) -> str:
@@ -124,9 +122,7 @@ def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
 def validate_ref(ref: str) -> None:
     """Reject Git refs that can alter command interpretation or traversal."""
     forbidden = any(
-        ord(character) < 32
-        or ord(character) == 127
-        or character in " ~^:?*[\\"
+        ord(character) < 32 or ord(character) == 127 or character in " ~^:?*[\\"
         for character in ref
     )
     if (
@@ -170,9 +166,7 @@ def _json_object(text: str, *, category: str) -> JsonObject:
             category,
             "GitHub returned malformed JSON",
         ) from exc
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise LooprError(
             EXIT_GITHUB,
             category,
@@ -236,9 +230,7 @@ class GitHubClient:
             result = self.runner.run(
                 ["gh", *args],
                 cwd=self.repo_dir,
-                env=self.runner.gh_env(
-                    self.reviewer_token if reviewer else None
-                ),
+                env=self.runner.gh_env(self.reviewer_token if reviewer else None),
                 input_text=input_text,
                 max_output=max_output,
             )
@@ -273,10 +265,7 @@ class GitHubClient:
             pr_value,
             origin_repo,
         )
-        if (
-            origin_repo is not None
-            and origin_repo.lower() != self.repository.lower()
-        ):
+        if origin_repo is not None and origin_repo.lower() != self.repository.lower():
             raise LooprError(
                 EXIT_PRECONDITION,
                 "repository",
@@ -350,14 +339,8 @@ class GitHubClient:
         if isinstance(name_with_owner, str) and name_with_owner:
             head_repo = name_with_owner
         else:
-            owner = _string(
-                head_owner.get("login"),
-                field="headRepositoryOwner.login",
-            )
-            name = _string(
-                head_repository.get("name"),
-                field="headRepository.name",
-            )
+            owner = _string(head_owner.get("login"), field="headRepositoryOwner.login")
+            name = _string(head_repository.get("name"), field="headRepository.name")
             head_repo = f"{owner}/{name}"
         author = _object(data.get("author"), field="author")
         pull_request = PullRequest(
@@ -412,9 +395,8 @@ class GitHubClient:
                 "identity",
                 "self-review is forbidden",
             )
-        if (
-            not SHA_RE.fullmatch(pull_request.base_sha)
-            or not SHA_RE.fullmatch(pull_request.head_sha)
+        if not SHA_RE.fullmatch(pull_request.base_sha) or not SHA_RE.fullmatch(
+            pull_request.head_sha
         ):
             raise LooprError(
                 EXIT_PRECONDITION,
@@ -588,7 +570,4 @@ class GitHubClient:
     @staticmethod
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
         """Return whether two snapshots have identical base and head SHAs."""
-        return (
-            first.base_sha == second.base_sha
-            and first.head_sha == second.head_sha
-        )
+        return first.base_sha == second.base_sha and first.head_sha == second.head_sha
