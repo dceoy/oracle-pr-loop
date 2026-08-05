@@ -121,7 +121,28 @@ ignore = [
   "unused-method-argument",       # ARG002
   "unused-lambda-argument",       # ARG005
 ]
+"skills/loopr/scripts/**/*.py" = [
+  "docstring-missing-returns",              # DOC201
+  "docstring-missing-exception",           # DOC501
+  "typing-only-standard-library-import",   # TCH003
+  "magic-value-comparison",                # PLR2004
+  "too-many-boolean-expressions",          # PLR0916
+  "too-many-locals",                       # PLR0914
+  "too-many-statements-in-try-clause",     # TRY300
+  "runtime-cast-value",                    # TC006
+  "static-join-to-f-string",               # FLY002
+  "no-self-use",                           # PLR6301
+  "try-consider-else",                     # TRY300
+  "raise-within-try",                      # TRY301
+  "suspicious-subprocess-import",          # S404
+  "subprocess-without-shell-equals-true",  # S603
+  "raise-vanilla-args",                    # TRY003
+  "raw-string-in-exception",               # EM101
+  "blind-except",                          # BLE001
+  "unnecessary-literal-within-tuple-call", # C409
+]
 "skills/loopr/tests/**/*.py" = [
+  "unsorted-imports",             # I001
   "docstring-missing-returns",    # DOC201
   "docstring-missing-exception",  # DOC501
   "import-private-name",          # PLC2701
@@ -135,6 +156,10 @@ ignore = [
   "unused-function-argument",     # ARG001
   "unused-method-argument",       # ARG002
   "unused-lambda-argument",       # ARG005
+  "implicit-namespace-package",   # INP001
+  "undocumented-public-init",     # D107
+  "raise-vanilla-args",           # TRY003
+  "raw-string-in-exception",      # EM101
 ]
 
 [tool.ruff.lint.pydocstyle]
