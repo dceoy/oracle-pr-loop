@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.parse
 from pathlib import Path, PurePosixPath
@@ -238,6 +239,16 @@ class GitHubClient:
         except (CommandError, UnicodeError) as exc:
             raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
 
+    def _git_env(self) -> dict[str, str]:
+        """Return a Git environment that cannot redirect immutable object reads."""
+        env = self.runner.allowlisted_env()
+        env.update({
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+        })
+        return env
+
     def initialize(self, pr_value: str) -> None:
         """Resolve the local repository, target PR, and reviewer identity."""
         origin_repo: str | None = None
@@ -245,13 +256,13 @@ class GitHubClient:
             root = self.runner.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 cwd=self.repo_dir,
-                env=self.runner.base_env(),
+                env=self._git_env(),
             ).stdout.decode("utf-8", "strict")
             self.repo_dir = Path(root.strip()).resolve()
             origin = self.runner.run(
                 ["git", "remote", "get-url", "origin"],
                 cwd=self.repo_dir,
-                env=self.runner.base_env(),
+                env=self._git_env(),
             ).stdout.decode("utf-8", "strict")
             origin_repo = normalize_repo(origin)
         except (CommandError, UnicodeError):
@@ -412,7 +423,7 @@ class GitHubClient:
             return self.runner.run(
                 ["git", *args],
                 cwd=self.repo_dir,
-                env=self.runner.base_env(),
+                env=self._git_env(),
                 max_output=max_output,
             ).stdout
         except CommandError as exc:
@@ -435,12 +446,70 @@ class GitHubClient:
         path: str,
         *,
         max_output: int,
-    ) -> bytes:
-        """Read one changed file from the frozen head tree."""
-        return self.git_bytes(
-            ["show", f"{pull_request.head_sha}:{path}"],
+    ) -> bytes | None:
+        """Read one changed blob, or return None for an explicit omission."""
+        listing = self.git_bytes(
+            [
+                "ls-tree",
+                "-r",
+                "-l",
+                "-z",
+                "--full-tree",
+                pull_request.head_sha,
+                "--",
+                f":(literal){path}",
+            ],
+            max_output=4096,
+        )
+        records = [record for record in listing.split(b"\0") if record]
+        if not records:
+            return None
+        if len(records) != 1 or b"\t" not in records[0]:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree returned an ambiguous changed-file entry",
+            )
+        metadata, raw_path = records[0].split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) != 4:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree returned malformed changed-file metadata",
+            )
+        _mode, object_type, raw_object_sha, raw_size = fields
+        try:
+            listed_path = raw_path.decode("utf-8", "strict")
+            object_sha = raw_object_sha.decode("ascii", "strict")
+        except UnicodeError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree returned non-UTF-8 changed-file metadata",
+            ) from exc
+        if listed_path != path or not SHA_RE.fullmatch(object_sha):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree changed-file identity mismatched",
+            )
+        if object_type != b"blob" or not raw_size.isdigit():
+            return None
+        size = int(raw_size)
+        if size > max_output:
+            return None
+        data = self.git_bytes(
+            ["cat-file", "blob", object_sha],
             max_output=max_output,
         )
+        if len(data) != size:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git blob size changed during immutable evidence read",
+            )
+        return data
 
     def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:
         """Read the exact base-to-head merge-base patch."""
