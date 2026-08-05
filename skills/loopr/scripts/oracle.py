@@ -64,9 +64,7 @@ def _json_object(text: str) -> JsonObject:
             "oracle_schema",
             "Oracle output must be exactly one JSON object",
         ) from exc
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise LooprError(
             EXIT_ORACLE,
             "oracle_schema",
@@ -123,10 +121,7 @@ def _notes(value: JsonValue | None) -> tuple[str, ...]:
             "oracle_schema",
             "non_blocking_notes must be an array",
         )
-    return tuple(
-        _string(item, field="non_blocking_notes")
-        for item in value
-    )
+    return tuple(_string(item, field="non_blocking_notes") for item in value)
 
 
 def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
@@ -142,12 +137,9 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
         _integer(value.get("schema_version"), field="schema_version") != 1
         or _string(value.get("repository"), field="repository")
         != pull_request.repository
-        or _integer(value.get("pr_number"), field="pr_number")
-        != pull_request.number
-        or _string(value.get("base_sha"), field="base_sha")
-        != pull_request.base_sha
-        or _string(value.get("head_sha"), field="head_sha")
-        != pull_request.head_sha
+        or _integer(value.get("pr_number"), field="pr_number") != pull_request.number
+        or _string(value.get("base_sha"), field="base_sha") != pull_request.base_sha
+        or _string(value.get("head_sha"), field="head_sha") != pull_request.head_sha
     ):
         raise LooprError(
             EXIT_ORACLE,
@@ -414,10 +406,7 @@ class OracleClient:
                 "oracle",
                 "Oracle output is missing or invalid UTF-8",
             ) from exc
-        if (
-            len(raw.encode()) > MAX_ORACLE_OUTPUT
-            or self.runner.contains_secret(raw)
-        ):
+        if len(raw.encode()) > MAX_ORACLE_OUTPUT or self.runner.contains_secret(raw):
             raise LooprError(
                 EXIT_ORACLE,
                 "oracle",
