@@ -26,11 +26,15 @@ if TYPE_CHECKING:
     from .process import CommandRunner
 
 MAX_CHANGED_FILES = 100
+MAX_INSTRUCTION_FILES = 100
 MAX_PATCH_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_ATTACHMENTS_BYTES = 20 * 1024 * 1024
 MAX_ORACLE_OUTPUT = 4 * 1024 * 1024
 MAX_REVIEW_BODY_BYTES = 60_000
+CORE_BUNDLE_FILES = 4
+MAX_ORACLE_ATTACHMENTS = MAX_CHANGED_FILES + MAX_INSTRUCTION_FILES + CORE_BUNDLE_FILES
+MAX_ORACLE_ARG_BYTES = 256 * 1024
 TOP_KEYS = {
     "schema_version",
     "repository",
@@ -220,6 +224,18 @@ class OracleClient:
                 "bundle",
                 "pull request exceeds changed-file limit",
             )
+        tracked = set(self.github.tracked_paths(pull_request))
+        instructions = {
+            path
+            for path in tracked
+            if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
+        }
+        if len(instructions) > MAX_INSTRUCTION_FILES:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "repository exceeds instruction-file limit",
+            )
         patch = self.github.patch(pull_request, max_output=MAX_PATCH_BYTES)
         try:
             patch_text = patch.decode("utf-8", "strict")
@@ -257,12 +273,6 @@ class OracleClient:
                 changed_paths_text,
             ),
         ]
-        tracked = set(self.github.tracked_paths(pull_request))
-        instructions = {
-            path
-            for path in tracked
-            if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
-        }
         manifest: list[JsonValue] = []
         attachments: list[Path] = []
         total = sum(path.stat().st_size for path in core)
@@ -365,6 +375,12 @@ class OracleClient:
         attachments: tuple[Path, ...],
     ) -> OracleReview:
         """Invoke Oracle once and strictly validate its bounded output."""
+        if len(attachments) > MAX_ORACLE_ATTACHMENTS:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "Oracle attachment count exceeds the command bound",
+            )
         raw_path = self.writer.root / "oracle-raw.json"
         prompt = PROMPT.format(
             repository=pull_request.repository,
@@ -396,6 +412,13 @@ class OracleClient:
         ]
         for attachment in attachments:
             command.extend(("--file", str(attachment)))
+        argument_bytes = sum(len(os.fsencode(argument)) + 1 for argument in command)
+        if argument_bytes > MAX_ORACLE_ARG_BYTES:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "Oracle command arguments exceed the byte bound",
+            )
         try:
             self.runner.run(
                 command,
