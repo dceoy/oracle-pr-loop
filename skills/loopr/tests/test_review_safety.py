@@ -5,8 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise Git directly
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -15,6 +14,9 @@ from scripts.github import GitHubClient
 from scripts.models import EXIT_PRECONDITION, LooprError, PullRequest
 from scripts.oracle import OracleClient
 from scripts.process import CommandRunner
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _git(
