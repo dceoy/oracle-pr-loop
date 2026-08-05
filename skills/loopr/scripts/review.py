@@ -61,12 +61,9 @@ def execute_review(
     try:
         after_post = github.snapshot()
         verified = github.verify_posted(initial, review_id)
-        expected_state = (
-            "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
-        )
-        if (
-            verified.get("state") != expected_state
-            or not github.same_snapshot(initial, after_post)
+        expected_state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
+        if verified.get("state") != expected_state or not github.same_snapshot(
+            initial, after_post
         ):
             raise LooprError(
                 EXIT_RACE,
@@ -104,10 +101,7 @@ def _run_directory(
         if artifacts_dir.is_absolute()
         else repo_dir.resolve() / artifacts_dir
     )
-    name = (
-        f"review-pr-{pull_request.number}-"
-        f"{pull_request.head_sha[:12]}-{stamp}"
-    )
+    name = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}-{stamp}"
     return root / "runs" / name
 
 
