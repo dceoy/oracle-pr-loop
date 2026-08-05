@@ -200,6 +200,17 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
     )
 
 
+def _validate_oracle_command(command: list[str]) -> None:
+    """Reject an Oracle command whose aggregate argv exceeds its byte bound."""
+    argument_bytes = sum(len(os.fsencode(argument)) + 1 for argument in command)
+    if argument_bytes > MAX_ORACLE_ARG_BYTES:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "Oracle command arguments exceed the byte bound",
+        )
+
+
 class OracleClient:
     """Build deterministic evidence and request one strict Oracle verdict."""
 
@@ -412,13 +423,7 @@ class OracleClient:
         ]
         for attachment in attachments:
             command.extend(("--file", str(attachment)))
-        argument_bytes = sum(len(os.fsencode(argument)) + 1 for argument in command)
-        if argument_bytes > MAX_ORACLE_ARG_BYTES:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "Oracle command arguments exceed the byte bound",
-            )
+        _validate_oracle_command(command)
         try:
             self.runner.run(
                 command,
