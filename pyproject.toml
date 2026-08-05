@@ -142,7 +142,7 @@ ignore = [
   "unnecessary-literal-within-tuple-call", # C409
 ]
 "skills/loopr/tests/**/*.py" = [
-  "unsorted-imports",             # I001
+  "unsorted-imports",              # I001
   "docstring-missing-returns",    # DOC201
   "docstring-missing-exception",  # DOC501
   "import-private-name",          # PLC2701
@@ -156,10 +156,10 @@ ignore = [
   "unused-function-argument",     # ARG001
   "unused-method-argument",       # ARG002
   "unused-lambda-argument",       # ARG005
-  "implicit-namespace-package",   # INP001
-  "undocumented-public-init",     # D107
-  "raise-vanilla-args",           # TRY003
-  "raw-string-in-exception",      # EM101
+  "implicit-namespace-package",  # INP001
+  "undocumented-public-init",    # D107
+  "raise-vanilla-args",          # TRY003
+  "raw-string-in-exception",     # EM101
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -170,7 +170,7 @@ max-args = 10
 max-public-methods = 40
 
 [tool.pyright]
-exclude = ["build", ".venv"]
+exclude = ["build", ".venv", ".agents", ".claude"]
 venvPath = "."
 venv = ".venv"
 typeCheckingMode = "strict"
@@ -186,6 +186,7 @@ root = "skills/loopr"
 extraPaths = ["skills/loopr"]
 reportPrivateUsage = "none"
 reportUnknownLambdaType = "none"
+reportUnknownVariableType = "none"
 
 [tool.pytest.ini_options]
 addopts = [
