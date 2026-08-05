@@ -364,6 +364,7 @@ def test_cli_normalizes_unexpected_operational_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Unexpected operational failures still produce exactly one JSON object."""
+
     def fail_review(**_kwargs: object) -> ReviewResult:
         raise OSError("filesystem failure")
 
