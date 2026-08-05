@@ -235,18 +235,6 @@ class OracleClient:
                 "bundle",
                 "pull request exceeds changed-file limit",
             )
-        tracked = set(self.github.tracked_paths(pull_request))
-        instructions = {
-            path
-            for path in tracked
-            if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
-        }
-        if len(instructions) > MAX_INSTRUCTION_FILES:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "repository exceeds instruction-file limit",
-            )
         patch = self.github.patch(pull_request, max_output=MAX_PATCH_BYTES)
         try:
             patch_text = patch.decode("utf-8", "strict")
@@ -261,6 +249,18 @@ class OracleClient:
                 EXIT_PRECONDITION,
                 "bundle",
                 "patch contains a known credential",
+            )
+        tracked = set(self.github.tracked_paths(pull_request))
+        instructions = {
+            path
+            for path in tracked
+            if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
+        }
+        if len(instructions) > MAX_INSTRUCTION_FILES:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "repository exceeds instruction-file limit",
             )
         snapshot: JsonObject = {
             "repository": pull_request.repository,
