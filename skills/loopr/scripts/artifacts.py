@@ -1,32 +1,92 @@
 """Private deterministic artifact writes."""
+
 from __future__ import annotations
-import json, os, stat, uuid
+
+import json
+import os
+import stat
+import uuid
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
-from models import EXIT_PRECONDITION, LooprError
-from process import CommandRunner
+from typing import TYPE_CHECKING
+
+from .models import EXIT_PRECONDITION, JsonValue, LooprError
+
+if TYPE_CHECKING:
+    from .process import CommandRunner
+
+
 class ArtifactWriter:
-    def __init__(self,root:Path,runner:CommandRunner)->None:
-        self.root=root.resolve(); self.runner=runner
-        self.root.mkdir(mode=0o700,parents=True,exist_ok=True)
-        meta=self.root.lstat()
-        if not stat.S_ISDIR(meta.st_mode) or self.root.is_symlink() or meta.st_mode & 0o077:
-            raise LooprError(EXIT_PRECONDITION,"artifacts","artifact directory must be a private real directory")
-    def _path(self,relative:str)->Path:
-        path=self.root/relative
-        try: path.parent.resolve().relative_to(self.root)
-        except ValueError as exc: raise LooprError(EXIT_PRECONDITION,"artifacts","artifact path escaped root") from exc
-        return path
-    def text(self,relative:str,value:str)->Path:
-        path=self._path(relative); path.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
-        safe=self.runner.redact(value); tmp=path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
+    """Write redacted artifacts atomically into a private real directory."""
+
+    def __init__(self, root: Path, runner: CommandRunner) -> None:
+        """Create and validate the private artifact root."""
+        self.root = root.resolve()
+        self.runner = runner
         try:
-            with os.fdopen(fd,"w",encoding="utf-8") as handle:
-                handle.write(safe); handle.flush(); os.fsync(handle.fileno())
-            os.replace(tmp,path)
-        finally:
-            if tmp.exists(): tmp.unlink()
+            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            metadata = self.root.lstat()
+        except OSError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "artifacts",
+                "failed to create or inspect the artifact directory",
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or self.root.is_symlink()
+            or metadata.st_mode & 0o077
+        ):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "artifacts",
+                "artifact directory must be a private real directory",
+            )
+
+    def _path(self, relative: str) -> Path:
+        """Resolve an artifact path without permitting root escape."""
+        path = self.root / relative
+        try:
+            path.parent.resolve().relative_to(self.root)
+        except (OSError, ValueError) as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "artifacts",
+                "artifact path escaped the private root",
+            ) from exc
         return path
-    def json(self,relative:str,value:Any)->Path:
-        return self.text(relative,json.dumps(value,sort_keys=True,indent=2,ensure_ascii=False)+"\n")
+
+    def text(self, relative: str, value: str) -> Path:
+        """Atomically write redacted UTF-8 text with mode 0600."""
+        path = self._path(relative)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            safe = self.runner.redact(value)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(safe)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(path)
+        except OSError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "artifacts",
+                "failed to write a private artifact",
+            ) from exc
+        finally:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+        return path
+
+    def json(self, relative: str, value: JsonValue) -> Path:
+        """Write canonical indented JSON as a private artifact."""
+        serialized = json.dumps(
+            value,
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+        return self.text(relative, f"{serialized}\n")
