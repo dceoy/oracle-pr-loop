@@ -104,20 +104,13 @@ class _PushAwareRunner(CommandRunner):
         """Harden workspace staging and post-write confirmation."""
         original_argv = tuple(str(value) for value in args)
         argv = self._exclude_artifacts(original_argv)
-        if original_argv == COMMIT_COMMAND:
-            self._require_no_merge_state(
-                cwd=cwd,
-                env=env,
-                timeout=timeout,
-            )
-        push_target = _push_target(argv)
-        if push_target is not None:
-            self._require_single_parent(
-                commit_sha=push_target[1],
-                cwd=cwd,
-                env=env,
-                timeout=timeout,
-            )
+        self._guard_commit_shape(
+            original_argv=original_argv,
+            argv=argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+        )
         retry_deadline = (
             time.monotonic() + submit_core.POLL_TIMEOUT_SECONDS
             if self._pushed_commit_sha is not None and argv[:3] == ("gh", "pr", "view")
@@ -185,6 +178,31 @@ class _PushAwareRunner(CommandRunner):
         if argv == WORKSPACE_STATUS_COMMAND:
             return (*argv, "--", ".", self._artifact_exclusion)
         return argv
+
+    def _guard_commit_shape(
+        self,
+        *,
+        original_argv: tuple[str, ...],
+        argv: tuple[str, ...],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int,
+    ) -> None:
+        """Reject merge state and multi-parent commits at the write boundary."""
+        if original_argv == COMMIT_COMMAND:
+            self._require_no_merge_state(
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+            )
+        push_target = _push_target(argv)
+        if push_target is not None:
+            self._require_single_parent(
+                commit_sha=push_target[1],
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+            )
 
     def _require_no_merge_state(
         self,
