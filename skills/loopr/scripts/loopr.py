@@ -15,6 +15,7 @@ if __package__ in {None, ""}:
 from .models import EXIT_PRECONDITION, JsonObject, LooprError
 from .process import CommandRunner
 from .review import execute_review
+from .submit import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -31,7 +32,7 @@ class StructuredArgumentParser(argparse.ArgumentParser):
 def parser() -> argparse.ArgumentParser:
     """Build the stable loopr command parser."""
     root = StructuredArgumentParser(
-        description="Review one exact GitHub pull-request head through Oracle/ChatGPT."
+        description="Review or submit one exact GitHub pull-request head."
     )
     subcommands = root.add_subparsers(dest="command", required=True)
     review = subcommands.add_parser(
@@ -58,46 +59,93 @@ def parser() -> argparse.ArgumentParser:
         choices=("light", "standard", "extended", "heavy"),
         default="heavy",
     )
+
+    submit = subcommands.add_parser(
+        "submit",
+        help="validate, commit, and lease-protect a workspace patch",
+    )
+    submit.add_argument(
+        "--pr",
+        required=True,
+        help="positive PR number or canonical GitHub pull URL",
+    )
+    submit.add_argument(
+        "--expected-head",
+        required=True,
+        help="full PR head SHA on which the workspace is based",
+    )
+    submit.add_argument(
+        "--repo-dir",
+        default=".",
+        help="local checkout containing the host-agent patch",
+    )
+    submit.add_argument(
+        "--artifacts-dir",
+        default=".pr-loopr",
+        help="private artifact directory",
+    )
     return root
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Execute one command and emit exactly one JSON object on stdout."""
     runner = CommandRunner()
+    command = _requested_command(argv)
     try:
         args = parser().parse_args(argv)
-        result = execute_review(
-            pr_value=args.pr,
-            repo_dir=Path(args.repo_dir),
-            artifacts_dir=Path(args.artifacts_dir),
-            thinking_time=args.oracle_thinking_time,
-            runner=runner,
-        )
+        command = args.command
+        if command == "review":
+            result = execute_review(
+                pr_value=args.pr,
+                repo_dir=Path(args.repo_dir),
+                artifacts_dir=Path(args.artifacts_dir),
+                thinking_time=args.oracle_thinking_time,
+                runner=runner,
+            )
+        else:
+            result = execute_submit(
+                pr_value=args.pr,
+                expected_head=args.expected_head,
+                repo_dir=Path(args.repo_dir),
+                artifacts_dir=Path(args.artifacts_dir),
+                runner=runner,
+            )
         _emit(result.as_json())
         return 0
     except LooprError as exc:
-        _emit_error(exc.category, runner.redact(str(exc)))
-        sys.stderr.write(f"loopr review: {runner.redact(str(exc))}\n")
+        message = runner.redact(str(exc))
+        _emit_error(command, exc.category, message)
+        sys.stderr.write(f"loopr {command}: {message}\n")
         return exc.code
     except KeyboardInterrupt:
         message = "interrupted; failed closed"
-        _emit_error("interrupted", message)
-        sys.stderr.write(f"loopr review: {message}\n")
+        _emit_error(command, "interrupted", message)
+        sys.stderr.write(f"loopr {command}: {message}\n")
         return EXIT_PRECONDITION
     except Exception as exc:
         message = runner.redact(f"{type(exc).__name__}: {exc}")
-        _emit_error("internal", message)
-        sys.stderr.write(f"loopr review: {message}\n")
+        _emit_error(command, "internal", message)
+        sys.stderr.write(f"loopr {command}: {message}\n")
         return EXIT_PRECONDITION
 
 
-def _emit_error(category: str, message: str) -> None:
+def _requested_command(argv: Sequence[str] | None) -> str:
+    """Return a bounded command label before argparse validation runs."""
+    values = list(sys.argv[1:] if argv is None else argv)
+    if values and values[0] in {"review", "submit"}:
+        return values[0]
+    return "unknown"
+
+
+def _emit_error(command: str, category: str, message: str) -> None:
     """Emit the stable structured failure schema."""
-    _emit({
-        "schema_version": 1,
-        "command": "review",
-        "error": {"category": category, "message": message},
-    })
+    _emit(
+        {
+            "schema_version": 1,
+            "command": command,
+            "error": {"category": category, "message": message},
+        }
+    )
 
 
 def _emit(value: JsonObject) -> None:

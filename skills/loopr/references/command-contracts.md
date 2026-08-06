@@ -59,10 +59,55 @@ A private run directory contains the normalized snapshot, changed-path list, exa
 
 Only GitHub.com, same-repository, open non-draft PRs are supported. Runtime code uses only the Python standard library. CI status, inline comments, repository edits, commit creation, pushing, agent invocation, and automatic iteration are out of scope.
 
-## `submit` — planned
+## `submit` — implemented
 
 ```console
-python3 skills/loopr/scripts/loopr.py submit --pr <NUMBER_OR_URL> --expected-head <SHA>
+python3 skills/loopr/scripts/loopr.py submit \
+  --pr <NUMBER_OR_URL> \
+  --expected-head <SHA>
 ```
 
-Issue #17 owns implementation of validation, commit creation, and lease-protected push. The host agent owns planning, editing, and local QA.
+Optional arguments are `--repo-dir` and `--artifacts-dir`. The host agent owns planning, editing, and local QA. `submit` owns only deterministic validation, one commit, and the remote branch write.
+
+### Success
+
+Exit status is `0` after GitHub exposes the resulting PR head:
+
+```json
+{
+  "schema_version": 1,
+  "command": "submit",
+  "repository": "owner/repository",
+  "pr_number": 123,
+  "base_sha": "40-character SHA",
+  "previous_head_sha": "40-character SHA",
+  "resulting_head_sha": "40-character SHA",
+  "commit_sha": "40-character SHA",
+  "pushed_branch": "feature",
+  "artifacts_dir": "/private/path"
+}
+```
+
+The resulting head SHA and commit SHA are identical.
+
+### Error
+
+Failures emit the same bounded error envelope with `"command":"submit"`. Input, repository, workspace, patch, commit, and credential failures use exit `2`; GitHub and push failures use exit `4`; stale snapshots, stale expected heads, and lease loss use exit `6`.
+
+### Validation and write behavior
+
+Before commit or push, the command verifies that `origin` has exactly one configured push URL and that its fetch and push URLs identify the target GitHub.com repository; the PR is open, non-draft, and same-repository; the remote PR head and local `HEAD` equal `--expected-head`; the workspace contains changes and no unresolved conflicts; tracked and staged patches pass `git diff --check`; the staged patch is non-empty and does not contain a known credential value; and the PR base/head remain unchanged across repeated snapshots.
+
+The command stages with `git add --all`, creates one commit with hooks and signing disabled, verifies that the commit is a direct child of the expected head, revalidates the remote branch, and pushes with:
+
+```console
+git push --no-verify \
+  --force-with-lease=refs/heads/<branch>:<expected-head> \
+  origin <commit>:refs/heads/<branch>
+```
+
+A concurrent branch update causes the explicit lease to fail and is never overwritten. If the push process reports an error after the remote already accepted the exact created commit, the command recognizes that state and continues GitHub confirmation; a third SHA remains a lease-loss failure. The command then polls GitHub until the PR head equals the created commit.
+
+### Artifacts and limits
+
+A private run directory records the initial PR snapshot, bounded staged patch, commit metadata, push metadata, and final result. Runtime dependencies remain in the Python standard library. The command does not create worktrees, manage a control repository, inspect unrelated worktrees, run tests, invoke model processes, or attempt to contain the host agent.
