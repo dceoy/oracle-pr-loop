@@ -97,6 +97,38 @@ class AmbiguousPushRunner(ScenarioRunner):
         return result
 
 
+class ClosedAfterPushRunner(ScenarioRunner):
+    """Close the PR immediately after the remote accepts the commit."""
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Expose a post-write state transition before GitHub confirmation."""
+        argv = [str(value) for value in args]
+        result = super().run(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            input_text=input_text,
+            check=check,
+            max_output=max_output,
+            watch_path=watch_path,
+        )
+        if argv[:2] == ["git", "push"] and result.returncode == 0:
+            self.state["state"] = "CLOSED"
+        return result
+
+
 def test_multiple_push_urls_fail_before_staging(tmp_path: Path) -> None:
     """A second push destination is rejected before local mutation."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
@@ -138,5 +170,46 @@ def test_ambiguous_push_failure_accepts_updated_remote(tmp_path: Path) -> None:
         "refs/heads/feature",
     ).split()[0]
     assert remote_head == result.commit_sha
+    assert result.resulting_head_sha == result.commit_sha
+    assert (Path(result.artifacts_dir) / "push.json").is_file()
+
+
+def test_known_credential_in_path_fails_before_commit(tmp_path: Path) -> None:
+    """Patch metadata cannot carry a known credential in a pathname."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    credential = "known-path-credential"
+    (repo / f"{credential}.txt").write_text("safe\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+    runner.secrets.add(credential)
+
+    with pytest.raises(LooprError) as captured:
+        execute_submit(
+            pr_value="1",
+            expected_head=head,
+            repo_dir=repo,
+            artifacts_dir=tmp_path / "artifacts",
+            runner=runner,
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "credentials"
+    assert _git(repo, "rev-parse", "HEAD") == head
+
+
+def test_closed_pr_after_push_accepts_exact_resulting_head(tmp_path: Path) -> None:
+    """A post-write close does not turn the exact successful push into failure."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = ClosedAfterPushRunner(repo, remote, state)
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        artifacts_dir=tmp_path / "artifacts",
+        runner=runner,
+    )
+
+    assert state["state"] == "CLOSED"
     assert result.resulting_head_sha == result.commit_sha
     assert (Path(result.artifacts_dir) / "push.json").is_file()
