@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactWriter
-from .github import GitHubClient
+from .github_client import GitHubClient
 from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
 from .oracle import OracleClient
 from .process import CommandRunner
@@ -65,9 +65,9 @@ def execute_review(
         )
     event = "APPROVE" if verdict.verdict == "APPROVE" else "REQUEST_CHANGES"
     review_id, posted = github.post_review(initial, event, body)
-    _persist_best_effort(writer, "github-review.json", posted)
 
     try:
+        _persist_best_effort(writer, "github-review.json", posted)
         after_post = github.snapshot()
         verified = github.verify_posted(initial, review_id)
         expected_state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
@@ -94,25 +94,42 @@ def execute_review(
         implementation_prompt=verdict.implementation_prompt,
         artifacts_dir=str(writer.root),
     )
-    _persist_best_effort(writer, "result.json", result.as_json())
+    _persist_best_effort(
+        writer,
+        "result.json",
+        result.as_json(),
+        suppress_interrupts=True,
+    )
     return result
 
 
 def _persist_best_effort(
-    writer: ArtifactWriter, relative: str, value: JsonValue
+    writer: ArtifactWriter,
+    relative: str,
+    value: JsonValue,
+    *,
+    suppress_interrupts: bool = False,
 ) -> None:
-    """Persist an audit artifact without failing an already-verified GitHub review.
+    """Persist an audit artifact without hiding an already-posted review.
 
-    Every write here runs after `post_review()` has mutated GitHub state, so a
-    local artifact-write failure (disk full, permission error) must not be
-    reported as a command failure: that would make a host retry re-post a
-    duplicate review without ever learning the first review's ID.
+    Before post-write verification, interrupts are re-raised so the surrounding
+    compensation block can dismiss the unreported review. After verification,
+    the caller may suppress every artifact-write failure so the verified review
+    ID is still returned instead of encouraging a duplicate retry.
     """
     try:
         writer.json(relative, value)
     except LooprError as exc:
         sys.stderr.write(
             f"loopr review: warning: failed to persist artifact {relative}: {exc}\n"
+        )
+    except BaseException as exc:
+        if not suppress_interrupts:
+            raise
+        detail = str(exc) or type(exc).__name__
+        sys.stderr.write(
+            f"loopr review: warning: failed to persist artifact {relative}: "
+            f"{detail}\n"
         )
 
 
