@@ -482,23 +482,22 @@ def _constrain_push_env(
     argv: tuple[str, ...],
     env: Mapping[str, str],
 ) -> Mapping[str, str]:
-    """Override command-scope Git config so follow-tags cannot add refs."""
+    """Append a highest-precedence follow-tags override for submit pushes."""
     if argv[:2] != ("git", "push"):
         return env
+    parameters = " ".join(
+        value.strip()
+        for key, value in env.items()
+        if key.upper() == "GIT_CONFIG_PARAMETERS" and value.strip()
+    )
     constrained = {
         key: value
         for key, value in env.items()
-        if key != "GIT_CONFIG_COUNT"
-        and key != "GIT_CONFIG_PARAMETERS"
-        and not key.startswith("GIT_CONFIG_KEY_")
-        and not key.startswith("GIT_CONFIG_VALUE_")
+        if key.upper() != "GIT_CONFIG_PARAMETERS"
     }
-    constrained.update(
-        {
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "push.followTags",
-            "GIT_CONFIG_VALUE_0": "false",
-        }
+    override = "'push.followTags=false'"
+    constrained["GIT_CONFIG_PARAMETERS"] = (
+        f"{parameters} {override}" if parameters else override
     )
     return constrained
 
