@@ -79,7 +79,7 @@ def execute_review(
                 "stale_state",
                 "posted review became stale or had an unexpected state",
             )
-    except LooprError as exc:
+    except BaseException as exc:
         _dismiss_stale(github, initial, review_id, exc)
         raise
 
@@ -189,14 +189,15 @@ def _dismiss_stale(
     github: GitHubClient,
     pull_request: PullRequest,
     review_id: int,
-    original: LooprError,
+    original: BaseException,
 ) -> None:
     """Neutralize a stale review and preserve failure context if dismissal fails."""
     try:
         github.dismiss(pull_request, review_id)
     except LooprError as dismiss_error:
+        original_message = str(original) or type(original).__name__
         message = (
-            f"{original}; stale review {review_id} could not be dismissed: "
+            f"{original_message}; stale review {review_id} could not be dismissed: "
             f"{dismiss_error}"
         )
         raise LooprError(EXIT_RACE, "stale_state", message) from original
