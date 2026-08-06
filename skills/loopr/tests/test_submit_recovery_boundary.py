@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from test_submit_command import ScenarioRunner, _fixture_repo, _git
@@ -12,6 +12,9 @@ from scripts import submit_core
 from scripts.models import JsonObject
 from scripts.process import CommandError, CommandResult
 from scripts.submit import execute_submit
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 class RecoveryDeadlineRunner(ScenarioRunner):
