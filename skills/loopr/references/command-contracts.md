@@ -1,43 +1,68 @@
-# Planned command contracts
+# Command contracts
 
-These interfaces define the stable boundary for follow-up issues. They are
-documentation only in issue #15; no executable stub is provided.
-
-## `review`
+## `review` — implemented
 
 ```console
 python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
 ```
 
-`review` resolves the pull request, binds the operation to the exact current
-base and head commits, obtains an independent Oracle/ChatGPT review, validates
-the structured verdict, and returns machine-readable JSON.
+Optional arguments are `--repo-dir`, `--artifacts-dir`, and `--oracle-thinking-time`. The command writes exactly one JSON object followed by a newline to stdout. Subprocess output and diagnostics never share stdout.
 
-A valid `APPROVE` or `REQUEST_CHANGES` verdict is a successful command result.
-The host agent consumes `REQUEST_CHANGES`, decides how to address the findings,
-edits the repository, and runs applicable local validation. The command does
-not launch an implementation agent.
+### Success
 
-Issue #16 owns the implementation and detailed result schema.
+Exit status is `0` for either valid verdict:
 
-## `submit`
+```json
+{
+  "schema_version": 1,
+  "command": "review",
+  "repository": "owner/repository",
+  "pr_number": 123,
+  "base_sha": "40-character SHA",
+  "head_sha": "40-character SHA",
+  "verdict": "APPROVE",
+  "github_review_id": 123456789,
+  "blocking_findings": [],
+  "implementation_prompt": null,
+  "artifacts_dir": "/private/path"
+}
+```
+
+For `REQUEST_CHANGES`, `blocking_findings` is a non-empty array of objects with exactly `id`, `title`, `description`, and `required_change`; `implementation_prompt` is a non-empty string for the invoking host agent. The command never launches an implementation agent.
+
+### Error
+
+Operational and contract failures exit non-zero and emit:
+
+```json
+{
+  "schema_version": 1,
+  "command": "review",
+  "error": {
+    "category": "stale_state",
+    "message": "bounded redacted diagnostic"
+  }
+}
+```
+
+Detailed diagnostics go to stderr. Stable exit classes are precondition/input `2`, Oracle/schema `3`, GitHub/write `4`, and stale base/head state `6`.
+
+### Snapshot and stale-state behavior
+
+The review is bound to repository, PR number, base SHA, and head SHA. The command re-reads the PR immediately before posting, posts through the GitHub reviews API with `commit_id` set to the frozen head, re-reads the PR after posting, and verifies the created review ID, author, state, and commit. A post-write race is neutralized by dismissing the review where GitHub permits it, then returning a non-zero stale-state error.
+
+### Artifacts
+
+A private run directory contains the normalized snapshot, changed-path list, exact patch, bundle manifest, included text attachments and explicit omission records, Oracle prompt and raw bounded response, validated review, GitHub review metadata, and final result. Known credential values are rejected or redacted and reviewer credentials are not supplied to Oracle.
+
+### Limitations
+
+Only GitHub.com, same-repository, open non-draft PRs are supported. Runtime code uses only the Python standard library. CI status, inline comments, repository edits, commit creation, pushing, agent invocation, and automatic iteration are out of scope.
+
+## `submit` — planned
 
 ```console
 python3 skills/loopr/scripts/loopr.py submit --pr <NUMBER_OR_URL> --expected-head <SHA>
 ```
 
-`submit` verifies pull-request and repository identity, confirms the remote head
-still matches `--expected-head`, performs deterministic patch validation,
-creates the commit, and pushes with an explicit lease. It returns
-machine-readable JSON describing the submitted head and commit.
-
-The host agent owns planning, editing, and repository-specific validation.
-`submit` does not decide how to fix review findings.
-
-Issue #17 owns the implementation and detailed result schema.
-
-## Process status
-
-Valid review verdicts are domain results, not runtime failures. Operational
-errors, stale state, malformed structured data, and command-contract violations
-use a non-zero exit status.
+Issue #17 owns implementation of validation, commit creation, and lease-protected push. The host agent owns planning, editing, and local QA.
