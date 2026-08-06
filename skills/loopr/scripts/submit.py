@@ -135,7 +135,10 @@ class _PushAwareRunner(CommandRunner):
                     self._pushed_commit_sha = target[1]
             break
 
-        if original_argv == STAGED_PATCH_COMMAND and self.contains_secret(result.stdout):
+        if (
+            original_argv == STAGED_PATCH_COMMAND
+            and self.contains_secret(result.stdout)
+        ):
             raise LooprError(
                 EXIT_PRECONDITION,
                 "credentials",
@@ -285,7 +288,11 @@ def _repo_root(runner: CommandRunner, repo_dir: Path) -> Path:
     except (CommandError, UnicodeError) as exc:
         raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
     if not root:
-        raise LooprError(EXIT_PRECONDITION, "git", "Git returned an empty repository root")
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "git",
+            "Git returned an empty repository root",
+        )
     return Path(root).resolve()
 
 
