@@ -11,10 +11,10 @@ from scripts.models import EXIT_PRECONDITION, LooprError
 from scripts.submit_guard import execute_submit
 
 
-def test_unpublished_submodule_commit_fails_before_superproject_push(
+def test_forged_tracking_ref_cannot_publish_an_unpublished_gitlink(
     tmp_path: Path,
 ) -> None:
-    """A gitlink cannot be published before its target exists remotely."""
+    """Local tracking refs cannot prove that a gitlink exists remotely."""
     repo, remote, state, _base, _head = _fixture_repo(tmp_path)
 
     submodule_remote = tmp_path / "submodule.git"
@@ -59,6 +59,16 @@ def test_unpublished_submodule_commit_fails_before_superproject_push(
     _git(submodule, "commit", "-am", "unpublished submodule")
     unpublished_submodule_head = _git(submodule, "rev-parse", "HEAD")
     assert unpublished_submodule_head != published_submodule_head
+    _git(
+        submodule,
+        "update-ref",
+        "refs/remotes/origin/main",
+        unpublished_submodule_head,
+    )
+    assert (
+        _git(submodule, "rev-parse", "refs/remotes/origin/main")
+        == unpublished_submodule_head
+    )
 
     with pytest.raises(LooprError) as captured:
         execute_submit(
