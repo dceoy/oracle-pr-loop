@@ -103,7 +103,8 @@ class _PushAwareRunner(CommandRunner):
     ) -> CommandResult:
         """Harden workspace staging and post-write confirmation."""
         original_argv = tuple(str(value) for value in args)
-        argv = self._exclude_artifacts(original_argv)
+        argv = _constrain_push(self._exclude_artifacts(original_argv))
+        env = _constrain_push_env(argv, env)
         self._guard_commit_shape(
             original_argv=original_argv,
             argv=argv,
@@ -468,6 +469,38 @@ def _require_artifacts_unstaged(
             "artifacts",
             "artifact directory must not contain tracked content",
         )
+
+
+def _constrain_push(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """Disable configuration-driven recursive writes for every submit push."""
+    if argv[:2] != ("git", "push"):
+        return argv
+    return (*argv[:2], "--recurse-submodules=no", *argv[2:])
+
+
+def _constrain_push_env(
+    argv: tuple[str, ...],
+    env: Mapping[str, str],
+) -> Mapping[str, str]:
+    """Override command-scope Git config so follow-tags cannot add refs."""
+    if argv[:2] != ("git", "push"):
+        return env
+    constrained = {
+        key: value
+        for key, value in env.items()
+        if key != "GIT_CONFIG_COUNT"
+        and key != "GIT_CONFIG_PARAMETERS"
+        and not key.startswith("GIT_CONFIG_KEY_")
+        and not key.startswith("GIT_CONFIG_VALUE_")
+    }
+    constrained.update(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "push.followTags",
+            "GIT_CONFIG_VALUE_0": "false",
+        }
+    )
+    return constrained
 
 
 def _push_target(argv: tuple[str, ...]) -> tuple[str, str, str, str] | None:
