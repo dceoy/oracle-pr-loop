@@ -136,7 +136,7 @@ class _PushAwareRunner(CommandRunner):
                 if target is None:
                     raise
                 remote, commit_sha, ref, expected_head = target
-                if not self._confirm_remote_after_push_error(
+                remote_confirmed = self._confirm_remote_after_push_error(
                     remote=remote,
                     commit_sha=commit_sha,
                     expected_head=expected_head,
@@ -144,9 +144,10 @@ class _PushAwareRunner(CommandRunner):
                     cwd=cwd,
                     env=env,
                     timeout=timeout,
-                ):
-                    raise
+                )
                 self._pushed_commit_sha = commit_sha
+                if not remote_confirmed:
+                    raise
                 result = CommandResult(argv, 0, b"", "")
             else:
                 target = _push_target(argv)

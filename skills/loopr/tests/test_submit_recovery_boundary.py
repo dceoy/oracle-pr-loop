@@ -58,6 +58,7 @@ class RecoveryDeadlineRunner(ScenarioRunner):
                     f"{commit_sha}:refs/heads/feature",
                 )
                 self.state["headRefOid"] = commit_sha
+                self.state["state"] = "CLOSED"
                 self.pending_commit = None
         return super().run(
             argv,
@@ -92,5 +93,6 @@ def test_fallback_accepts_commit_after_recovery_deadline(
 
     assert runner.recovery_reads == 2
     assert runner.pending_commit is None
+    assert state["state"] == "CLOSED"
     assert result.resulting_head_sha == result.commit_sha
     assert (Path(result.artifacts_dir) / "push.json").is_file()
