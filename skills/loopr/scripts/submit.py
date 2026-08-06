@@ -135,10 +135,11 @@ class _PushAwareRunner(CommandRunner):
                 target = _push_target(argv)
                 if target is None:
                     raise
-                remote, commit_sha, ref = target
+                remote, commit_sha, ref, expected_head = target
                 if not self._confirm_remote_after_push_error(
                     remote=remote,
                     commit_sha=commit_sha,
+                    expected_head=expected_head,
                     ref=ref,
                     cwd=cwd,
                     env=env,
@@ -271,17 +272,19 @@ class _PushAwareRunner(CommandRunner):
         *,
         remote: str,
         commit_sha: str,
+        expected_head: str,
         ref: str,
         cwd: Path,
         env: Mapping[str, str],
         timeout: int,
     ) -> bool:
-        """Retry only inconclusive remote reads after an ambiguous push error."""
+        """Retry expected or inconclusive remote reads after a push error."""
         deadline = time.monotonic() + submit_core.POLL_TIMEOUT_SECONDS
         while True:
             matches = self._remote_matches(
                 remote=remote,
                 commit_sha=commit_sha,
+                expected_head=expected_head,
                 ref=ref,
                 cwd=cwd,
                 env=env,
@@ -317,6 +320,7 @@ class _PushAwareRunner(CommandRunner):
         *,
         remote: str,
         commit_sha: str,
+        expected_head: str,
         ref: str,
         cwd: Path,
         env: Mapping[str, str],
@@ -333,7 +337,17 @@ class _PushAwareRunner(CommandRunner):
             output = result.stdout.decode("utf-8", "strict")
         except (CommandError, UnicodeError):
             return None
-        return output.splitlines() == [f"{commit_sha}\t{ref}"]
+        lines = output.splitlines()
+        if len(lines) != 1:
+            return None
+        remote_sha, separator, remote_ref = lines[0].partition("\t")
+        if separator != "\t" or remote_ref != ref or not _is_sha(remote_sha):
+            return None
+        if remote_sha == commit_sha:
+            return True
+        if remote_sha == expected_head:
+            return None
+        return False
 
 
 def execute_submit(
@@ -455,16 +469,32 @@ def _require_artifacts_unstaged(
         )
 
 
-def _push_target(argv: tuple[str, ...]) -> tuple[str, str, str] | None:
+def _push_target(argv: tuple[str, ...]) -> tuple[str, str, str, str] | None:
     if len(argv) < 5 or argv[:2] != ("git", "push"):
         return None
     remote = argv[-2]
     source, separator, destination = argv[-1].partition(":")
+    leases = [
+        value.removeprefix("--force-with-lease=")
+        for value in argv[2:-2]
+        if value.startswith("--force-with-lease=")
+    ]
+    if len(leases) != 1:
+        return None
+    lease_ref, lease_separator, expected_head = leases[0].partition(":")
     if (
         separator != ":"
-        or len(source) != 40
-        or any(character not in "0123456789abcdef" for character in source)
+        or not _is_sha(source)
         or not destination.startswith("refs/heads/")
+        or lease_separator != ":"
+        or lease_ref != destination
+        or not _is_sha(expected_head)
     ):
         return None
-    return remote, source, destination
+    return remote, source, destination, expected_head
+
+
+def _is_sha(value: str) -> bool:
+    return len(value) == 40 and all(
+        character in "0123456789abcdef" for character in value
+    )
