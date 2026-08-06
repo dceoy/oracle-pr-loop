@@ -9,3 +9,10 @@ extend = "pyproject.toml"
   "typing-only-standard-library-import",
   "compare-to-empty-string",
 ]
+
+[format]
+exclude = [
+  "skills/loopr/scripts/loopr.py",
+  "skills/loopr/scripts/submit_core.py",
+  "skills/loopr/tests/test_submit_command.py",
+]
