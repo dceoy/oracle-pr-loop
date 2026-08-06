@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pathlib
 
-REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "loopr"
 DISCOVERY_LINKS = (
     REPOSITORY_ROOT / ".agents" / "skills" / "loopr",
@@ -29,12 +29,26 @@ def _require(condition: bool, message: str) -> None:
 
 
 def test_canonical_skill_layout_exists() -> None:
-    """The canonical skill owns the instructions and planned subdirectories."""
+    """The canonical skill owns all production code, references, and tests."""
     skill_file = CANONICAL_SKILL / "SKILL.md"
     _require(skill_file.is_file(), "missing canonical SKILL.md")
     for directory in ("scripts", "references", "tests"):
         path = CANONICAL_SKILL / directory
         _require(path.is_dir(), f"missing canonical directory: {path}")
+
+
+def test_legacy_root_orchestrator_is_deleted() -> None:
+    """No root compatibility CLI or monolithic root test package remains."""
+    _require(not (REPOSITORY_ROOT / "loopr.py").exists(), "legacy root loopr.py exists")
+    _require(not (REPOSITORY_ROOT / "tests").exists(), "legacy root tests exist")
+    _require(
+        not (CANONICAL_SKILL / "scripts" / ".gitkeep").exists(),
+        "populated scripts directory still contains .gitkeep",
+    )
+    _require(
+        not (CANONICAL_SKILL / "tests" / ".gitkeep").exists(),
+        "populated tests directory still contains .gitkeep",
+    )
 
 
 def test_loopr_discovery_links_are_direct_and_canonical() -> None:
@@ -82,6 +96,47 @@ def test_skill_contract_is_vendor_neutral_and_complete() -> None:
     forbidden = ("codex exec", "claude -p", "cursor agent")
     for command in forbidden:
         _require(command not in text.lower(), f"host-specific command: {command}")
+
+
+def test_runtime_has_no_legacy_agent_or_linux_containment() -> None:
+    """Production modules contain no embedded agent or Linux supervisor path."""
+    forbidden = (
+        "codex exec",
+        "codex login",
+        "pidfd_open",
+        "pr_set_child_subreaper",
+        "subreaper",
+        "/proc/",
+        "git worktree add",
+        "loopr/pr-",
+    )
+    scripts = CANONICAL_SKILL / "scripts"
+    for path in scripts.glob("*.py"):
+        text = path.read_text(encoding="utf-8").lower()
+        for concept in forbidden:
+            _require(concept not in text, f"legacy runtime concept in {path}: {concept}")
+
+
+def test_docs_do_not_advertise_the_legacy_interface() -> None:
+    """Public documentation describes only the skill-native commands."""
+    documents = (
+        REPOSITORY_ROOT / "README.md",
+        REPOSITORY_ROOT / "pyproject.toml",
+        CANONICAL_SKILL / "SKILL.md",
+        CANONICAL_SKILL / "references" / "command-contracts.md",
+    )
+    forbidden = (
+        "python3 loopr.py",
+        "node.js 24",
+        "codex login",
+        "disposable worktree",
+        "issue #18",
+        "pidfd_open",
+    )
+    for path in documents:
+        text = path.read_text(encoding="utf-8").lower()
+        for concept in forbidden:
+            _require(concept not in text, f"stale documentation in {path}: {concept}")
 
 
 def test_unrelated_skill_discovery_remains_valid() -> None:

@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - main
+    paths:
+      - .agents/skills/loopr
+      - .claude/skills/loopr
+      - .github/workflows/ci.yml
+      - .ruff.toml
+      - pyproject.toml
+      - skills/loopr/**
+      - uv.lock
   pull_request:
     branches:
       - main
@@ -11,6 +19,14 @@ on:
       - opened
       - synchronize
       - reopened
+    paths:
+      - .agents/skills/loopr
+      - .claude/skills/loopr
+      - .github/workflows/ci.yml
+      - .ruff.toml
+      - pyproject.toml
+      - skills/loopr/**
+      - uv.lock
   workflow_dispatch:
 permissions:
   contents: read
@@ -33,6 +49,14 @@ jobs:
     with:
       package-path: .
       python-version: "3.12"
+  python-test-macos:
+    permissions:
+      contents: read
+    uses: dceoy/gha-for-devops/.github/workflows/python-package-test.yml@main  # zizmor: ignore[unpinned-uses]
+    with:
+      package-path: .
+      python-version: "3.12"
+      runs-on: macos-latest
   github-codeql-analysis:
     permissions:
       contents: read
@@ -48,6 +72,7 @@ jobs:
     needs:
       - python-lint-and-scan
       - python-test
+      - python-test-macos
     uses: dceoy/gha-for-devops/.github/workflows/dependabot-auto-merge.yml@main  # zizmor: ignore[unpinned-uses]
     permissions:
       contents: write
