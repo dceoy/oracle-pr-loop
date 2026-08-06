@@ -21,9 +21,16 @@ from scripts.models import (
 from scripts.process import CommandError, CommandResult, CommandRunner
 from scripts.submit import execute_submit
 
-GIT = shutil.which("git")
-if GIT is None:
-    raise RuntimeError("git is required for submit integration tests")
+
+def _git_executable() -> str:
+    """Return the Git executable required by integration tests."""
+    executable = shutil.which("git")
+    if executable is None:
+        raise RuntimeError("git is required for submit integration tests")
+    return executable
+
+
+GIT = _git_executable()
 
 
 class ScenarioRunner(CommandRunner):
