@@ -94,8 +94,7 @@ class _PushAwareRunner(CommandRunner):
         argv = self._exclude_artifacts(original_argv)
         retry_deadline = (
             time.monotonic() + submit_core.POLL_TIMEOUT_SECONDS
-            if self._pushed_commit_sha is not None
-            and argv[:3] == ("gh", "pr", "view")
+            if self._pushed_commit_sha is not None and argv[:3] == ("gh", "pr", "view")
             else None
         )
         while True:
@@ -135,9 +134,8 @@ class _PushAwareRunner(CommandRunner):
                     self._pushed_commit_sha = target[1]
             break
 
-        if (
-            original_argv == STAGED_PATCH_COMMAND
-            and self.contains_secret(result.stdout)
+        if original_argv == STAGED_PATCH_COMMAND and self.contains_secret(
+            result.stdout
         ):
             raise LooprError(
                 EXIT_PRECONDITION,
