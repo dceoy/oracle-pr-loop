@@ -44,6 +44,8 @@ python3 skills/loopr/scripts/loopr.py submit \
   --expected-head <SHA>
 ```
 
+The compact command form is `submit --pr <NUMBER_OR_URL> --expected-head <SHA>`.
+
 `submit` requires local `HEAD` and the remote PR head to equal `--expected-head`. It rejects repository mismatches, forks, drafts, conflicts, whitespace failures, empty patches, unsafe refs, known credential values, and base/head races. It stages the complete patch, creates one hook-free unsigned commit, pushes the PR branch with an explicit force-with-lease bound to the expected head, confirms GitHub exposes the resulting SHA, and emits one machine-readable JSON object.
 
 Operational and stale-state failures use non-zero exit statuses and structured error objects. Diagnostics are written only to stderr.
