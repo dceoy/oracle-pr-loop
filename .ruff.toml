@@ -1,5 +1,11 @@
 extend = "pyproject.toml"
 
 [lint.extend-per-file-ignores]
-"skills/loopr/tests/test_submit_command.py" = ["TCH003", "PLC1901"]
-"skills/loopr/tests/test_submit_transport.py" = ["TCH003", "PLC1901"]
+"skills/loopr/tests/test_submit_command.py" = [
+  "typing-only-standard-library-import",
+  "compare-to-empty-string",
+]
+"skills/loopr/tests/test_submit_transport.py" = [
+  "typing-only-standard-library-import",
+  "compare-to-empty-string",
+]
