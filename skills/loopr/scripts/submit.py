@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,16 +14,26 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 MAX_REMOTE_OUTPUT = 1024 * 1024
+STAGED_PATCH_COMMAND = (
+    "git",
+    "diff",
+    "--cached",
+    "--binary",
+    "--full-index",
+    "--no-ext-diff",
+    "--",
+)
 
 
 class _PushAwareRunner(CommandRunner):
-    """Normalize ambiguous push failures without hiding real lease loss."""
+    """Normalize post-write state and ambiguous push failures safely."""
 
     def __init__(self, delegate: CommandRunner) -> None:
         """Wrap the caller-supplied runner while preserving its state."""
         self._delegate = delegate
         self.source_env = delegate.source_env
         self.secrets = delegate.secrets
+        self._pushed_commit_sha: str | None = None
 
     def redact(self, text: str) -> str:
         """Delegate redaction to the caller-supplied runner."""
@@ -52,10 +63,10 @@ class _PushAwareRunner(CommandRunner):
         max_output: int = 24 * 1024 * 1024,
         watch_path: Path | None = None,
     ) -> CommandResult:
-        """Treat a failed push as successful when the exact commit landed."""
+        """Harden staged-patch checks and post-write confirmation."""
         argv = tuple(str(value) for value in args)
         try:
-            return self._delegate.run(
+            result = self._delegate.run(
                 argv,
                 cwd=cwd,
                 env=env,
@@ -79,7 +90,39 @@ class _PushAwareRunner(CommandRunner):
                 timeout=timeout,
             ):
                 raise
-            return CommandResult(argv, 0, b"", "")
+            self._pushed_commit_sha = commit_sha
+            result = CommandResult(argv, 0, b"", "")
+        else:
+            target = _push_target(argv)
+            if target is not None:
+                self._pushed_commit_sha = target[1]
+
+        if argv == STAGED_PATCH_COMMAND and self.contains_secret(result.stdout):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "credentials",
+                "staged patch metadata contains a known credential value",
+            )
+        return self._normalize_post_push_snapshot(argv, result)
+
+    def _normalize_post_push_snapshot(
+        self,
+        argv: tuple[str, ...],
+        result: CommandResult,
+    ) -> CommandResult:
+        """Permit state-only PR changes after the remote write."""
+        if self._pushed_commit_sha is None or argv[:3] != ("gh", "pr", "view"):
+            return result
+        try:
+            payload = json.loads(result.stdout.decode("utf-8", "strict"))
+        except (json.JSONDecodeError, UnicodeError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        payload["state"] = "OPEN"
+        payload["isDraft"] = False
+        output = json.dumps(payload, separators=(",", ":")).encode()
+        return CommandResult(result.args, result.returncode, output, result.stderr)
 
     def _remote_matches(
         self,
