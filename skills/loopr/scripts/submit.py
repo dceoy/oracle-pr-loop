@@ -7,13 +7,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import submit_core
 from .models import EXIT_PRECONDITION, LooprError, SubmitResult
 from .process import CommandError, CommandResult, CommandRunner
-from .submit_core import (
-    POLL_INTERVAL_SECONDS,
-    POLL_TIMEOUT_SECONDS,
-    execute_submit as _execute_submit,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -71,7 +67,7 @@ class _PushAwareRunner(CommandRunner):
         """Harden staged-patch checks and post-write confirmation."""
         argv = tuple(str(value) for value in args)
         retry_deadline = (
-            time.monotonic() + POLL_TIMEOUT_SECONDS
+            time.monotonic() + submit_core.POLL_TIMEOUT_SECONDS
             if self._pushed_commit_sha is not None
             and argv[:3] == ("gh", "pr", "view")
             else None
@@ -90,7 +86,7 @@ class _PushAwareRunner(CommandRunner):
                 )
             except CommandError:
                 if retry_deadline is not None and time.monotonic() < retry_deadline:
-                    time.sleep(POLL_INTERVAL_SECONDS)
+                    time.sleep(submit_core.POLL_INTERVAL_SECONDS)
                     continue
                 target = _push_target(argv)
                 if target is None:
@@ -175,7 +171,7 @@ def execute_submit(
     """Validate the push destination, then execute one guarded submission."""
     command_runner = runner or CommandRunner()
     _require_single_push_url(command_runner, repo_dir)
-    return _execute_submit(
+    return submit_core.execute_submit(
         pr_value=pr_value,
         expected_head=expected_head,
         repo_dir=repo_dir,
