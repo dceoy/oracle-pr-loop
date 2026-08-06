@@ -160,6 +160,8 @@ class _StuckProcess:
     def wait(self, timeout: float | None = None) -> int:
         """Record the bounded wait and simulate a leader that never exits."""
         self.wait_timeouts.append(timeout)
+        if timeout is None:
+            raise AssertionError("cleanup wait must be bounded")
         raise process_module.subprocess.TimeoutExpired("fake", timeout)
 
 
