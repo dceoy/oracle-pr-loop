@@ -310,33 +310,41 @@ class CommandRunner:
             time.sleep(POLL_INTERVAL_SECONDS)
         return not cls._group_exists(pgid)
 
+    @staticmethod
+    def _wait_for_process_exit(proc: subprocess.Popen[bytes], timeout: float) -> bool:
+        """Wait at most the cleanup budget for the group leader to be reaped."""
+        if proc.poll() is not None:
+            return True
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
     @classmethod
     def _terminate_group(cls, proc: subprocess.Popen[bytes]) -> None:
         """Terminate and prove exit of the complete subprocess group.
 
         The group leader exiting does not imply the group is empty: a
-        same-session descendant can outlive it. Signal the whole process
-        group by pgid regardless of the leader's state, then fail closed unless
-        the group is confirmed absent after the final SIGKILL.
+        same-session descendant can outlive it. Every leader wait is bounded,
+        the complete group is signaled by pgid, and cleanup fails closed unless
+        both the leader is reaped and the process group is confirmed absent.
         """
         pgid = proc.pid
-        if proc.poll() is None:
-            with suppress(ProcessLookupError):
-                os.killpg(pgid, signal.SIGTERM)
-            try:
-                proc.wait(timeout=TERMINATION_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                with suppress(ProcessLookupError):
-                    os.killpg(pgid, signal.SIGKILL)
-                proc.wait()
-        else:
-            with suppress(ProcessLookupError):
-                os.killpg(pgid, signal.SIGTERM)
+        leader_reaped = proc.poll() is not None
+        with suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGTERM)
+        if not leader_reaped:
+            leader_reaped = cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS)
 
-        if cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS):
+        if leader_reaped and cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS):
             return
+
         with suppress(ProcessLookupError):
             os.killpg(pgid, signal.SIGKILL)
-        if cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS):
+        if not leader_reaped:
+            leader_reaped = cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS)
+        group_gone = cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS)
+        if leader_reaped and group_gone:
             return
         raise CommandError("could not prove subprocess group termination")
