@@ -370,13 +370,14 @@ def execute_submit(
             github.repo_dir,
             initial.head_ref,
         )
-        if current_remote != expected_head:
+        if current_remote == expected_head:
+            raise
+        if current_remote != commit_sha:
             raise LooprError(
                 EXIT_RACE,
                 "lease_lost",
                 "remote head changed and the lease-protected push was rejected",
             ) from exc
-        raise
 
     resulting = github.poll_result(initial, commit_sha)
     writer.json(
