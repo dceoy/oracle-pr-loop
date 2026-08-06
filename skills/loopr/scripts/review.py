@@ -128,8 +128,7 @@ def _persist_best_effort(
             raise
         detail = str(exc) or type(exc).__name__
         sys.stderr.write(
-            f"loopr review: warning: failed to persist artifact {relative}: "
-            f"{detail}\n"
+            f"loopr review: warning: failed to persist artifact {relative}: {detail}\n"
         )
 
 
