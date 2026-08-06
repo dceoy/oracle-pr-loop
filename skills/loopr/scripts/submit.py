@@ -68,8 +68,7 @@ class _PushAwareRunner(CommandRunner):
         argv = tuple(str(value) for value in args)
         retry_deadline = (
             time.monotonic() + submit_core.POLL_TIMEOUT_SECONDS
-            if self._pushed_commit_sha is not None
-            and argv[:3] == ("gh", "pr", "view")
+            if self._pushed_commit_sha is not None and argv[:3] == ("gh", "pr", "view")
             else None
         )
         while True:
