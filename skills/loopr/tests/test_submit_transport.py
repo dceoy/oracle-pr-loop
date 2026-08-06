@@ -129,6 +129,51 @@ class ClosedAfterPushRunner(ScenarioRunner):
         return result
 
 
+class TransientGitHubAfterPushRunner(ScenarioRunner):
+    """Fail the first GitHub snapshot after a successful push."""
+
+    def __init__(self, repo: Path, remote: Path, state: JsonObject) -> None:
+        """Initialize one transient post-write GitHub failure."""
+        super().__init__(repo, remote, state)
+        self.push_completed = False
+        self.fail_next_snapshot = True
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Raise once after the remote write, then expose the pushed head."""
+        argv = [str(value) for value in args]
+        if (
+            argv[:3] == ["gh", "pr", "view"]
+            and self.push_completed
+            and self.fail_next_snapshot
+        ):
+            self.fail_next_snapshot = False
+            raise CommandError("temporary GitHub API failure")
+        result = super().run(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            input_text=input_text,
+            check=check,
+            max_output=max_output,
+            watch_path=watch_path,
+        )
+        if argv[:2] == ["git", "push"] and result.returncode == 0:
+            self.push_completed = True
+        return result
+
+
 def test_multiple_push_urls_fail_before_staging(tmp_path: Path) -> None:
     """A second push destination is rejected before local mutation."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
@@ -211,5 +256,24 @@ def test_closed_pr_after_push_accepts_exact_resulting_head(tmp_path: Path) -> No
     )
 
     assert state["state"] == "CLOSED"
+    assert result.resulting_head_sha == result.commit_sha
+    assert (Path(result.artifacts_dir) / "push.json").is_file()
+
+
+def test_transient_github_failure_after_push_is_retried(tmp_path: Path) -> None:
+    """A temporary post-write GitHub failure does not negate the exact push."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = TransientGitHubAfterPushRunner(repo, remote, state)
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        artifacts_dir=tmp_path / "artifacts",
+        runner=runner,
+    )
+
+    assert runner.fail_next_snapshot is False
     assert result.resulting_head_sha == result.commit_sha
     assert (Path(result.artifacts_dir) / "push.json").is_file()
