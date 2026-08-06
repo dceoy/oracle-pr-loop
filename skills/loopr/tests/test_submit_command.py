@@ -43,6 +43,7 @@ class ScenarioRunner(CommandRunner):
         state: JsonObject,
         *,
         lease_loss_sha: str | None = None,
+        base_advance_sha: str | None = None,
     ) -> None:
         """Initialize one isolated submission scenario."""
         super().__init__()
@@ -50,6 +51,7 @@ class ScenarioRunner(CommandRunner):
         self.remote = remote
         self.state = state
         self.lease_loss_sha = lease_loss_sha
+        self.base_advance_sha = base_advance_sha
 
     def run(
         self,
@@ -101,6 +103,9 @@ class ScenarioRunner(CommandRunner):
             raise CommandError(detail or f"command failed: {' '.join(argv)}")
         if argv[:2] == ["git", "push"] and completed.returncode == 0:
             self.state["headRefOid"] = argv[-1].split(":", 1)[0]
+            if self.base_advance_sha is not None:
+                self.state["baseRefOid"] = self.base_advance_sha
+                self.base_advance_sha = None
         return CommandResult(tuple(argv), completed.returncode, stdout, stderr)
 
 
@@ -342,8 +347,8 @@ def test_untracked_whitespace_error_fails_before_commit(tmp_path: Path) -> None:
     assert _git(repo, "rev-parse", "HEAD") == head
 
 
-def test_known_credential_in_patch_fails_before_commit(tmp_path: Path) -> None:
-    """Known environment credential values cannot enter the staged patch."""
+def test_known_credential_in_staged_blob_fails_before_commit(tmp_path: Path) -> None:
+    """Known environment credential values cannot enter staged blobs."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     credential = "known-test-credential"
     (repo / "file.txt").write_text(f"{credential}\n", encoding="utf-8")
@@ -361,6 +366,56 @@ def test_known_credential_in_patch_fails_before_commit(tmp_path: Path) -> None:
 
     assert captured.value.category == "credentials"
     assert _git(repo, "rev-parse", "HEAD") == head
+
+
+def test_known_credential_in_binary_blob_fails_before_commit(
+    tmp_path: Path,
+) -> None:
+    """Binary diff encoding cannot hide a known credential value."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    credential = "known-binary-credential"
+    (repo / "secret.bin").write_bytes(
+        b"\x00prefix\x00" + credential.encode() + b"\x00suffix\x00"
+    )
+    runner = ScenarioRunner(repo, remote, state)
+    runner.secrets.add(credential)
+
+    with pytest.raises(LooprError) as captured:
+        execute_submit(
+            pr_value="1",
+            expected_head=head,
+            repo_dir=repo,
+            artifacts_dir=tmp_path / "artifacts",
+            runner=runner,
+        )
+
+    assert captured.value.category == "credentials"
+    assert _git(repo, "rev-parse", "HEAD") == head
+
+
+def test_base_advance_after_push_keeps_success(tmp_path: Path) -> None:
+    """A post-write base advance does not negate the exact pushed head."""
+    repo, remote, state, base, head = _fixture_repo(tmp_path)
+    advanced_base = "f" * 40
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = ScenarioRunner(
+        repo,
+        remote,
+        state,
+        base_advance_sha=advanced_base,
+    )
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        artifacts_dir=tmp_path / "artifacts",
+        runner=runner,
+    )
+
+    assert state["baseRefOid"] == advanced_base
+    assert result.base_sha == base
+    assert result.resulting_head_sha == result.commit_sha
 
 
 def test_malformed_head_ref_fails_before_staging(tmp_path: Path) -> None:

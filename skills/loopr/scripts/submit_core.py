@@ -43,6 +43,7 @@ PR_FIELDS = ",".join(
     )
 )
 MAX_PATCH_BYTES = 20 * 1024 * 1024
+MAX_STAGED_CONTENT_BYTES = MAX_PATCH_BYTES
 POLL_TIMEOUT_SECONDS = 90
 POLL_INTERVAL_SECONDS = 2
 COMMIT_MESSAGE = "loopr: apply reviewed changes"
@@ -209,12 +210,6 @@ class SubmitGitHubClient:
         deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
         while True:
             current = self.snapshot()
-            if current.base_sha != initial.base_sha:
-                raise LooprError(
-                    EXIT_RACE,
-                    "stale_state",
-                    "pull request base changed during submission",
-                )
             if current.head_sha == commit_sha:
                 return current
             if current.head_sha != initial.head_sha:
@@ -290,12 +285,10 @@ def execute_submit(
             "empty_patch",
             "staged patch is empty",
         )
-    if command_runner.contains_secret(patch):
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "credentials",
-            "staged patch contains a known credential value",
-        )
+    _require_no_known_credentials_in_staged_blobs(
+        command_runner,
+        github.repo_dir,
+    )
     _require_same_snapshot(initial, github.snapshot(), phase="before commit")
 
     writer = ArtifactWriter(
@@ -443,6 +436,140 @@ def _validate_local_workspace(
             "workspace has no implementation changes",
         )
     _git(runner, repo_dir, ["diff", "--check", "HEAD", "--"])
+
+
+def _require_no_known_credentials_in_staged_blobs(
+    runner: CommandRunner,
+    repo_dir: Path,
+) -> None:
+    """Scan bounded staged blob contents for known credential values."""
+    raw = _git(
+        runner,
+        repo_dir,
+        [
+            "diff",
+            "--cached",
+            "--raw",
+            "--no-abbrev",
+            "-z",
+            "--diff-filter=ACMRT",
+            "--",
+        ],
+        max_output=MAX_PATCH_BYTES,
+    )
+    scanned_bytes = 0
+    for object_id in _staged_object_ids(raw):
+        object_type = _git_text(
+            runner,
+            repo_dir,
+            ["cat-file", "-t", object_id],
+        ).strip()
+        if object_type != "blob":
+            continue
+        size_text = _git_text(
+            runner,
+            repo_dir,
+            ["cat-file", "-s", object_id],
+        ).strip()
+        try:
+            size = int(size_text)
+        except ValueError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned an invalid staged blob size",
+            ) from exc
+        if (
+            size < 0
+            or size > MAX_STAGED_CONTENT_BYTES
+            or scanned_bytes + size > MAX_STAGED_CONTENT_BYTES
+        ):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "credentials",
+                "staged blob content exceeds the credential scan bound",
+            )
+        content = _git(
+            runner,
+            repo_dir,
+            ["cat-file", "blob", object_id],
+            max_output=max(1, size),
+        )
+        if len(content) != size:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned a truncated staged blob",
+            )
+        scanned_bytes += size
+        if runner.contains_secret(content):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "credentials",
+                "staged blob contains a known credential value",
+            )
+
+
+def _staged_object_ids(raw: bytes) -> list[str]:
+    """Parse new object IDs from NUL-delimited staged raw diff records."""
+    if not raw:
+        return []
+    fields = raw.split(b"\0")
+    if fields[-1]:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "git",
+            "Git returned malformed staged diff metadata",
+        )
+    fields.pop()
+    object_ids: list[str] = []
+    seen: set[str] = set()
+    index = 0
+    while index < len(fields):
+        header = fields[index]
+        index += 1
+        parts = header.split()
+        if len(parts) != 5 or not parts[0].startswith(b":"):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned malformed staged diff metadata",
+            )
+        status = parts[4][:1]
+        path_count = 2 if status in {b"C", b"R"} else 1
+        if status not in {b"A", b"C", b"M", b"R", b"T"}:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned an unexpected staged diff status",
+            )
+        if index + path_count > len(fields) or any(
+            not value for value in fields[index : index + path_count]
+        ):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned malformed staged diff paths",
+            )
+        index += path_count
+        try:
+            object_id = parts[3].decode("ascii", "strict")
+        except UnicodeError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned a non-ASCII staged object ID",
+            ) from exc
+        if not _is_sha(object_id):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned an invalid staged object ID",
+            )
+        if object_id not in seen:
+            seen.add(object_id)
+            object_ids.append(object_id)
+    return object_ids
 
 
 def _require_same_snapshot(
