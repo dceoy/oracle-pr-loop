@@ -15,10 +15,20 @@ if TYPE_CHECKING:
 
 GITLINK_MODE = b"160000"
 MAX_GITLINK_DIFF_BYTES = 1024 * 1024
+STAGED_RAW_PREFIX = (
+    "git",
+    "diff",
+    "--cached",
+    "--raw",
+    "--no-abbrev",
+    "-z",
+    "--diff-filter=ACMRT",
+    "--",
+)
 
 
 class _SubmitBoundaryRunner(CommandRunner):
-    """Freeze PR refs and reject gitlink changes before the remote write."""
+    """Freeze PR refs and reject unsafe candidate metadata before remote writes."""
 
     def __init__(self, delegate: CommandRunner) -> None:
         """Wrap one command runner without changing its environment state."""
@@ -56,7 +66,7 @@ class _SubmitBoundaryRunner(CommandRunner):
         max_output: int = 24 * 1024 * 1024,
         watch_path: Path | None = None,
     ) -> CommandResult:
-        """Freeze pre-push PR refs and reject candidate gitlink changes."""
+        """Freeze PR refs and reject unsafe staged metadata or gitlinks."""
         argv = tuple(str(value) for value in args)
         is_real_push = (
             argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
@@ -80,6 +90,14 @@ class _SubmitBoundaryRunner(CommandRunner):
             max_output=max_output,
             watch_path=watch_path,
         )
+        if argv[: len(STAGED_RAW_PREFIX)] == STAGED_RAW_PREFIX and self.contains_secret(
+            result.stdout
+        ):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "credentials",
+                "staged path metadata contains a known credential value",
+            )
         if not self._push_started and argv[:3] == ("gh", "pr", "view"):
             self._require_stable_pr_refs(result.stdout)
         return result
@@ -228,7 +246,7 @@ def execute_submit(
     artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Execute submit while freezing refs and rejecting gitlink changes."""
+    """Execute submit while freezing refs and rejecting unsafe metadata."""
     command_runner = runner or CommandRunner()
     return _execute_submit(
         pr_value=pr_value,
