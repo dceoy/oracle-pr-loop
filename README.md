@@ -22,15 +22,23 @@ Compatible hosts discover the same directory through:
 
 The host agent plans, edits, and runs repository validation. Oracle/ChatGPT
 independently reviews the exact pull-request head and returns a structured
-verdict. Deterministic skill scripts will inspect the pull request, transport
-reviews, validate patches, create commits, and push with an explicit lease.
-GitHub and Git remain the sources of pull-request identity, commit state,
-reviews, and remote branch updates.
+verdict. Deterministic skill scripts inspect the pull request, transport
+reviews, validate the complete workspace patch, create one commit, and push the
+PR branch with an explicit lease. GitHub and Git remain the sources of
+pull-request identity, commit state, reviews, and remote branch updates.
 
-The documented `review` and `submit` command boundaries are not implemented
-yet. Issue #16 will implement `review`, and issue #17 will implement `submit`.
-Until those migrations land, use the root `loopr.py` executable described
-below; its current behavior is unchanged by the structural skill layout.
+The vendor-neutral commands are:
+
+```console
+python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
+python3 skills/loopr/scripts/loopr.py submit \
+  --pr <NUMBER_OR_URL> \
+  --expected-head <SHA>
+```
+
+The root executable remains unchanged until issue #18 removes the legacy
+orchestrator and wires the complete host-driven iteration around these command
+contracts.
 
 ## Requirements
 

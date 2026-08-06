@@ -1,0 +1,18 @@
+extend = "pyproject.toml"
+
+[lint.extend-per-file-ignores]
+"skills/loopr/tests/test_submit_command.py" = [
+  "typing-only-standard-library-import",
+  "compare-to-empty-string",
+]
+"skills/loopr/tests/test_submit_transport.py" = [
+  "typing-only-standard-library-import",
+  "compare-to-empty-string",
+]
+
+[format]
+exclude = [
+  "skills/loopr/scripts/loopr.py",
+  "skills/loopr/scripts/submit_core.py",
+  "skills/loopr/tests/test_submit_command.py",
+]

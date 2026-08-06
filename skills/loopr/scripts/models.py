@@ -1,4 +1,4 @@
-"""Validated models and stable errors for the loopr review command."""
+"""Validated models and stable errors for loopr skill commands."""
 
 from __future__ import annotations
 
@@ -91,6 +91,38 @@ class ReviewResult:
                 "github_review_id": self.github_review_id,
                 "blocking_findings": list(self.blocking_findings),
                 "implementation_prompt": self.implementation_prompt,
+                "artifacts_dir": self.artifacts_dir,
+            },
+        )
+
+
+@dataclass(frozen=True)
+class SubmitResult:
+    """The machine-readable result returned by the submit command."""
+
+    repository: str
+    pr_number: int
+    base_sha: str
+    previous_head_sha: str
+    resulting_head_sha: str
+    commit_sha: str
+    pushed_branch: str
+    artifacts_dir: str
+
+    def as_json(self) -> JsonObject:
+        """Return the stable command result schema."""
+        return cast(
+            JsonObject,
+            {
+                "schema_version": 1,
+                "command": "submit",
+                "repository": self.repository,
+                "pr_number": self.pr_number,
+                "base_sha": self.base_sha,
+                "previous_head_sha": self.previous_head_sha,
+                "resulting_head_sha": self.resulting_head_sha,
+                "commit_sha": self.commit_sha,
+                "pushed_branch": self.pushed_branch,
                 "artifacts_dir": self.artifacts_dir,
             },
         )
