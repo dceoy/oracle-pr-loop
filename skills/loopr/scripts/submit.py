@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .models import EXIT_PRECONDITION, LooprError, SubmitResult
 from .process import CommandError, CommandResult, CommandRunner
-from .submit_core import execute_submit as _execute_submit
+from .submit_core import (
+    POLL_INTERVAL_SECONDS,
+    POLL_TIMEOUT_SECONDS,
+    execute_submit as _execute_submit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -65,37 +70,48 @@ class _PushAwareRunner(CommandRunner):
     ) -> CommandResult:
         """Harden staged-patch checks and post-write confirmation."""
         argv = tuple(str(value) for value in args)
-        try:
-            result = self._delegate.run(
-                argv,
-                cwd=cwd,
-                env=env,
-                timeout=timeout,
-                input_text=input_text,
-                check=check,
-                max_output=max_output,
-                watch_path=watch_path,
-            )
-        except CommandError:
-            target = _push_target(argv)
-            if target is None:
-                raise
-            remote, commit_sha, ref = target
-            if not self._remote_matches(
-                remote=remote,
-                commit_sha=commit_sha,
-                ref=ref,
-                cwd=cwd,
-                env=env,
-                timeout=timeout,
-            ):
-                raise
-            self._pushed_commit_sha = commit_sha
-            result = CommandResult(argv, 0, b"", "")
-        else:
-            target = _push_target(argv)
-            if target is not None:
-                self._pushed_commit_sha = target[1]
+        retry_deadline = (
+            time.monotonic() + POLL_TIMEOUT_SECONDS
+            if self._pushed_commit_sha is not None
+            and argv[:3] == ("gh", "pr", "view")
+            else None
+        )
+        while True:
+            try:
+                result = self._delegate.run(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                    input_text=input_text,
+                    check=check,
+                    max_output=max_output,
+                    watch_path=watch_path,
+                )
+            except CommandError:
+                if retry_deadline is not None and time.monotonic() < retry_deadline:
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+                target = _push_target(argv)
+                if target is None:
+                    raise
+                remote, commit_sha, ref = target
+                if not self._remote_matches(
+                    remote=remote,
+                    commit_sha=commit_sha,
+                    ref=ref,
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                ):
+                    raise
+                self._pushed_commit_sha = commit_sha
+                result = CommandResult(argv, 0, b"", "")
+            else:
+                target = _push_target(argv)
+                if target is not None:
+                    self._pushed_commit_sha = target[1]
+            break
 
         if argv == STAGED_PATCH_COMMAND and self.contains_secret(result.stdout):
             raise LooprError(
