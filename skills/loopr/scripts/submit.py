@@ -318,19 +318,34 @@ def _require_artifacts_unstaged(
 ) -> None:
     artifact_pathspec = artifact_exclusion.replace(":(exclude,", ":(", 1)
     try:
-        result = runner.run(
-            ["git", "diff", "--cached", "--name-only", "-z", "--", artifact_pathspec],
+        index = runner.run(
+            ["git", "ls-files", "-z", "--", artifact_pathspec],
+            cwd=repo_root,
+            env=runner.base_env(),
+            max_output=MAX_REMOTE_OUTPUT,
+        )
+        head = runner.run(
+            [
+                "git",
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                "HEAD",
+                "--",
+                artifact_pathspec,
+            ],
             cwd=repo_root,
             env=runner.base_env(),
             max_output=MAX_REMOTE_OUTPUT,
         )
     except CommandError as exc:
         raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-    if result.stdout:
+    if index.stdout or head.stdout:
         raise LooprError(
             EXIT_PRECONDITION,
             "artifacts",
-            "artifact directory contains staged changes",
+            "artifact directory must not contain tracked content",
         )
 
 

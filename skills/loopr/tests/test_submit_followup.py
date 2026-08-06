@@ -92,6 +92,34 @@ def test_previous_artifacts_are_excluded_from_submit(tmp_path: Path) -> None:
     assert (Path(result.artifacts_dir) / "result.json").is_file()
 
 
+def test_tracked_artifact_directory_is_rejected(tmp_path: Path) -> None:
+    """Tracked repository content cannot be hidden by the artifact exclusion."""
+    repo, remote, state, _base, _head = _fixture_repo(tmp_path)
+    tracked = repo / ".pr-loopr" / "tracked.txt"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("repository content\n", encoding="utf-8")
+    _git(repo, "add", ".pr-loopr/tracked.txt")
+    _git(repo, "commit", "-m", "track artifact path")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "origin", "feature")
+    state["headRefOid"] = head
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+
+    with pytest.raises(LooprError) as captured:
+        execute_submit(
+            pr_value="1",
+            expected_head=head,
+            repo_dir=repo,
+            artifacts_dir=Path(".pr-loopr"),
+            runner=ScenarioRunner(repo, remote, state),
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "artifacts"
+    assert _git(repo, "diff", "--cached", "--name-only") == ""
+
+
+
 def test_only_previous_artifacts_remain_an_empty_patch(tmp_path: Path) -> None:
     """Audit output alone cannot satisfy the implementation-change check."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
