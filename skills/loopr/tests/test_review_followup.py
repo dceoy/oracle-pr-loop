@@ -19,7 +19,11 @@ SHA_A = "a" * 40
 SHA_B = "b" * 40
 
 
-def _sample_pr(*, head_sha: str = SHA_B, paths: tuple[str, ...] = ("file.py",)) -> PullRequest:
+def _sample_pr(
+    *,
+    head_sha: str = SHA_B,
+    paths: tuple[str, ...] = ("file.py",),
+) -> PullRequest:
     """Return one valid frozen pull-request snapshot."""
     return PullRequest(
         repository="owner/repository",
