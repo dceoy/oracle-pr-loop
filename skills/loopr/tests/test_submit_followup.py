@@ -116,8 +116,7 @@ def test_tracked_artifact_directory_is_rejected(tmp_path: Path) -> None:
 
     assert captured.value.code == EXIT_PRECONDITION
     assert captured.value.category == "artifacts"
-    assert _git(repo, "diff", "--cached", "--name-only") == ""
-
+    assert not _git(repo, "diff", "--cached", "--name-only")
 
 
 def test_only_previous_artifacts_remain_an_empty_patch(tmp_path: Path) -> None:
