@@ -68,9 +68,7 @@ class _SubmitBoundaryRunner(CommandRunner):
     ) -> CommandResult:
         """Freeze PR refs and reject unsafe staged metadata or gitlinks."""
         argv = tuple(str(value) for value in args)
-        is_real_push = (
-            argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
-        )
+        is_real_push = argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
         if is_real_push:
             self._reject_gitlink_changes(
                 argv=argv,
