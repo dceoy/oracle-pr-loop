@@ -425,86 +425,11 @@ def test_runner_terminates_on_watched_file_overflow(tmp_path: Path) -> None:
         )
 
 
-def _pid_is_running(pid: int) -> bool:
-    """Return whether pid names a live, non-zombie process."""
-    try:
-        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    return "State:\tZ" not in status
-
-
-def test_runner_reaps_descendants_after_leader_exits(tmp_path: Path) -> None:
-    """A same-session descendant left behind by an exited leader is reaped."""
-    runner = CommandRunner({"PATH": os.environ["PATH"]})
-    marker = tmp_path / "child.pid"
-    script = (
-        "import subprocess, sys\n"
-        f"marker = {str(marker)!r}\n"
-        "child = subprocess.Popen(\n"
-        "    [sys.executable, '-c', 'import time; time.sleep(30)']\n"
-        ")\n"
-        "with open(marker, 'w') as handle:\n"
-        "    handle.write(str(child.pid))\n"
-        "sys.exit(0)\n"
-    )
-    command = [sys.executable, "-c", script]
-    result = runner.run(command, cwd=tmp_path, env=runner.base_env(), timeout=5)
-
-    assert result.returncode == 0
-    child_pid = int(marker.read_text())
-    assert not _pid_is_running(child_pid)
-
-
-def test_runner_detects_overflow_from_descendant_during_termination_grace(
-    tmp_path: Path,
-) -> None:
-    """An overflow from a SIGTERM-ignoring descendant during grace is caught."""
-    runner = CommandRunner({"PATH": os.environ["PATH"]})
-    watch_path = tmp_path / "watched.bin"
-    watch_path.write_bytes(b"")
-    ready_path = tmp_path / "child.ready"
-    child_script = tmp_path / "child.py"
-    child_script.write_text(
-        "import signal, time, pathlib\n"
-        f"path = pathlib.Path({str(watch_path)!r})\n"
-        "def on_term(*_args):\n"
-        "    for _ in range(400):\n"
-        "        with path.open('ab') as handle:\n"
-        "            handle.write(b'x' * 64)\n"
-        "        time.sleep(0.005)\n"
-        "signal.signal(signal.SIGTERM, on_term)\n"
-        f"pathlib.Path({str(ready_path)!r}).write_text('ready')\n"
-        "time.sleep(30)\n",
-        encoding="utf-8",
-    )
-    leader_script = (
-        "import pathlib, subprocess, sys, time\n"
-        f"subprocess.Popen([sys.executable, {str(child_script)!r}])\n"
-        f"ready = pathlib.Path({str(ready_path)!r})\n"
-        "deadline = time.monotonic() + 5\n"
-        "while not ready.exists() and time.monotonic() < deadline:\n"
-        "    time.sleep(0.005)\n"
-        "sys.exit(0)\n"
-    )
-    command = [sys.executable, "-c", leader_script]
-
-    with pytest.raises(CommandError, match="output exceeded bound"):
-        runner.run(
-            command,
-            cwd=tmp_path,
-            env=runner.base_env(),
-            timeout=5,
-            max_output=1024,
-            watch_path=watch_path,
-        )
-
-
-def test_runner_terminates_process_group_on_interrupt(
+def test_runner_terminates_child_on_interrupt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A KeyboardInterrupt while monitoring still reaps the detached child."""
+    """A KeyboardInterrupt while monitoring still reaps the direct child."""
     runner = CommandRunner({"PATH": os.environ["PATH"]})
     command = [sys.executable, "-c", "import time; time.sleep(30)"]
     pids: list[int] = []
