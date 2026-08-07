@@ -25,7 +25,6 @@ from scripts.models import (
     LooprError,
     PullRequest,
     ReviewResult,
-    SubmitResult,
 )
 from scripts.oracle import parse_review
 from scripts.process import CommandResult, CommandRunner
@@ -313,18 +312,8 @@ def _run_submit_cli(
     fixture: AcceptanceFixture,
     artifacts_dir: Path,
 ) -> tuple[int, dict[str, object]]:
-    """Run the public submit CLI against a real disposable Git repository."""
-
-    def submit_with_fixture(**_kwargs: object) -> SubmitResult:
-        return execute_submit(
-            pr_value="1",
-            expected_head=fixture.head_sha,
-            repo_dir=fixture.repo,
-            artifacts_dir=artifacts_dir,
-            runner=fixture.runner,
-        )
-
-    monkeypatch.setattr(cli, "execute_submit", submit_with_fixture)
+    """Run the public submit CLI through its production safety boundary."""
+    monkeypatch.setattr(cli, "CommandRunner", lambda: fixture.runner)
     status = cli.main([
         "submit",
         "--pr",
@@ -336,6 +325,10 @@ def _run_submit_cli(
         "--artifacts-dir",
         str(artifacts_dir),
     ])
+    assert any(
+        command[:3] == ("git", "diff-tree", "--no-commit-id")
+        for command in fixture.runner.commands
+    )
     return status, _stdout_json(capsys)
 
 
