@@ -1,75 +1,36 @@
 # pr-review-loop
 
-`pr-review-loop` is a vendor-neutral agent skill for improving one GitHub pull request
-through independent Oracle/ChatGPT review. The host agent owns planning, editing,
-and repository QA; deterministic skill commands own review transport, patch
-validation, commit creation, and lease-protected pushes.
+`pr-review-loop` is a vendor-neutral agent skill for improving one GitHub pull request through independent Oracle/ChatGPT review. The host agent owns implementation and repository QA; the skill owns deterministic review transport and guarded submission.
 
-## Supported clients
+The canonical skill lives at `skills/pr-review-loop/`. Codex CLI and Cursor CLI discover it through `.agents/skills/pr-review-loop`; Claude Code uses `.claude/skills/pr-review-loop`. All discovery paths point to the same implementation.
 
-The canonical skill lives at `skills/pr-review-loop/`. Supported hosts discover that same
-directory through symlinks:
+## Requirements
 
-- Codex CLI: `.agents/skills/pr-review-loop`
-- Claude Code: `.claude/skills/pr-review-loop`
-- Cursor CLI: `.agents/skills/pr-review-loop`
+- macOS or Linux with Python 3.10+, Git, and authenticated GitHub CLI;
+- an open, non-draft, same-repository GitHub.com pull request and matching `origin`;
+- Oracle with Chrome/Chromium and an authenticated browser profile for `review`;
+- `GH_REVIEW_TOKEN` for a dedicated reviewer account distinct from the PR author;
+- push access and Git commit identity for `submit`.
 
-There is no client-specific copy or runtime fork. Client-specific discovery
-instructions, when needed, point to the canonical skill rather than changing
-production code.
-
-## Quick start
-
-### 1. Prepare the checkout and reviewer
-
-Requirements:
-
-- macOS or Linux;
-- Python 3.10 or newer;
-- Git and authenticated GitHub CLI;
-- an `origin` matching the target GitHub.com repository;
-- an open, non-draft, same-repository pull request;
-- push access and configured Git commit identity for `submit`;
-- Oracle with Chrome or Chromium;
-- a persistent Oracle browser profile authenticated to ChatGPT;
-- `GH_REVIEW_TOKEN` for a dedicated reviewer account that differs from the PR
-  author.
-
-Initialize Oracle's browser profile once:
+Initialize Oracle once when needed:
 
 ```console
 oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-The default profile is `~/.oracle/browser-profile`. Set
-`ORACLE_BROWSER_PROFILE_DIR` to use another persistent profile.
+## Workflow
 
-### 2. Review the exact PR head
+Review the exact PR head:
 
 ```console
 export GH_REVIEW_TOKEN='...'
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
-`review` emits exactly one JSON object on stdout. Both valid verdicts are
-successful process results:
+`APPROVE` and `REQUEST_CHANGES` are both successful domain results. On `REQUEST_CHANGES`, the host agent implements the returned blocking findings and runs normal repository QA.
 
-- `APPROVE`: finish successfully.
-- `REQUEST_CHANGES`: the host agent implements only the returned
-  `blocking_findings`, using `implementation_prompt` as reviewer guidance.
-
-Operational, schema, GitHub, and stale-state failures return non-zero status and
-must be resolved before continuing.
-
-### 3. Let the host edit and validate
-
-After `REQUEST_CHANGES`, the invoking Codex CLI, Claude Code, Cursor CLI, or
-other compatible host edits the current checkout and runs the repository's
-normal QA. `pr-review-loop` does not launch an implementation agent and does not
-select or run repository QA.
-
-### 4. Submit against the reviewed head
+Submit the complete workspace patch against the reviewed head:
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py submit \
@@ -77,47 +38,15 @@ python3 skills/pr-review-loop/scripts/cli.py submit \
   --expected-head <REVIEWED_HEAD_SHA>
 ```
 
-`submit` verifies repository identity, local and remote head binding, conflicts,
-whitespace, patch content, known credential values, and repeated base/head
-snapshots. It stages the complete intended patch, creates one hook-free unsigned
-commit, pushes with an explicit force-with-lease bound to the reviewed head, and
-confirms the resulting GitHub PR head.
+`submit` validates repository identity, exact local/remote head binding, conflicts, whitespace, staged content, credentials, repeated PR snapshots, and the remote branch lease. It creates one hook-free unsigned commit, pushes only with an explicit force-with-lease, and confirms the resulting GitHub PR head.
 
-### 5. Re-review and stop deterministically
+Run a fresh `review` after each successful submission. The host owns iteration and must stop on operational failure or the chosen iteration limit rather than manufacture approval.
 
-Run a fresh `review` against the resulting head. Repeat the host edit/QA and
-`submit` sequence only when the fresh verdict is `REQUEST_CHANGES`.
+## Contracts and limits
 
-Choose an iteration limit before starting. Finish only on a fresh `APPROVE`;
-otherwise stop when the configured limit is reached. The host owns this loop and
-must not manufacture approval after a limit or operational failure.
+Both commands emit exactly one JSON object on stdout; diagnostics go to stderr. Private audit artifacts are written below `.pr-review-loop/runs/` by default. See `skills/pr-review-loop/references/command-contracts.md` for schemas and exit classes and `skills/pr-review-loop/references/operations.md` for the compact cross-client smoke-test procedure.
 
-## Contracts and artifacts
-
-The stable version-1 success and error schemas, exit classes, race behavior, and
-artifact contracts are documented in
-`skills/pr-review-loop/references/command-contracts.md`.
-
-Each command writes bounded, permission-restricted audit artifacts below
-`.pr-review-loop/runs/` by default. Review artifacts record the frozen PR snapshot,
-review evidence, validated Oracle result, GitHub review metadata, and final
-result. Submit artifacts record the staged patch, commit metadata, push metadata,
-and final result.
-
-For executable cross-client smoke tests, troubleshooting, reviewer setup, and
-stale-head recovery, see `skills/pr-review-loop/references/operations.md`.
-
-## Safety and limitations
-
-- `review` never edits, commits, pushes, or launches an implementation agent.
-- `submit` never plans changes, interprets findings, runs tests, or launches a
-  model process.
-- Known credential values are rejected or redacted from review and audit paths.
-- Reviews are anchored to the exact reviewed commit; pushes are bound to the
-  expected head with an explicit lease.
-- GitHub.com only; GitHub Enterprise and fork pull requests are unsupported.
-- CI status is not an approval gate.
-- The runtime does not sandbox or contain the host agent.
+GitHub Enterprise and fork PRs are unsupported. CI status is not an approval gate. `review` never edits, commits, pushes, or launches an implementation agent. `submit` never plans changes, interprets findings, runs repository QA, or launches a model process.
 
 ## Development
 

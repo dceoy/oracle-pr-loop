@@ -5,40 +5,25 @@ description: Review and improve a pull request through independent Oracle/ChatGP
 
 # pr-review-loop
 
-Use this skill to review and improve one pull request without embedding or launching a particular implementation agent. The canonical skill is compatible with Codex CLI, Claude Code, Cursor CLI, and other clients that support agent skills.
+Use this skill to improve one GitHub pull request without embedding or launching a specific implementation agent. Codex CLI, Claude Code, Cursor CLI, and compatible hosts all use the same canonical implementation.
 
 ## Workflow
 
-1. Identify the pull request and review its exact current head through Oracle/ChatGPT.
-2. Consume the structured review result.
-3. When the result is `REQUEST_CHANGES`, let the invoking host agent plan and edit the repository.
-4. Let the host agent run the repository's applicable validation.
-5. Submit the complete workspace patch against the reviewed head.
-6. Obtain a fresh Oracle/ChatGPT review for the resulting head.
-7. Repeat until `APPROVE`, an explicit stop condition, or the iteration limit.
+1. Run `review` against the exact current PR head.
+2. Finish on `APPROVE`.
+3. On `REQUEST_CHANGES`, let the host agent implement only the blocking findings and run repository QA.
+4. Run `submit` against the reviewed head.
+5. Run a fresh `review` on the resulting head and repeat until approval or the chosen iteration limit.
 
-Choose the iteration limit before starting. The host agent owns the loop and must stop rather than manufacture approval when that limit is reached.
-
-## Responsibilities
-
-- **Host agent:** Plan changes, edit the repository, run local validation, and decide how to address review findings.
-- **Oracle/ChatGPT:** Independently review the exact pull-request head and generate a structured verdict.
-- **Skill scripts:** Deterministically inspect pull-request state, construct evidence, transport reviews, validate patches, create one commit, and perform a lease-protected push.
-- **GitHub/Git:** Provide pull-request identity, immutable commit state, reviews, and remote branch updates.
-
-Production skill code must not launch, select, or detect Codex CLI, Claude Code, Cursor CLI, or another host agent.
+The host agent owns planning, editing, QA, and iteration. Oracle/ChatGPT owns independent review. Skill scripts own deterministic Git/GitHub inspection, review publication, patch validation, one commit, and the lease-protected push.
 
 ## Commands
-
-Review one exact PR head:
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
-`review` validates an open, non-draft, same-repository GitHub.com pull request; binds the operation to exact base and head commits; builds deterministic evidence from immutable Git objects; strictly validates Oracle output; posts one aggregate review anchored to the reviewed head; and emits exactly one machine-readable JSON object on stdout.
-
-Submit the host agent's complete workspace patch:
+`review` requires an open, non-draft, same-repository GitHub.com PR; exact base/head binding; Oracle with an authenticated browser profile; and `GH_REVIEW_TOKEN` for a dedicated reviewer account different from the PR author. It emits one JSON object on stdout and never edits, commits, pushes, or launches an implementation agent.
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py submit \
@@ -46,16 +31,12 @@ python3 skills/pr-review-loop/scripts/cli.py submit \
   --expected-head <SHA>
 ```
 
-The compact command form is `submit --pr <NUMBER_OR_URL> --expected-head <SHA>`.
+`submit` requires local `HEAD` and the remote PR head to equal `--expected-head`. It rejects repository mismatches, forks, drafts, conflicts, whitespace failures, empty patches, unsafe refs, known credentials, gitlink changes, and stale state. It stages the complete patch, creates one hook-free unsigned commit, pushes with an explicit force-with-lease, and confirms the resulting PR head.
 
-`submit` requires local `HEAD` and the remote PR head to equal `--expected-head`. It rejects repository mismatches, forks, drafts, conflicts, whitespace failures, empty patches, unsafe refs, known credential values, and base/head races. It stages the complete patch, creates one hook-free unsigned commit, pushes the PR branch with an explicit force-with-lease bound to the expected head, confirms GitHub exposes the resulting SHA, and emits one machine-readable JSON object.
+## Contract
 
-Operational and stale-state failures use non-zero exit statuses and structured error objects. Diagnostics are written only to stderr.
+Both commands require Python 3, Git, GitHub CLI, a matching `origin`, and ordinary GitHub authentication. Operational failures return non-zero status with a structured error object; diagnostics go only to stderr. Artifacts default to `.pr-review-loop/runs/`.
 
-## Prerequisites and limits
+GitHub Enterprise and fork PRs are unsupported. CI status is not an approval gate. Production code must not launch, select, or detect Codex CLI, Claude Code, Cursor CLI, or another implementation agent.
 
-Both commands require Python 3, Git, GitHub CLI, ordinary GitHub read authentication, a matching local `origin`, and an open non-draft same-repository GitHub.com PR. `submit` additionally requires push access and configured Git commit identity. `review` additionally requires Oracle, Chrome/Chromium, an authenticated Oracle browser profile, and `GH_REVIEW_TOKEN` for a dedicated reviewer account.
-
-Artifacts default to `.pr-review-loop/runs/`. CI status is not an approval condition. Fork PRs and GitHub Enterprise are unsupported. `review` does not edit, commit, push, or launch an implementation agent. `submit` does not plan changes, edit files, run repository QA, interpret review findings, or invoke an implementation agent. The host agent owns iteration around the two commands; no repository-root compatibility wrapper is provided.
-
-See `references/command-contracts.md` for the public JSON and exit-status contracts. See `references/operations.md` for Codex CLI, Claude Code, and Cursor CLI discovery, manual end-to-end smoke tests, Oracle login setup, troubleshooting, and stale-head recovery.
+See `references/command-contracts.md` for public JSON/exit contracts and `references/operations.md` for the compact cross-client smoke-test and recovery procedure.
