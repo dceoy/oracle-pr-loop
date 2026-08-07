@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import loopr as cli
+from scripts import cli
 from scripts.models import (
     EXIT_PRECONDITION,
     EXIT_RACE,
@@ -142,8 +142,8 @@ def _fixture_repo(
     repo = tmp_path / "repo"
     _run_process([GIT, "init", "--bare", str(remote)], cwd=tmp_path)
     _run_process([GIT, "clone", str(remote), str(repo)], cwd=tmp_path)
-    _git(repo, "config", "user.name", "Loopr Test")
-    _git(repo, "config", "user.email", "loopr@example.invalid")
+    _git(repo, "config", "user.name", "PR Review Loop Test")
+    _git(repo, "config", "user.email", "pr-review-loop@example.invalid")
     (repo / "file.txt").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "file.txt")
     _git(repo, "commit", "-m", "base")
