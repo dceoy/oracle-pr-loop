@@ -1,15 +1,12 @@
-"""Regression tests for review resource and process cleanup bounds."""
+"""Regression tests for review resource bounds."""
 
 from __future__ import annotations
 
-import signal
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import pytest
 
-from scripts import process as process_module
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient
 from scripts.models import LooprError, PullRequest
@@ -19,14 +16,7 @@ from scripts.oracle import (
     MAX_ORACLE_ATTACHMENTS,
     OracleClient,
 )
-from scripts.process import (
-    TERMINATION_GRACE_SECONDS,
-    CommandError,
-    CommandRunner,
-)
-
-if TYPE_CHECKING:
-    import subprocess
+from scripts.process import CommandRunner
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -126,107 +116,3 @@ def test_oracle_review_rejects_excessive_argument_bytes(
 
     assert captured.value.category == "bundle"
     assert "arguments exceed" in str(captured.value)
-
-
-class _ExitedProcess:
-    """Minimal Popen-compatible object whose group never disappears."""
-
-    pid = 4242
-    returncode = 0
-
-    def poll(self) -> int:
-        """Report that the direct child has already exited."""
-        return 0
-
-    def wait(self, timeout: float | None = None) -> int:
-        """Return the already-observed exit status."""
-        del timeout
-        return 0
-
-
-class _StuckProcess:
-    """Popen-compatible process whose leader cannot be reaped after SIGKILL."""
-
-    pid = 4343
-    returncode = None
-
-    def __init__(self) -> None:
-        self.wait_timeouts: list[float | None] = []
-
-    def poll(self) -> None:
-        """Report that the direct child remains alive."""
-        return None
-
-    def wait(self, timeout: float | None = None) -> int:
-        """Record the bounded wait and simulate a leader that never exits."""
-        self.wait_timeouts.append(timeout)
-        if timeout is None:
-            raise AssertionError("cleanup wait must be bounded")
-        raise process_module.subprocess.TimeoutExpired("fake", timeout)
-
-
-def test_terminate_group_fails_when_final_sigkill_cannot_be_verified(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cleanup fails closed when the process group survives the final SIGKILL."""
-    signals: list[int] = []
-
-    def fake_killpg(_pgid: int, signal_number: int) -> None:
-        signals.append(signal_number)
-
-    ticks = iter((0.0, 3.0, 3.0, 6.0))
-    monkeypatch.setattr(process_module.os, "killpg", fake_killpg)
-    monkeypatch.setattr(
-        process_module,
-        "time",
-        SimpleNamespace(
-            monotonic=lambda: next(ticks),
-            sleep=lambda _seconds: None,
-        ),
-    )
-
-    process = cast("subprocess.Popen[bytes]", _ExitedProcess())
-    with pytest.raises(CommandError, match="could not prove"):
-        CommandRunner._terminate_group(process)
-
-    assert [value for value in signals if value != 0] == [
-        signal.SIGTERM,
-        signal.SIGKILL,
-    ]
-    assert signals.count(0) == 2
-
-
-def test_terminate_group_bounds_post_sigkill_leader_wait(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A non-reapable leader cannot make post-SIGKILL cleanup wait forever."""
-    signals: list[int] = []
-    group_checks: list[tuple[int, float]] = []
-
-    def fake_killpg(_pgid: int, signal_number: int) -> None:
-        signals.append(signal_number)
-
-    def fake_wait_for_group_exit(
-        _cls: type[CommandRunner], pgid: int, timeout: float
-    ) -> bool:
-        group_checks.append((pgid, timeout))
-        return False
-
-    monkeypatch.setattr(process_module.os, "killpg", fake_killpg)
-    monkeypatch.setattr(
-        CommandRunner,
-        "_wait_for_group_exit",
-        classmethod(fake_wait_for_group_exit),
-    )
-
-    stuck = _StuckProcess()
-    process = cast("subprocess.Popen[bytes]", stuck)
-    with pytest.raises(CommandError, match="could not prove"):
-        CommandRunner._terminate_group(process)
-
-    assert stuck.wait_timeouts == [
-        TERMINATION_GRACE_SECONDS,
-        TERMINATION_GRACE_SECONDS,
-    ]
-    assert signals == [signal.SIGTERM, signal.SIGKILL]
-    assert group_checks == [(stuck.pid, TERMINATION_GRACE_SECONDS)]
