@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 MAX_REMOTE_OUTPUT = 1024 * 1024
 MAX_GITLINK_DIFF_BYTES = 1024 * 1024
 GITLINK_MODE = b"160000"
+COMMIT_TREE_FIELD_COUNT = 2
+PUSH_ARGV_MIN_LEN = 5
+PUSH_REFSPEC_ARGV_MIN_LEN = 4
+RAW_DIFF_HEADER_FIELD_COUNT = 5
+SHA_HEX_LENGTH = 40
 STAGE_COMMAND = ("git", "add", "--all", "--")
 WORKSPACE_STATUS_COMMAND = (
     "git",
@@ -82,19 +87,35 @@ class _PushAwareRunner(CommandRunner):
         self._pushed_commit_sha: str | None = None
 
     def redact(self, text: str) -> str:
-        """Delegate redaction to the caller-supplied runner."""
+        """Delegate redaction to the caller-supplied runner.
+
+        Returns:
+            The redacted text.
+        """
         return self._delegate.redact(text)
 
     def contains_secret(self, value: str | bytes) -> bool:
-        """Delegate credential detection to the caller-supplied runner."""
+        """Delegate credential detection to the caller-supplied runner.
+
+        Returns:
+            Whether value contains a known secret.
+        """
         return self._delegate.contains_secret(value)
 
     def base_env(self) -> dict[str, str]:
-        """Delegate the base environment."""
+        """Delegate the base environment.
+
+        Returns:
+            The caller-supplied runner's base environment.
+        """
         return self._delegate.base_env()
 
     def gh_env(self, reviewer_token: str | None = None) -> dict[str, str]:
-        """Delegate the GitHub environment."""
+        """Delegate the GitHub environment.
+
+        Returns:
+            The caller-supplied runner's GitHub environment.
+        """
         return self._delegate.gh_env(reviewer_token)
 
     def run(
@@ -109,7 +130,16 @@ class _PushAwareRunner(CommandRunner):
         max_output: int = 24 * 1024 * 1024,
         watch_path: Path | None = None,
     ) -> CommandResult:
-        """Harden workspace staging and post-write confirmation."""
+        """Harden workspace staging and post-write confirmation.
+
+        Returns:
+            The completed, post-write-normalized command result.
+
+        Raises:
+            LooprError: The staged patch metadata contains a known credential.
+            CommandError: The command failed and could not be confirmed as a
+                successful push through a lost response.
+        """
         original_argv = tuple(str(value) for value in args)
         argv = _constrain_push(self._exclude_artifacts(original_argv))
         env = _constrain_push_env(argv, env)
@@ -175,7 +205,11 @@ class _PushAwareRunner(CommandRunner):
         return self._normalize_post_push_snapshot(argv, result)
 
     def _exclude_artifacts(self, argv: tuple[str, ...]) -> tuple[str, ...]:
-        """Keep private skill artifacts outside every workspace pathspec."""
+        """Keep private skill artifacts outside every workspace pathspec.
+
+        Returns:
+            argv, with the artifact exclusion pathspec appended if applicable.
+        """
         if self._artifact_exclusion is None:
             return argv
         if argv in {
@@ -222,7 +256,11 @@ class _PushAwareRunner(CommandRunner):
         env: Mapping[str, str],
         timeout: int,
     ) -> None:
-        """Reject a resolved or unresolved in-progress merge before commit."""
+        """Reject a resolved or unresolved in-progress merge before commit.
+
+        Raises:
+            LooprError: The merge state could not be read, or a merge is in progress.
+        """
         try:
             result = self._delegate.run(
                 ["git", "rev-parse", "--git-path", "MERGE_HEAD"],
@@ -258,7 +296,12 @@ class _PushAwareRunner(CommandRunner):
         env: Mapping[str, str],
         timeout: int,
     ) -> None:
-        """Require the exact commit being pushed to have one parent."""
+        """Require the exact commit being pushed to have one parent.
+
+        Raises:
+            LooprError: The commit's parentage could not be read, or it does
+                not have exactly one parent.
+        """
         try:
             result = self._delegate.run(
                 ["git", "rev-list", "--parents", "-n", "1", commit_sha],
@@ -270,7 +313,7 @@ class _PushAwareRunner(CommandRunner):
             fields = result.stdout.decode("ascii", "strict").split()
         except (CommandError, UnicodeError) as exc:
             raise LooprError(EXIT_PRECONDITION, "commit", str(exc)) from exc
-        if len(fields) != 2 or fields[0] != commit_sha:
+        if len(fields) != COMMIT_TREE_FIELD_COUNT or fields[0] != commit_sha:
             raise LooprError(
                 EXIT_PRECONDITION,
                 "commit",
@@ -288,7 +331,11 @@ class _PushAwareRunner(CommandRunner):
         env: Mapping[str, str],
         timeout: int,
     ) -> bool:
-        """Retry expected or inconclusive remote reads after a push error."""
+        """Retry expected or inconclusive remote reads after a push error.
+
+        Returns:
+            Whether the remote confirms the push landed.
+        """
         deadline = time.monotonic() + submission.POLL_TIMEOUT_SECONDS
         while True:
             matches = self._remote_matches(
@@ -311,7 +358,11 @@ class _PushAwareRunner(CommandRunner):
         argv: tuple[str, ...],
         result: CommandResult,
     ) -> CommandResult:
-        """Permit state-only PR changes after the remote write."""
+        """Permit state-only PR changes after the remote write.
+
+        Returns:
+            result, with a freshly pushed PR's stale-looking state normalized.
+        """
         if self._pushed_commit_sha is None or argv[:3] != ("gh", "pr", "view"):
             return result
         try:
@@ -372,19 +423,35 @@ class _SubmitBoundaryRunner(CommandRunner):
         self._push_started = False
 
     def redact(self, text: str) -> str:
-        """Delegate redaction to the caller-supplied runner."""
+        """Delegate redaction to the caller-supplied runner.
+
+        Returns:
+            The redacted text.
+        """
         return self._delegate.redact(text)
 
     def contains_secret(self, value: str | bytes) -> bool:
-        """Delegate credential detection to the caller-supplied runner."""
+        """Delegate credential detection to the caller-supplied runner.
+
+        Returns:
+            Whether value contains a known secret.
+        """
         return self._delegate.contains_secret(value)
 
     def base_env(self) -> dict[str, str]:
-        """Delegate the base environment."""
+        """Delegate the base environment.
+
+        Returns:
+            The caller-supplied runner's base environment.
+        """
         return self._delegate.base_env()
 
     def gh_env(self, reviewer_token: str | None = None) -> dict[str, str]:
-        """Delegate the GitHub environment."""
+        """Delegate the GitHub environment.
+
+        Returns:
+            The caller-supplied runner's GitHub environment.
+        """
         return self._delegate.gh_env(reviewer_token)
 
     def run(
@@ -399,7 +466,16 @@ class _SubmitBoundaryRunner(CommandRunner):
         max_output: int = 24 * 1024 * 1024,
         watch_path: Path | None = None,
     ) -> CommandResult:
-        """Freeze PR refs and reject unsafe staged metadata or gitlinks."""
+        """Freeze PR refs and reject unsafe staged metadata or gitlinks.
+
+        Returns:
+            The completed command result.
+
+        Raises:
+            LooprError: Staged path metadata contains a known credential, a
+                pushed commit changes a gitlink, or a PR's base or head ref
+                changed before push.
+        """
         argv = tuple(str(value) for value in args)
         is_real_push = argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
         if is_real_push:
@@ -434,7 +510,12 @@ class _SubmitBoundaryRunner(CommandRunner):
         return result
 
     def _require_stable_pr_refs(self, output: bytes) -> None:
-        """Reject base or head ref rebinding while SHAs remain unchanged."""
+        """Reject base or head ref rebinding while SHAs remain unchanged.
+
+        Raises:
+            LooprError: The pull request's base or head ref changed since it
+                was first observed by this runner.
+        """
         try:
             payload: object = json.loads(output.decode("utf-8", "strict"))
         except (json.JSONDecodeError, UnicodeError):
@@ -467,7 +548,11 @@ class _SubmitBoundaryRunner(CommandRunner):
         env: Mapping[str, str],
         timeout: int,
     ) -> None:
-        """Fail closed when the exact candidate commit changes a gitlink."""
+        """Fail closed when the exact candidate commit changes a gitlink.
+
+        Raises:
+            LooprError: The commit's diff could not be read, or it changes a gitlink.
+        """
         commit_sha = _pushed_commit(argv)
         if commit_sha is None:
             raise LooprError(
@@ -518,7 +603,11 @@ def execute_submit(
     artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Validate the push destination, then execute one transport-safe submission."""
+    """Validate the push destination, then execute one transport-safe submission.
+
+    Returns:
+        The stable submit command result.
+    """
     command_runner = runner or CommandRunner()
     _require_single_push_url(command_runner, repo_dir)
     repo_root = _repo_root(command_runner, repo_dir)
@@ -542,7 +631,11 @@ def execute_guarded(
     artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Execute submit while freezing refs and rejecting unsafe metadata."""
+    """Execute submit while freezing refs and rejecting unsafe metadata.
+
+    Returns:
+        The stable submit command result.
+    """
     command_runner = runner or CommandRunner()
     return execute_submit(
         pr_value=pr_value,
@@ -649,7 +742,11 @@ def _require_artifacts_unstaged(
 
 
 def _constrain_push(argv: tuple[str, ...]) -> tuple[str, ...]:
-    """Disable configuration-driven recursive writes for every submit push."""
+    """Disable configuration-driven recursive writes for every submit push.
+
+    Returns:
+        argv, with an explicit `--recurse-submodules=no` appended for a push.
+    """
     if argv[:2] != ("git", "push"):
         return argv
     return (*argv[:2], "--recurse-submodules=no", *argv[2:])
@@ -659,7 +756,11 @@ def _constrain_push_env(
     argv: tuple[str, ...],
     env: Mapping[str, str],
 ) -> Mapping[str, str]:
-    """Append a highest-precedence follow-tags override for submit pushes."""
+    """Append a highest-precedence follow-tags override for submit pushes.
+
+    Returns:
+        env, with `push.followTags=false` appended for a push.
+    """
     if argv[:2] != ("git", "push"):
         return env
     parameters = " ".join(
@@ -680,7 +781,7 @@ def _constrain_push_env(
 
 
 def _push_target(argv: tuple[str, ...]) -> tuple[str, str, str, str] | None:
-    if len(argv) < 5 or argv[:2] != ("git", "push"):
+    if len(argv) < PUSH_ARGV_MIN_LEN or argv[:2] != ("git", "push"):
         return None
     remote = argv[-2]
     source, separator, destination = argv[-1].partition(":")
@@ -705,8 +806,12 @@ def _push_target(argv: tuple[str, ...]) -> tuple[str, str, str, str] | None:
 
 
 def _pushed_commit(argv: tuple[str, ...]) -> str | None:
-    """Extract the exact source commit from the constrained push refspec."""
-    if len(argv) < 4:
+    """Extract the exact source commit from the constrained push refspec.
+
+    Returns:
+        The pushed source commit SHA, or None if argv is not a constrained push.
+    """
+    if len(argv) < PUSH_REFSPEC_ARGV_MIN_LEN:
         return None
     source, separator, destination = argv[-1].partition(":")
     if (
@@ -719,7 +824,14 @@ def _pushed_commit(argv: tuple[str, ...]) -> str | None:
 
 
 def _contains_gitlink_change(raw: bytes) -> bool:
-    """Parse a bounded NUL-delimited raw diff and detect mode 160000."""
+    """Parse a bounded NUL-delimited raw diff and detect mode 160000.
+
+    Returns:
+        Whether the diff contains a gitlink (submodule) change.
+
+    Raises:
+        LooprError: raw is malformed commit diff metadata.
+    """
     if not raw:
         return False
     fields = raw.split(b"\0")
@@ -735,7 +847,7 @@ def _contains_gitlink_change(raw: bytes) -> bool:
         header = fields[index]
         index += 1
         parts = header.split()
-        if len(parts) != 5 or not parts[0].startswith(b":"):
+        if len(parts) != RAW_DIFF_HEADER_FIELD_COUNT or not parts[0].startswith(b":"):
             raise LooprError(
                 EXIT_PRECONDITION,
                 "submodule",
@@ -766,6 +878,6 @@ def _contains_gitlink_change(raw: bytes) -> bool:
 
 
 def _is_sha(value: str) -> bool:
-    return len(value) == 40 and all(
+    return len(value) == SHA_HEX_LENGTH and all(
         character in "0123456789abcdef" for character in value
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -12,7 +13,13 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "scripts"
 
-from .models import EXIT_PRECONDITION, JsonObject, LooprError
+from .models import (
+    EXIT_PRECONDITION,
+    JsonObject,
+    LooprError,
+    ReviewResult,
+    SubmitResult,
+)
 from .process import CommandRunner
 from .review import execute_review
 from .submit import execute_guarded as execute_submit
@@ -24,13 +31,22 @@ if TYPE_CHECKING:
 class StructuredArgumentParser(argparse.ArgumentParser):
     """Raise structured command errors instead of terminating with prose."""
 
+    @typing.override
     def error(self, message: str) -> NoReturn:
-        """Convert argparse validation failures into LooprError."""
+        """Convert argparse validation failures into LooprError.
+
+        Raises:
+            LooprError: Always.
+        """
         raise LooprError(EXIT_PRECONDITION, "input", message)
 
 
 def parser() -> argparse.ArgumentParser:
-    """Build the stable skill command parser."""
+    """Build the stable skill command parser.
+
+    Returns:
+        The configured argument parser for the `review` and `submit` commands.
+    """
     root = StructuredArgumentParser(
         description="Review or submit one exact GitHub pull-request head."
     )
@@ -75,30 +91,17 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Execute one command and emit exactly one JSON object on stdout."""
+    """Execute one command and emit exactly one JSON object on stdout.
+
+    Returns:
+        The process exit code.
+    """
     runner = CommandRunner()
     command = _requested_command(argv)
     try:
         args = parser().parse_args(argv)
         command = args.command
-        if command == "review":
-            result = execute_review(
-                pr_value=args.pr,
-                repo_dir=Path(args.repo_dir),
-                artifacts_dir=Path(args.artifacts_dir),
-                thinking_time=args.oracle_thinking_time,
-                runner=runner,
-            )
-        else:
-            result = execute_submit(
-                pr_value=args.pr,
-                expected_head=args.expected_head,
-                repo_dir=Path(args.repo_dir),
-                artifacts_dir=Path(args.artifacts_dir),
-                runner=runner,
-            )
-        _emit(result.as_json())
-        return 0
+        result = _dispatch(command, args, runner)
     except LooprError as exc:
         message = runner.redact(str(exc))
         _emit_error(command, exc.category, message)
@@ -109,11 +112,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit_error(command, "interrupted", message)
         sys.stderr.write(f"pr-review-loop {command}: {message}\n")
         return EXIT_PRECONDITION
-    except Exception as exc:
+    except Exception as exc:  # ruff: ignore[blind-except] -- top-level entry point must fail closed on any error
         message = runner.redact(f"{type(exc).__name__}: {exc}")
         _emit_error(command, "internal", message)
         sys.stderr.write(f"pr-review-loop {command}: {message}\n")
         return EXIT_PRECONDITION
+    else:
+        _emit(result.as_json())
+        return 0
+
+
+def _dispatch(
+    command: str, args: argparse.Namespace, runner: CommandRunner
+) -> ReviewResult | SubmitResult:
+    """Run the requested command against its parsed arguments.
+
+    Returns:
+        The completed command's result.
+    """
+    if command == "review":
+        return execute_review(
+            pr_value=args.pr,
+            repo_dir=Path(args.repo_dir),
+            artifacts_dir=Path(args.artifacts_dir),
+            thinking_time=args.oracle_thinking_time,
+            runner=runner,
+        )
+    return execute_submit(
+        pr_value=args.pr,
+        expected_head=args.expected_head,
+        repo_dir=Path(args.repo_dir),
+        artifacts_dir=Path(args.artifacts_dir),
+        runner=runner,
+    )
 
 
 def _requested_command(argv: Sequence[str] | None) -> str:

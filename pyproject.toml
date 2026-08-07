@@ -103,20 +103,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"skills/pr-review-loop/scripts/**/*.py" = [
-  "docstring-missing-returns",              # DOC201
-  "docstring-missing-exception",            # DOC501
-  "magic-value-comparison",                 # PLR2004
-  "too-many-locals",                        # PLR0914
-  "too-many-statements-in-try-clause",      # TRY300
-  "no-self-use",                            # PLR6301
-  "try-consider-else",                      # TRY300
-  "raise-within-try",                       # TRY301
-  "suspicious-subprocess-import",           # S404
-  "subprocess-without-shell-equals-true",   # S603
-  "blind-except",                           # BLE001
-  "static-join-to-f-string",                # FLY002
-]
 "**/tests/**/*.py" = [
   "undocumented-public-method",     # D102
   "undocumented-public-function",   # D103

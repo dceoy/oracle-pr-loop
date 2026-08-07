@@ -27,7 +27,15 @@ def execute_review(
     thinking_time: str,
     runner: CommandRunner | None = None,
 ) -> ReviewResult:
-    """Review and post one exact pull-request snapshot."""
+    """Review and post one exact pull-request snapshot.
+
+    Returns:
+        The stable review command result.
+
+    Raises:
+        LooprError: The pull request, bundle, or Oracle verdict violated a
+            precondition, or the posted review could not be verified fresh.
+    """
     command_runner = runner or CommandRunner()
     github = GitHubClient(
         command_runner,
@@ -70,15 +78,7 @@ def execute_review(
         _persist_best_effort(writer, "github-review.json", posted)
         after_post = github.snapshot()
         verified = github.verify_posted(initial, review_id)
-        expected_state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
-        if verified.get("state") != expected_state or not github.same_snapshot(
-            initial, after_post
-        ):
-            raise LooprError(
-                EXIT_RACE,
-                "stale_state",
-                "posted review became stale or had an unexpected state",
-            )
+        _require_fresh_state(github, initial, after_post, verified, event)
     except BaseException as exc:
         _dismiss_stale(github, initial, review_id, exc)
         raise
@@ -136,6 +136,28 @@ def _persist_best_effort(
         sys.stderr.write(f"{message}\n")
 
 
+def _require_fresh_state(
+    github: GitHubClient,
+    initial: PullRequest,
+    after_post: PullRequest,
+    verified: JsonValue,
+    event: str,
+) -> None:
+    """Confirm the posted review's state and snapshot are still fresh.
+
+    Raises:
+        LooprError: The verified state or repository snapshot went stale.
+    """
+    expected_state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
+    state = verified.get("state") if isinstance(verified, dict) else None
+    if state != expected_state or not github.same_snapshot(initial, after_post):
+        raise LooprError(
+            EXIT_RACE,
+            "stale_state",
+            "posted review became stale or had an unexpected state",
+        )
+
+
 MAX_POSTED_BODY_BYTES = 65_000
 _RUN_DIRECTORY_ATTEMPTS = 8
 
@@ -152,6 +174,13 @@ def _trusted_runs_root(repo_dir: Path, artifacts_dir: Path) -> Path:
     so an absolute path, or a symlink anywhere in its ancestry, cannot redirect the
     run root either. `..` components are rejected outright because they could
     otherwise walk the trusted anchor back out of it.
+
+    Returns:
+        The trusted `runs` directory under `artifacts_dir`.
+
+    Raises:
+        LooprError: `artifacts_dir` contains a `..` component, or a path
+            component exists but is not a real directory.
     """
     if ".." in artifacts_dir.parts:
         raise LooprError(
@@ -187,7 +216,15 @@ def _run_directory(
     artifacts_dir: Path,
     pull_request: PullRequest,
 ) -> Path:
-    """Atomically claim a collision-resistant, unique run directory."""
+    """Atomically claim a collision-resistant, unique run directory.
+
+    Returns:
+        The newly created, exclusively claimed run directory.
+
+    Raises:
+        LooprError: `artifacts_dir` is untrusted, or no unique directory
+            name could be claimed within the retry budget.
+    """
     root = _trusted_runs_root(repo_dir, artifacts_dir)
     prefix = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}"
     for _ in range(_RUN_DIRECTORY_ATTEMPTS):
@@ -211,7 +248,11 @@ def _dismiss_stale(
     review_id: int,
     original: BaseException,
 ) -> None:
-    """Neutralize a stale review and preserve failure context if dismissal fails."""
+    """Neutralize a stale review and preserve failure context if dismissal fails.
+
+    Raises:
+        LooprError: Dismissal itself failed; raised from the original error.
+    """
     try:
         github.dismiss(pull_request, review_id)
     except LooprError as dismiss_error:

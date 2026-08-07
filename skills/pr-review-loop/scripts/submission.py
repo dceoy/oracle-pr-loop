@@ -28,23 +28,17 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
-PR_FIELDS = ",".join((
-    "url",
-    "number",
-    "state",
-    "isDraft",
-    "baseRefName",
-    "baseRefOid",
-    "headRefName",
-    "headRefOid",
-    "headRepository",
-    "headRepositoryOwner",
-))
+PR_FIELDS = (
+    "url,number,state,isDraft,baseRefName,baseRefOid,"
+    "headRefName,headRefOid,headRepository,headRepositoryOwner"
+)
 MAX_PATCH_BYTES = 20 * 1024 * 1024
 MAX_STAGED_CONTENT_BYTES = MAX_PATCH_BYTES
 GITLINK_MODE = b"160000"
 POLL_TIMEOUT_SECONDS = 90
 POLL_INTERVAL_SECONDS = 2
+RAW_DIFF_HEADER_FIELD_COUNT = 5
+REMOTE_REF_LINE_FIELD_COUNT = 2
 COMMIT_MESSAGE = "loopr: apply reviewed changes"
 
 
@@ -77,7 +71,12 @@ class SubmitGitHubClient:
         self.url = ""
 
     def initialize(self, pr_value: str) -> None:
-        """Resolve and cross-check the local repository and target PR."""
+        """Resolve and cross-check the local repository and target PR.
+
+        Raises:
+            LooprError: The repository or target PR is ambiguous, invalid,
+                or unreachable.
+        """
         root = self._git_text(["rev-parse", "--show-toplevel"]).strip()
         self.repo_dir = Path(root).resolve()
         fetch_repo = normalize_repo(self._git_text(["remote", "get-url", "origin"]))
@@ -201,7 +200,15 @@ class SubmitGitHubClient:
         initial: SubmissionSnapshot,
         commit_sha: str,
     ) -> SubmissionSnapshot:
-        """Wait until GitHub exposes the pushed commit as the PR head."""
+        """Wait until GitHub exposes the pushed commit as the PR head.
+
+        Returns:
+            The confirmed post-push submission snapshot.
+
+        Raises:
+            LooprError: GitHub did not expose the pushed commit as the PR
+                head before the poll deadline.
+        """
         deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
         while True:
             current = self.snapshot()
@@ -230,7 +237,14 @@ def execute_submit(
     artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Validate, commit, and lease-protect the complete workspace patch."""
+    """Validate, commit, and lease-protect the complete workspace patch.
+
+    Returns:
+        The stable submit command result.
+
+    Raises:
+        LooprError: The workspace, patch, or PR lease violated a precondition.
+    """
     command_runner = runner or CommandRunner()
     if not _is_sha(expected_head):
         raise LooprError(
@@ -438,7 +452,12 @@ def _require_no_known_credentials_in_staged_blobs(
     runner: CommandRunner,
     repo_dir: Path,
 ) -> None:
-    """Scan bounded staged blob contents for known credential values."""
+    """Scan bounded staged blob contents for known credential values.
+
+    Raises:
+        LooprError: Git returned malformed or oversized blob metadata, or a
+            staged blob contains a known credential value.
+    """
     raw = _git(
         runner,
         repo_dir,
@@ -507,7 +526,14 @@ def _require_no_known_credentials_in_staged_blobs(
 
 
 def _staged_object_id(parts: list[bytes]) -> str | None:
-    """Return the staged blob ID, excluding gitlinks from blob scanning."""
+    """Return the staged blob ID, excluding gitlinks from blob scanning.
+
+    Returns:
+        The staged blob's object ID, or None for a gitlink.
+
+    Raises:
+        LooprError: Git returned a non-ASCII or invalid staged object ID.
+    """
     if parts[1] == GITLINK_MODE:
         return None
     try:
@@ -528,7 +554,14 @@ def _staged_object_id(parts: list[bytes]) -> str | None:
 
 
 def _staged_object_ids(raw: bytes) -> list[str]:
-    """Parse new blob object IDs from NUL-delimited staged raw diff records."""
+    """Parse new blob object IDs from NUL-delimited staged raw diff records.
+
+    Returns:
+        The distinct new (non-gitlink) staged blob object IDs.
+
+    Raises:
+        LooprError: `raw` is malformed staged diff metadata.
+    """
     if not raw:
         return []
     fields = raw.split(b"\0")
@@ -546,7 +579,7 @@ def _staged_object_ids(raw: bytes) -> list[str]:
         header = fields[index]
         index += 1
         parts = header.split()
-        if len(parts) != 5 or not parts[0].startswith(b":"):
+        if len(parts) != RAW_DIFF_HEADER_FIELD_COUNT or not parts[0].startswith(b":"):
             raise LooprError(
                 EXIT_PRECONDITION,
                 "git",
@@ -601,7 +634,7 @@ def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
             "remote pull-request branch was missing or ambiguous",
         )
     fields = lines[0].split("\t")
-    if len(fields) != 2 or fields[1] != f"refs/heads/{ref}":
+    if len(fields) != REMOTE_REF_LINE_FIELD_COUNT or fields[1] != f"refs/heads/{ref}":
         raise LooprError(
             EXIT_GITHUB,
             "remote_ref",
@@ -633,9 +666,10 @@ def _git(
             env=runner.base_env(),
             max_output=max_output,
         )
-        return result.stdout
     except CommandError as exc:
         raise LooprError(error_code, category, str(exc)) from exc
+    else:
+        return result.stdout
 
 
 def _git_text(
