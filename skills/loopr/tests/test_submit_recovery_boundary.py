@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pytest
 from test_submit_command import ScenarioRunner, _fixture_repo, _git
 
 from scripts import submit_core
@@ -14,6 +13,8 @@ from scripts.submit import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    import pytest
 
     from scripts.models import JsonObject
 
