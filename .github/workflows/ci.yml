@@ -4,14 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - .agents/skills/loopr
-      - .claude/skills/loopr
-      - .github/workflows/ci.yml
-      - .ruff.toml
-      - pyproject.toml
-      - skills/loopr/**
-      - uv.lock
   pull_request:
     branches:
       - main
@@ -19,14 +11,6 @@ on:
       - opened
       - synchronize
       - reopened
-    paths:
-      - .agents/skills/loopr
-      - .claude/skills/loopr
-      - .github/workflows/ci.yml
-      - .ruff.toml
-      - pyproject.toml
-      - skills/loopr/**
-      - uv.lock
   workflow_dispatch:
 permissions:
   contents: read
