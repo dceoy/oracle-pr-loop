@@ -128,7 +128,8 @@ class AcceptanceReviewRunner(CommandRunner):
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
         if not argv or argv[0] != "oracle":
-            raise AssertionError(f"unexpected review subprocess: {argv!r}")
+            message = f"unexpected review subprocess: {argv!r}"
+            raise AssertionError(message)
         if watch_path is None:
             raise AssertionError("Oracle invocation must provide a watched output path")
         watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
@@ -358,12 +359,11 @@ def test_cross_agent_request_submit_rereview_flow(
     )
 
     fixture = _acceptance_fixture(tmp_path)
-    initial = _review_snapshot(fixture, head_sha=fixture.head_sha)
     request_status, request_payload, request_runner = _run_review_cli(
         monkeypatch,
         capsys,
         fixture,
-        initial,
+        _review_snapshot(fixture, head_sha=fixture.head_sha),
         "REQUEST_CHANGES",
     )
     assert request_status == 0
@@ -396,12 +396,11 @@ def test_cross_agent_request_submit_rereview_flow(
     assert submit_payload["resulting_head_sha"] == submit_payload["commit_sha"]
 
     resulting_head = cast("str", submit_payload["resulting_head_sha"])
-    updated = _review_snapshot(fixture, head_sha=resulting_head)
     approve_status, approve_payload, approve_runner = _run_review_cli(
         monkeypatch,
         capsys,
         fixture,
-        updated,
+        _review_snapshot(fixture, head_sha=resulting_head),
         "APPROVE",
     )
     assert approve_status == 0
