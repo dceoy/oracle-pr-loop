@@ -16,7 +16,7 @@ from typing import ClassVar, TypeVar, cast
 
 import pytest
 
-from scripts import loopr as cli, process as process_module, review as review_module
+from scripts import cli, process as process_module, review as review_module
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient, normalize_repo, resolve_target, validate_path
 from scripts.models import (
