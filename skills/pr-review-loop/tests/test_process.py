@@ -5,14 +5,16 @@ from __future__ import annotations
 import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- test-controlled process
 import sys
-from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import cast, TYPE_CHECKING
 
 import pytest
 
 from scripts.process import CommandError, CommandRunner
 from scripts import process as process_module
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_redactor_matches_credential_aliases() -> None:

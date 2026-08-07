@@ -124,7 +124,9 @@ class AcceptanceReviewRunner(CommandRunner):
         self.commands.append(argv)
         if argv and argv[0] == "oracle":
             if watch_path is None:
-                raise AssertionError("Oracle invocation must provide a watched output path")
+                raise AssertionError(
+                    "Oracle invocation must provide a watched output path"
+                )
             watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
             return CommandResult(args=argv, returncode=0, stdout=b"", stderr="")
         return super().run(

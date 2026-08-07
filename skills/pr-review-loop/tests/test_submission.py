@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
-from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,10 @@ from scripts.models import (
 )
 from scripts.process import CommandError, CommandResult, CommandRunner
 from scripts.submit import execute_submit
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 def _git_executable() -> str:
