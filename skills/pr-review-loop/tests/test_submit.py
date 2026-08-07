@@ -190,6 +190,10 @@ class BranchOnlyLeaseLossRunner(ScenarioRunner):
             _run_process(
                 [
                     GIT,
+                    "-c",
+                    "push.followTags=false",
+                    "-c",
+                    "push.recurseSubmodules=no",
                     "push",
                     str(self.remote),
                     f"{self.competitor}:refs/heads/feature",
