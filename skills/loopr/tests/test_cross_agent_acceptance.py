@@ -26,7 +26,7 @@ from scripts.models import (
     SubmitResult,
 )
 from scripts.oracle import parse_review
-from scripts.process import CommandResult
+from scripts.process import CommandResult, CommandRunner
 from scripts.review import execute_review
 from scripts.submit import execute_submit
 
@@ -149,7 +149,9 @@ def _review_result(
         verdict=verdict,
         github_review_id=101 if request_changes else 102,
         blocking_findings=blockers,
-        implementation_prompt=("Implement only B1 and run repository QA." if blockers else None),
+        implementation_prompt=(
+            "Implement only B1 and run repository QA." if blockers else None
+        ),
         artifacts_dir=str(artifacts_dir),
     )
 
@@ -211,6 +213,11 @@ def _run_submit_cli(
     return status, _stdout_json(capsys)
 
 
+def _runner_with_token() -> CommandRunner:
+    """Return a command runner carrying only the fake reviewer token."""
+    return CommandRunner({"GH_REVIEW_TOKEN": "token"})
+
+
 @pytest.mark.parametrize(("client", "discovery_path"), CLIENTS)
 def test_cross_agent_request_submit_rereview_flow(
     client: str,
@@ -222,7 +229,9 @@ def test_cross_agent_request_submit_rereview_flow(
     """Every supported host uses the same request/fix/submit/re-review contract."""
     discovered = REPOSITORY_ROOT / discovery_path
     assert discovered.is_symlink(), client
-    assert discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True), client
+    assert (
+        discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True)
+    ), client
     assert (discovered / "scripts" / "loopr.py").samefile(
         CANONICAL_SKILL / "scripts" / "loopr.py"
     )
@@ -324,20 +333,13 @@ def test_stale_review_head_fails_before_post(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=fixture_runner_with_token(),
+            runner=_runner_with_token(),
         )
 
     assert captured.value.code == EXIT_RACE
     assert captured.value.category == "stale_state"
     assert FakeGitHubClient.instance is not None
     assert FakeGitHubClient.instance.post_count == 0
-
-
-def fixture_runner_with_token():
-    """Return a command runner carrying only the fake reviewer token."""
-    from scripts.process import CommandRunner
-
-    return CommandRunner({"GH_REVIEW_TOKEN": "token"})
 
 
 def test_stale_submit_head_fails_before_workspace_mutation(tmp_path: Path) -> None:
