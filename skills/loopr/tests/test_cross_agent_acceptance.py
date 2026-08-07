@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from test_review_command import (
@@ -29,6 +28,9 @@ from scripts.oracle import parse_review
 from scripts.process import CommandResult, CommandRunner
 from scripts.review import execute_review
 from scripts.submit import execute_submit
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "loopr"
@@ -160,7 +162,7 @@ def _stdout_json(capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
     """Read the one structured stdout object emitted by the CLI."""
     captured = capsys.readouterr()
     assert captured.out.count("\n") == 1
-    return cast(dict[str, object], json.loads(captured.out))
+    return cast("dict[str, object]", json.loads(captured.out))
 
 
 def _run_review_cli(
@@ -266,7 +268,7 @@ def test_cross_agent_request_submit_rereview_flow(
     assert submit_payload["previous_head_sha"] == fixture.head_sha
     assert submit_payload["resulting_head_sha"] == submit_payload["commit_sha"]
 
-    resulting_head = cast(str, submit_payload["resulting_head_sha"])
+    resulting_head = cast("str", submit_payload["resulting_head_sha"])
     approval = _review_result(
         fixture,
         head_sha=resulting_head,
@@ -300,7 +302,7 @@ def test_operational_failure_uses_stable_nonzero_error_schema(
     monkeypatch.setattr(cli, "execute_review", fail_review)
     status = cli.main(["review", "--pr", "1"])
     payload = _stdout_json(capsys)
-    error = cast(dict[str, object], payload["error"])
+    error = cast("dict[str, object]", payload["error"])
 
     assert status == EXIT_ORACLE
     assert set(payload) == {"schema_version", "command", "error"}
