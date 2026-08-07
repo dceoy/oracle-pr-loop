@@ -14,9 +14,9 @@ directory through symlinks:
 - Claude Code: `.claude/skills/pr-review-loop`
 - Cursor CLI: `.agents/skills/pr-review-loop`
 
-There is no client-specific copy, runtime fork, or repository-root compatibility
-CLI. Client-specific discovery instructions, when needed, point to the canonical
-skill rather than changing production code.
+There is no client-specific copy or runtime fork. Client-specific discovery
+instructions, when needed, point to the canonical skill rather than changing
+production code.
 
 ## Quick start
 
@@ -118,14 +118,6 @@ stale-head recovery, see `skills/pr-review-loop/references/operations.md`.
 - GitHub.com only; GitHub Enterprise and fork pull requests are unsupported.
 - CI status is not an approval gate.
 - The runtime does not sandbox or contain the host agent.
-
-## Migration note
-
-The legacy migration removed the 4,679-line repository-root `loopr.py`
-orchestrator, reducing root production Python from 4,679 lines to 0. Surviving
-production code lives only under `skills/pr-review-loop/scripts/`.
-
-The completed implementation order is #15 → (#16 and #17) → #18 → #19.
 
 ## Development
 
