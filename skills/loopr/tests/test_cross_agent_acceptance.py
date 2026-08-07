@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
 from test_review_command import (
@@ -15,12 +15,13 @@ from test_review_command import (
 )
 from test_submit_command import ScenarioRunner, _fixture_repo
 
-from scripts import loopr as cli
+from scripts import loopr as cli, review as review_module
 from scripts.models import (
     EXIT_ORACLE,
     EXIT_RACE,
     JsonObject,
     LooprError,
+    PullRequest,
     ReviewResult,
     SubmitResult,
 )
@@ -101,6 +102,112 @@ class RecordingScenarioRunner(ScenarioRunner):
         )
 
 
+class AcceptanceReviewRunner(CommandRunner):
+    """Fake only the external Oracle process while preserving review orchestration."""
+
+    def __init__(self, oracle_payload: JsonObject) -> None:
+        """Initialize one deterministic Oracle response and command record."""
+        super().__init__({"GH_REVIEW_TOKEN": "token"})
+        self.oracle_payload = oracle_payload
+        self.commands: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Materialize fake Oracle output instead of launching an external model."""
+        del cwd, env, timeout, input_text, check, max_output
+        argv = tuple(str(value) for value in args)
+        self.commands.append(argv)
+        if not argv or argv[0] != "oracle":
+            raise AssertionError(f"unexpected review subprocess: {argv!r}")
+        if watch_path is None:
+            raise AssertionError("Oracle invocation must provide a watched output path")
+        watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
+        return CommandResult(args=argv, returncode=0, stdout=b"", stderr="")
+
+
+class AcceptanceGitHubClient(FakeGitHubClient):
+    """Fake GitHub network I/O while exposing real evidence and review contracts."""
+
+    instance: ClassVar[AcceptanceGitHubClient | None] = None
+    snapshots: ClassVar[list[PullRequest]] = []
+
+    def __init__(
+        self,
+        runner: CommandRunner,
+        repo_dir: Path,
+        token: str,
+    ) -> None:
+        """Initialize one deterministic GitHub review transport."""
+        super().__init__(runner, repo_dir, token)
+        self.posted_events: list[str] = []
+
+    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
+        """Return deterministic UTF-8 patch evidence without GitHub network I/O."""
+        del max_output
+        return (
+            b"diff --git a/file.txt b/file.txt\n"
+            b"--- a/file.txt\n"
+            b"+++ b/file.txt\n"
+            b"@@ -1 +1 @@\n"
+            b"-original\n"
+            b"+fixed\n"
+        )
+
+    def tracked_paths(self, _pull_request: PullRequest) -> tuple[str, ...]:
+        """Expose only the changed fixture path as tracked evidence."""
+        return ("file.txt",)
+
+    def changed_file_bytes(
+        self,
+        _pull_request: PullRequest,
+        path: str,
+        *,
+        max_output: int,
+    ) -> bytes | None:
+        """Return bounded text evidence for the changed fixture file."""
+        del max_output
+        if path != "file.txt":
+            return None
+        return b"fixed\n"
+
+    def post_review(
+        self,
+        pull_request: PullRequest,
+        event: str,
+        _body: str,
+    ) -> tuple[int, JsonObject]:
+        """Record the GitHub write that production review orchestration requested."""
+        self.post_count += 1
+        self.posted_events.append(event)
+        review_id = 101 if event == "REQUEST_CHANGES" else 102
+        return review_id, {"id": review_id, "commit_id": pull_request.head_sha}
+
+    def verify_posted(
+        self,
+        _pull_request: PullRequest,
+        _review_id: int,
+    ) -> JsonObject:
+        """Return the state corresponding to the event posted by the real flow."""
+        if not self.posted_events:
+            raise AssertionError("review verification occurred before posting")
+        state = (
+            "CHANGES_REQUESTED"
+            if self.posted_events[-1] == "REQUEST_CHANGES"
+            else "APPROVED"
+        )
+        return {"state": state}
+
+
 @dataclass(frozen=True)
 class AcceptanceFixture:
     """Disposable repository state shared by one acceptance flow."""
@@ -122,40 +229,50 @@ def _acceptance_fixture(tmp_path: Path) -> AcceptanceFixture:
     )
 
 
-def _review_result(
-    fixture: AcceptanceFixture,
-    *,
-    head_sha: str,
-    verdict: str,
-    artifacts_dir: Path,
-) -> ReviewResult:
-    """Create one stable fake reviewer result bound to a disposable PR head."""
+def _review_snapshot(fixture: AcceptanceFixture, *, head_sha: str) -> PullRequest:
+    """Bind the fake GitHub review snapshot to the disposable repository SHAs."""
+    return replace(
+        sample_pr(base_sha=fixture.base_sha, head_sha=head_sha),
+        repository="acme/demo",
+        number=1,
+        url="https://github.com/acme/demo/pull/1",
+        base_ref="main",
+        head_ref="feature",
+        head_repository="acme/demo",
+        changed_paths=("file.txt",),
+        raw={"baseRefOid": fixture.base_sha, "headRefOid": head_sha},
+    )
+
+
+def _oracle_payload(pull_request: PullRequest, *, verdict: str) -> JsonObject:
+    """Return strict fake Oracle JSON for the exact frozen pull-request identity."""
     request_changes = verdict == "REQUEST_CHANGES"
     blockers = (
-        (
+        [
             {
                 "id": "B1",
                 "title": "Fix the fixture",
                 "description": "The fixture still contains the review blocker.",
                 "required_change": "Replace feature content with fixed content.",
-            },
-        )
+            }
+        ]
         if request_changes
-        else ()
+        else []
     )
-    return ReviewResult(
-        repository="acme/demo",
-        pr_number=1,
-        base_sha=fixture.base_sha,
-        head_sha=head_sha,
-        verdict=verdict,
-        github_review_id=101 if request_changes else 102,
-        blocking_findings=blockers,
-        implementation_prompt=(
-            "Implement only B1 and run repository QA." if blockers else None
+    return {
+        "schema_version": 1,
+        "repository": pull_request.repository,
+        "pr_number": pull_request.number,
+        "base_sha": pull_request.base_sha,
+        "head_sha": pull_request.head_sha,
+        "verdict": verdict,
+        "review_body": "Fix the fixture." if request_changes else "Approved.",
+        "implementation_prompt": (
+            "Implement only B1 and run repository QA." if request_changes else None
         ),
-        artifacts_dir=str(artifacts_dir),
-    )
+        "blocking_findings": blockers,
+        "non_blocking_notes": [],
+    }
 
 
 def _stdout_json(capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
@@ -169,10 +286,14 @@ def _run_review_cli(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     fixture: AcceptanceFixture,
-    result: ReviewResult,
-) -> tuple[int, dict[str, object]]:
-    """Run the public review CLI with only external reviewer transport faked."""
-    monkeypatch.setattr(cli, "execute_review", lambda **_kwargs: result)
+    pull_request: PullRequest,
+    verdict: str,
+) -> tuple[int, dict[str, object], AcceptanceReviewRunner]:
+    """Run the public review CLI with only Oracle/GitHub external I/O faked."""
+    AcceptanceGitHubClient.snapshots = [pull_request, pull_request, pull_request]
+    monkeypatch.setattr(review_module, "GitHubClient", AcceptanceGitHubClient)
+    runner = AcceptanceReviewRunner(_oracle_payload(pull_request, verdict=verdict))
+    monkeypatch.setattr(cli, "CommandRunner", lambda: runner)
     status = cli.main([
         "review",
         "--pr",
@@ -180,7 +301,7 @@ def _run_review_cli(
         "--repo-dir",
         str(fixture.repo),
     ])
-    return status, _stdout_json(capsys)
+    return status, _stdout_json(capsys), runner
 
 
 def _run_submit_cli(
@@ -231,30 +352,36 @@ def test_cross_agent_request_submit_rereview_flow(
     """Every supported host uses the same request/fix/submit/re-review contract."""
     discovered = REPOSITORY_ROOT / discovery_path
     assert discovered.is_symlink(), client
-    assert (
-        discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True)
-    ), client
+    assert discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True)
     assert (discovered / "scripts" / "loopr.py").samefile(
         CANONICAL_SKILL / "scripts" / "loopr.py"
     )
 
     fixture = _acceptance_fixture(tmp_path)
-    request = _review_result(
-        fixture,
-        head_sha=fixture.head_sha,
-        verdict="REQUEST_CHANGES",
-        artifacts_dir=tmp_path / "review-request",
-    )
-    request_status, request_payload = _run_review_cli(
+    initial = _review_snapshot(fixture, head_sha=fixture.head_sha)
+    request_status, request_payload, request_runner = _run_review_cli(
         monkeypatch,
         capsys,
         fixture,
-        request,
+        initial,
+        "REQUEST_CHANGES",
     )
     assert request_status == 0
     assert set(request_payload) == REVIEW_SUCCESS_KEYS
     assert request_payload["verdict"] == "REQUEST_CHANGES"
     assert request_payload["head_sha"] == fixture.head_sha
+    assert AcceptanceGitHubClient.instance is not None
+    assert AcceptanceGitHubClient.instance.posted_events == ["REQUEST_CHANGES"]
+    request_artifacts = Path(cast("str", request_payload["artifacts_dir"]))
+    for artifact in (
+        "snapshot.json",
+        "patch.diff",
+        "bundle-manifest.json",
+        "validated-review.json",
+        "github-review.json",
+        "result.json",
+    ):
+        assert (request_artifacts / artifact).is_file()
 
     (fixture.repo / "file.txt").write_text("fixed\n", encoding="utf-8")
     submit_status, submit_payload = _run_submit_cli(
@@ -269,24 +396,28 @@ def test_cross_agent_request_submit_rereview_flow(
     assert submit_payload["resulting_head_sha"] == submit_payload["commit_sha"]
 
     resulting_head = cast("str", submit_payload["resulting_head_sha"])
-    approval = _review_result(
-        fixture,
-        head_sha=resulting_head,
-        verdict="APPROVE",
-        artifacts_dir=tmp_path / "review-approve",
-    )
-    approve_status, approve_payload = _run_review_cli(
+    updated = _review_snapshot(fixture, head_sha=resulting_head)
+    approve_status, approve_payload, approve_runner = _run_review_cli(
         monkeypatch,
         capsys,
         fixture,
-        approval,
+        updated,
+        "APPROVE",
     )
     assert approve_status == 0
     assert set(approve_payload) == REVIEW_SUCCESS_KEYS
     assert approve_payload["verdict"] == "APPROVE"
     assert approve_payload["head_sha"] == resulting_head
+    assert AcceptanceGitHubClient.instance is not None
+    assert AcceptanceGitHubClient.instance.posted_events == ["APPROVE"]
 
-    invoked_programs = {command[0] for command in fixture.runner.commands if command}
+    commands = [
+        *request_runner.commands,
+        *fixture.runner.commands,
+        *approve_runner.commands,
+    ]
+    invoked_programs = {command[0] for command in commands if command}
+    assert "oracle" in invoked_programs
     assert not invoked_programs.intersection({"codex", "claude", "cursor"})
 
 
