@@ -6,6 +6,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -168,8 +169,8 @@ class CommandRunner:
         stdout/stderr spools so a process that writes its real payload to a
         side file (rather than stdout) cannot exhaust disk during a long
         timeout window; the process group is terminated as soon as it grows
-        past `max_output`. Because the child runs in its own session, a
-        `KeyboardInterrupt` raised anywhere during monitoring is caught to
+        past `max_output`. Because the child runs in an isolated process group,
+        a `KeyboardInterrupt` raised anywhere during monitoring is caught to
         terminate and reap the child before propagating, so an interrupt
         cannot leave it running past the command's lifetime.
         """
@@ -191,16 +192,28 @@ class CommandRunner:
         ):
             stdin_file.write(input_bytes)
             stdin_file.seek(0)
-            proc = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                env=dict(env),
-                stdin=stdin_file if input_text is not None else subprocess.DEVNULL,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                start_new_session=True,
-                shell=False,
-            )
+            if sys.version_info >= (3, 11):
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env=dict(env),
+                    stdin=stdin_file if input_text is not None else subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    process_group=0,
+                    shell=False,
+                )
+            else:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    env=dict(env),
+                    stdin=stdin_file if input_text is not None else subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                    shell=False,
+                )
             try:
                 deadline = time.monotonic() + timeout
                 stderr_limit = min(max_output, MAX_STDERR)
