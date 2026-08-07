@@ -1,6 +1,21 @@
 extend = "pyproject.toml"
 
 [lint.extend-per-file-ignores]
+"skills/pr-review-loop/tests/test_artifacts.py" = [
+  "typing-only-standard-library-import",
+]
+"skills/pr-review-loop/tests/test_cli.py" = [
+  "line-too-long",
+  "undocumented-public-function",
+  "undocumented-public-method",
+]
+"skills/pr-review-loop/tests/test_oracle.py" = [
+  "typing-only-standard-library-import",
+  "typing-only-third-party-import",
+]
+"skills/pr-review-loop/tests/test_process.py" = [
+  "typing-only-standard-library-import",
+]
 "skills/pr-review-loop/tests/test_submission.py" = [
   "typing-only-standard-library-import",
   "compare-to-empty-string",
@@ -8,9 +23,13 @@ extend = "pyproject.toml"
 "skills/pr-review-loop/tests/test_submit.py" = [
   "typing-only-standard-library-import",
   "compare-to-empty-string",
+  "line-too-long",
+  "undocumented-public-function",
+  "undocumented-public-method",
 ]
 
 [format]
 exclude = [
   "skills/pr-review-loop/tests/test_submission.py",
+  "skills/pr-review-loop/tests/test_submit.py",
 ]
