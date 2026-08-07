@@ -48,20 +48,6 @@ def test_canonical_skill_layout_exists() -> None:
         _require(path.is_dir(), f"missing canonical directory: {path}")
 
 
-def test_legacy_root_orchestrator_is_deleted() -> None:
-    """No root compatibility CLI or monolithic root test package remains."""
-    _require(not (REPOSITORY_ROOT / "loopr.py").exists(), "legacy root loopr.py exists")
-    _require(not (REPOSITORY_ROOT / "tests").exists(), "legacy root tests exist")
-    _require(
-        not (CANONICAL_SKILL / "scripts" / ".gitkeep").exists(),
-        "populated scripts directory still contains .gitkeep",
-    )
-    _require(
-        not (CANONICAL_SKILL / "tests" / ".gitkeep").exists(),
-        "populated tests directory still contains .gitkeep",
-    )
-
-
 def test_production_module_names_are_simple() -> None:
     """Production modules use short lowercase names without underscores."""
     scripts = CANONICAL_SKILL / "scripts"
@@ -79,10 +65,6 @@ def test_production_module_names_are_simple() -> None:
 def test_cli_module_is_named_by_responsibility() -> None:
     """The command entrypoint uses a responsibility-based module name."""
     _require((CANONICAL_SKILL / "scripts" / "cli.py").is_file(), "missing cli.py")
-    _require(
-        not (CANONICAL_SKILL / "scripts" / "loopr.py").exists(),
-        "legacy branded CLI module still exists",
-    )
 
 
 def test_pr_review_loop_discovery_links_are_direct_and_canonical() -> None:
@@ -132,7 +114,7 @@ def test_skill_contract_is_vendor_neutral_and_complete() -> None:
         _require(command not in text.lower(), f"host-specific command: {command}")
 
 
-def test_runtime_has_no_legacy_agent_or_linux_containment() -> None:
+def test_runtime_has_no_agent_or_linux_containment() -> None:
     """Production modules contain no embedded agent or Linux supervisor path."""
     forbidden = (
         "codex exec",
@@ -142,7 +124,6 @@ def test_runtime_has_no_legacy_agent_or_linux_containment() -> None:
         "subreaper",
         "/proc/",
         "git worktree add",
-        "loopr/pr-",
     )
     scripts = CANONICAL_SKILL / "scripts"
     for path in scripts.glob("*.py"):
@@ -150,12 +131,12 @@ def test_runtime_has_no_legacy_agent_or_linux_containment() -> None:
         for concept in forbidden:
             _require(
                 concept not in text,
-                f"legacy runtime concept in {path}: {concept}",
+                f"unsupported runtime concept in {path}: {concept}",
             )
 
 
-def test_docs_do_not_advertise_the_legacy_interface() -> None:
-    """Public documentation describes only the skill-native commands."""
+def test_docs_describe_current_interface() -> None:
+    """Public documentation describes only the current skill commands."""
     documents = (
         REPOSITORY_ROOT / "README.md",
         REPOSITORY_ROOT / "pyproject.toml",
@@ -163,11 +144,6 @@ def test_docs_do_not_advertise_the_legacy_interface() -> None:
         CANONICAL_SKILL / "references" / "command-contracts.md",
     )
     forbidden = (
-        "python3 loopr.py",
-        "skills/loopr/",
-        ".agents/skills/loopr",
-        ".claude/skills/loopr",
-        ".pr-loopr/",
         "node.js 24",
         "codex login",
         "disposable worktree",
