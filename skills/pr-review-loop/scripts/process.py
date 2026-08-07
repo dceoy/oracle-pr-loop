@@ -7,11 +7,13 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 MAX_OUTPUT = 24 * 1024 * 1024
 MAX_INPUT = 4 * 1024 * 1024
@@ -171,14 +173,17 @@ class CommandRunner:
         """
         argv = tuple(str(value) for value in args)
         if not argv or any("\0" in value for value in argv):
-            raise CommandError("invalid subprocess argument vector")
+            msg = "invalid subprocess argument vector"
+            raise CommandError(msg)
         if timeout <= 0 or max_output <= 0:
-            raise CommandError("subprocess bounds must be positive")
+            msg = "subprocess bounds must be positive"
+            raise CommandError(msg)
         executable = self.trusted(argv[0])
         argv = (executable, *argv[1:])
         input_bytes = b"" if input_text is None else input_text.encode()
         if len(input_bytes) > MAX_INPUT:
-            raise CommandError("command input exceeded bound")
+            msg = "command input exceeded bound"
+            raise CommandError(msg)
 
         with (
             tempfile.TemporaryFile(mode="w+b") as stdin_file,
@@ -300,4 +305,5 @@ class CommandRunner:
             proc.kill()
         if cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS):
             return
-        raise CommandError("could not reap subprocess")
+        msg = "could not reap subprocess"
+        raise CommandError(msg)

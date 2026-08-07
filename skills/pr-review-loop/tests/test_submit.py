@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from test_submission import GIT, ScenarioRunner, _fixture_repo, _git, _run_process
-
 from scripts import submission as submission_module
 from scripts.models import EXIT_PRECONDITION, EXIT_RACE, JsonObject, LooprError
 from scripts.process import CommandError, CommandResult
 from scripts.submit import execute_guarded, execute_submit
-from typing import TYPE_CHECKING
+from test_submission import GIT, ScenarioRunner, _fixture_repo, _git, _run_process
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -85,7 +84,8 @@ class AmbiguousPushRunner(ScenarioRunner):
         )
         if argv[:2] == ["git", "push"] and self.fail_after_push:
             self.fail_after_push = False
-            raise CommandError("connection dropped after remote update")
+            msg = "connection dropped after remote update"
+            raise CommandError(msg)
         return result
 
 
@@ -147,7 +147,8 @@ class TransientGitHubAfterPushRunner(ScenarioRunner):
             and self.fail_next_snapshot
         ):
             self.fail_next_snapshot = False
-            raise CommandError("temporary GitHub API failure")
+            msg = "temporary GitHub API failure"
+            raise CommandError(msg)
         result = super().run(
             argv,
             cwd=cwd,
@@ -245,7 +246,8 @@ class TransientRemoteConfirmationRunner(ScenarioRunner):
             and self.fail_first_recovery
         ):
             self.fail_first_recovery = False
-            raise CommandError("temporary remote confirmation failure")
+            msg = "temporary remote confirmation failure"
+            raise CommandError(msg)
         result = super().run(
             argv,
             cwd=cwd,
@@ -259,7 +261,8 @@ class TransientRemoteConfirmationRunner(ScenarioRunner):
         if argv[:2] == ["git", "push"] and self.fail_after_push:
             self.fail_after_push = False
             self.remote_updated = True
-            raise CommandError("connection dropped after remote update")
+            msg = "connection dropped after remote update"
+            raise CommandError(msg)
         return result
 
 
@@ -286,7 +289,8 @@ class DelayedRemoteAcceptanceRunner(ScenarioRunner):
         argv = [str(value) for value in args]
         if argv[:2] == ["git", "push"]:
             self.pending_commit = argv[-1].split(":", 1)[0]
-            raise CommandError("connection dropped before remote confirmation")
+            msg = "connection dropped before remote confirmation"
+            raise CommandError(msg)
         if (
             argv[:4] == ["git", "ls-remote", "--refs", "origin"]
             and self.pending_commit is not None
@@ -337,7 +341,8 @@ class RecoveryDeadlineRunner(ScenarioRunner):
         argv = [str(value) for value in args]
         if argv[:2] == ["git", "push"]:
             self.pending_commit = argv[-1].split(":", 1)[0]
-            raise CommandError("connection dropped before remote confirmation")
+            msg = "connection dropped before remote confirmation"
+            raise CommandError(msg)
         if (
             argv[:4] == ["git", "ls-remote", "--refs", "origin"]
             and self.pending_commit is not None

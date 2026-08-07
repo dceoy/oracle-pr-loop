@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient
 from scripts.models import LooprError, PullRequest

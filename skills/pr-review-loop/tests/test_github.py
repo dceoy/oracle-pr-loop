@@ -8,7 +8,6 @@ import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercis
 from typing import TYPE_CHECKING, cast
 
 import pytest
-
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient
 from scripts.models import EXIT_PRECONDITION, LooprError, PullRequest

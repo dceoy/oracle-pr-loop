@@ -443,7 +443,7 @@ class _SubmitBoundaryRunner(CommandRunner):
             isinstance(key, str) for key in payload
         ):
             return
-        data = cast(JsonObject, payload)
+        data = cast("JsonObject", payload)
         base_ref = data.get("baseRefName")
         head_ref = data.get("headRefName")
         if not isinstance(base_ref, str) or not isinstance(head_ref, str):

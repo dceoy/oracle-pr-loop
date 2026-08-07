@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import json
 import stat
+from typing import TYPE_CHECKING
 
 import pytest
-
 from scripts.artifacts import ArtifactWriter
 from scripts.models import LooprError
 from scripts.process import CommandRunner
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path

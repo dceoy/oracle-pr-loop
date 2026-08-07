@@ -7,12 +7,13 @@ import os
 import stat
 import uuid
 from contextlib import suppress
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .models import EXIT_PRECONDITION, JsonValue, LooprError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .process import CommandRunner
 
 

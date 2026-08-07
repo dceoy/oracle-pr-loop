@@ -77,7 +77,7 @@ def _json_object(text: str) -> JsonObject:
             "oracle_schema",
             "Oracle output must be exactly one JSON object",
         )
-    return cast(JsonObject, value)
+    return cast("JsonObject", value)
 
 
 def _string(value: JsonValue | None, *, field: str) -> str:
@@ -307,7 +307,7 @@ class OracleClient:
                 attachments.append(attachment)
                 total += size
         manifest_path = self.writer.json("bundle-manifest.json", manifest)
-        return tuple([*core, manifest_path, *attachments])
+        return (*core, manifest_path, *attachments)
 
     def _attachment(
         self,
@@ -442,7 +442,8 @@ class OracleClient:
                 os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
             )
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise OSError("Oracle output path is not a regular file")
+                msg = "Oracle output path is not a regular file"
+                raise OSError(msg)
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = None
                 raw_bytes = handle.read(MAX_ORACLE_OUTPUT + 1)

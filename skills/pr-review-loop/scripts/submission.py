@@ -673,7 +673,7 @@ def _json_object(text: str) -> JsonObject:
             "github_schema",
             "GitHub returned a non-object JSON response",
         )
-    return cast(JsonObject, value)
+    return cast("JsonObject", value)
 
 
 def _object(value: JsonValue | None, *, field: str) -> JsonObject:

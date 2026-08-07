@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
-
 from scripts import review as review_module
 from scripts.artifacts import ArtifactWriter
 from scripts.models import (

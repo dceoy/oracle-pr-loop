@@ -79,7 +79,7 @@ class ReviewResult:
     def as_json(self) -> JsonObject:
         """Return the stable command result schema."""
         return cast(
-            JsonObject,
+            "JsonObject",
             {
                 "schema_version": 1,
                 "command": "review",
@@ -112,7 +112,7 @@ class SubmitResult:
     def as_json(self) -> JsonObject:
         """Return the stable command result schema."""
         return cast(
-            JsonObject,
+            "JsonObject",
             {
                 "schema_version": 1,
                 "command": "submit",

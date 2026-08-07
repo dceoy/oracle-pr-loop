@@ -106,53 +106,32 @@ ignore = [
 "skills/pr-review-loop/scripts/**/*.py" = [
   "docstring-missing-returns",              # DOC201
   "docstring-missing-exception",            # DOC501
-  "typing-only-standard-library-import",    # TCH003
   "magic-value-comparison",                 # PLR2004
-  "too-many-boolean-expressions",           # PLR0916
   "too-many-locals",                        # PLR0914
   "too-many-statements-in-try-clause",      # TRY300
-  "runtime-cast-value",                     # TC006
-  "static-join-to-f-string",                # FLY002
   "no-self-use",                            # PLR6301
   "try-consider-else",                      # TRY300
   "raise-within-try",                       # TRY301
   "suspicious-subprocess-import",           # S404
   "subprocess-without-shell-equals-true",   # S603
-  "raise-vanilla-args",                     # TRY003
-  "raw-string-in-exception",                # EM101
   "blind-except",                           # BLE001
-  "unnecessary-literal-within-tuple-call",  # C409
+  "static-join-to-f-string",                # FLY002
 ]
-"skills/pr-review-loop/tests/**/*.py" = [
-  "unsorted-imports",             # I001
-  "docstring-missing-returns",    # DOC201
-  "docstring-missing-exception",  # DOC501
-  "import-private-name",          # PLC2701
-  "too-many-public-methods",      # PLR0904
-  "magic-value-comparison",       # PLR2004
-  "no-self-use",                  # PLR6301
-  "assert",                       # S101
-  "hardcoded-password-string",    # S105
-  "hardcoded-password-func-arg",  # S106
-  "private-member-access",        # SLF001
-  "unused-function-argument",     # ARG001
-  "unused-method-argument",       # ARG002
-  "unused-lambda-argument",       # ARG005
-  "implicit-namespace-package",   # INP001
-  "undocumented-public-init",     # D107
-  "raise-vanilla-args",           # TRY003
-  "raw-string-in-exception",      # EM101
-]
-"skills/pr-review-loop/tests/test_cli.py" = [
-  "undocumented-public-function",   # D103
+"**/tests/**/*.py" = [
   "undocumented-public-method",     # D102
-]
-"skills/pr-review-loop/tests/test_submission.py" = [
-  "compare-to-empty-string",  # PLC1901
-]
-"skills/pr-review-loop/tests/test_submit.py" = [
   "undocumented-public-function",   # D103
-  "undocumented-public-method",     # D102
+  "undocumented-public-init",       # D107
+  "docstring-missing-returns",      # DOC201
+  "docstring-missing-exception",    # DOC501
+  "import-private-name",            # PLC2701
+  "too-many-public-methods",        # PLR0904
+  "magic-value-comparison",         # PLR2004
+  "no-self-use",                    # PLR6301
+  "assert",                         # S101
+  "hardcoded-password-string",      # S105
+  "hardcoded-password-func-arg",    # S106
+  "private-member-access",          # SLF001
+  "implicit-namespace-package",     # INP001
   "compare-to-empty-string",        # PLC1901
 ]
 
@@ -162,6 +141,7 @@ convention = "google"
 [tool.ruff.lint.pylint]
 max-args = 10
 max-public-methods = 40
+max-bool-expr = 10
 
 [tool.pyright]
 exclude = ["build", ".venv", ".agents", ".claude"]

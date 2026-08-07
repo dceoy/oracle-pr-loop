@@ -8,10 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
-from test_review import FakeGitHubClient, install_orchestration_fakes, sample_pr
-from test_submission import ScenarioRunner, _fixture_repo
-
-from scripts import cli, review as review_module
+from scripts import cli
+from scripts import review as review_module
 from scripts.github import GitHubClient
 from scripts.models import (
     EXIT_ORACLE,
@@ -27,6 +25,8 @@ from scripts.oracle import parse_review
 from scripts.process import CommandResult, CommandRunner
 from scripts.review import execute_review
 from scripts.submit import execute_submit
+from test_review import FakeGitHubClient, install_orchestration_fakes, sample_pr
+from test_submission import ScenarioRunner, _fixture_repo
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -124,9 +124,8 @@ class AcceptanceReviewRunner(CommandRunner):
         self.commands.append(argv)
         if argv and argv[0] == "oracle":
             if watch_path is None:
-                raise AssertionError(
-                    "Oracle invocation must provide a watched output path"
-                )
+                msg = "Oracle invocation must provide a watched output path"
+                raise AssertionError(msg)
             watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
             return CommandResult(args=argv, returncode=0, stdout=b"", stderr="")
         return super().run(
@@ -162,7 +161,8 @@ class AcceptanceGitHubClient(GitHubClient):
     def initialize(self, pr_value: str) -> None:
         del pr_value
         if not self._snapshots:
-            raise AssertionError("acceptance review requires at least one PR snapshot")
+            msg = "acceptance review requires at least one PR snapshot"
+            raise AssertionError(msg)
         initial = self._snapshots[0]
         self.repository = initial.repository
         self.number = initial.number
@@ -171,7 +171,8 @@ class AcceptanceGitHubClient(GitHubClient):
 
     def snapshot(self) -> PullRequest:
         if not self._snapshots:
-            raise AssertionError("acceptance GitHub snapshot sequence was exhausted")
+            msg = "acceptance GitHub snapshot sequence was exhausted"
+            raise AssertionError(msg)
         return self._snapshots.pop(0)
 
     def post_review(
@@ -193,7 +194,8 @@ class AcceptanceGitHubClient(GitHubClient):
     ) -> JsonObject:
         del pull_request, review_id
         if not self.posted_events:
-            raise AssertionError("review verification occurred before posting")
+            msg = "review verification occurred before posting"
+            raise AssertionError(msg)
         state = (
             "CHANGES_REQUESTED"
             if self.posted_events[-1] == "REQUEST_CHANGES"

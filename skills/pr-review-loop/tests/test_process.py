@@ -6,12 +6,11 @@ import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- test-controlled process
 import sys
 from types import SimpleNamespace
-from typing import cast, TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
-
-from scripts.process import CommandError, CommandRunner
 from scripts import process as process_module
+from scripts.process import CommandError, CommandRunner
 
 if TYPE_CHECKING:
     from pathlib import Path
