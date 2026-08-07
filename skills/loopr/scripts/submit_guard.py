@@ -232,7 +232,7 @@ def _contains_gitlink_change(raw: bytes) -> bool:
             )
         old_mode = parts[0][1:]
         new_mode = parts[1]
-        if old_mode == GITLINK_MODE or new_mode == GITLINK_MODE:
+        if GITLINK_MODE in (old_mode, new_mode):
             return True
         index += path_count
     return False
