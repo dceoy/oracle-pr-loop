@@ -12,7 +12,5 @@ extend = "pyproject.toml"
 
 [format]
 exclude = [
-  "skills/pr-review-loop/scripts/cli.py",
-  "skills/pr-review-loop/scripts/submit_core.py",
   "skills/pr-review-loop/tests/test_submit_command.py",
 ]

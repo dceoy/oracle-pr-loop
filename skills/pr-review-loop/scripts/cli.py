@@ -15,7 +15,7 @@ if __package__ in {None, ""}:
 from .models import EXIT_PRECONDITION, JsonObject, LooprError
 from .process import CommandRunner
 from .review import execute_review
-from .submit_guard import execute_submit
+from .submit import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

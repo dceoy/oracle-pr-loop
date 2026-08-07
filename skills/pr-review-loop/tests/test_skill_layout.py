@@ -10,6 +10,17 @@ DISCOVERY_LINKS = (
     REPOSITORY_ROOT / ".agents" / "skills" / "pr-review-loop",
     REPOSITORY_ROOT / ".claude" / "skills" / "pr-review-loop",
 )
+PRODUCTION_MODULES = (
+    "artifacts",
+    "cli",
+    "github",
+    "models",
+    "oracle",
+    "process",
+    "review",
+    "submission",
+    "submit",
+)
 UNRELATED_DISCOVERY = (
     (
         REPOSITORY_ROOT / ".claude" / "skills" / "local-qa",
@@ -49,6 +60,20 @@ def test_legacy_root_orchestrator_is_deleted() -> None:
         not (CANONICAL_SKILL / "tests" / ".gitkeep").exists(),
         "populated tests directory still contains .gitkeep",
     )
+
+
+def test_production_module_names_are_simple() -> None:
+    """Production modules use short lowercase names without underscores."""
+    scripts = CANONICAL_SKILL / "scripts"
+    actual = tuple(
+        sorted(path.stem for path in scripts.glob("*.py") if path.name != "__init__.py")
+    )
+    _require(actual == PRODUCTION_MODULES, f"unexpected production modules: {actual}")
+    for name in actual:
+        _require(
+            name.isalpha() and name.islower(),
+            f"production module name must be lowercase letters only: {name}",
+        )
 
 
 def test_cli_module_is_named_by_responsibility() -> None:

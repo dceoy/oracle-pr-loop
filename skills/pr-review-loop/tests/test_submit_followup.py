@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 from test_submit_command import ScenarioRunner, _fixture_repo, _git
 
-from scripts import submit_core
+from scripts import submission as submit_core
 from scripts.models import EXIT_PRECONDITION, JsonObject, LooprError
 from scripts.process import CommandError, CommandResult
 from scripts.submit import execute_submit

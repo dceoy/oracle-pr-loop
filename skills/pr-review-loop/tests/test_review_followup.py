@@ -10,7 +10,7 @@ from typing import ClassVar
 import pytest
 
 from scripts import review as review_module
-from scripts.github_client import GitHubClient
+from scripts.github import GitHubClient
 from scripts.models import JsonObject, JsonValue, OracleReview, PullRequest
 from scripts.process import CommandRunner
 from scripts.review import execute_review

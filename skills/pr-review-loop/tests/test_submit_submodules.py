@@ -8,7 +8,7 @@ import pytest
 from test_submit_command import GIT, ScenarioRunner, _fixture_repo, _git, _run_process
 
 from scripts.models import EXIT_PRECONDITION, LooprError
-from scripts.submit_guard import execute_submit
+from scripts.submit import execute_submit
 
 if TYPE_CHECKING:
     from pathlib import Path
