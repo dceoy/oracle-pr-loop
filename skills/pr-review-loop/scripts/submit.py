@@ -1,4 +1,4 @@
-"""Hardened public entrypoint for deterministic PR submission."""
+"""Deterministic pull-request submission safety and transport."""
 
 from __future__ import annotations
 
@@ -122,7 +122,8 @@ class _PushAwareRunner(CommandRunner):
         )
         retry_deadline = (
             time.monotonic() + submission.POLL_TIMEOUT_SECONDS
-            if self._pushed_commit_sha is not None and argv[:3] == ("gh", "pr", "view")
+            if self._pushed_commit_sha is not None
+            and argv[:3] == ("gh", "pr", "view")
             else None
         )
         while True:
@@ -401,7 +402,9 @@ class _SubmitBoundaryRunner(CommandRunner):
     ) -> CommandResult:
         """Freeze PR refs and reject unsafe staged metadata or gitlinks."""
         argv = tuple(str(value) for value in args)
-        is_real_push = argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
+        is_real_push = (
+            argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
+        )
         if is_real_push:
             self._reject_gitlink_changes(
                 argv=argv,
@@ -421,8 +424,9 @@ class _SubmitBoundaryRunner(CommandRunner):
             max_output=max_output,
             watch_path=watch_path,
         )
-        if argv[: len(STAGED_RAW_COMMAND)] == STAGED_RAW_COMMAND and self.contains_secret(
-            result.stdout
+        if (
+            argv[: len(STAGED_RAW_COMMAND)] == STAGED_RAW_COMMAND
+            and self.contains_secret(result.stdout)
         ):
             raise LooprError(
                 EXIT_PRECONDITION,
@@ -510,7 +514,7 @@ class _SubmitBoundaryRunner(CommandRunner):
             )
 
 
-def _execute_submit(
+def execute_submit(
     *,
     pr_value: str,
     expected_head: str,
@@ -518,7 +522,7 @@ def _execute_submit(
     artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Validate the push destination, then execute one guarded submission."""
+    """Validate the push destination, then execute one transport-safe submission."""
     command_runner = runner or CommandRunner()
     _require_single_push_url(command_runner, repo_dir)
     repo_root = _repo_root(command_runner, repo_dir)
@@ -534,7 +538,7 @@ def _execute_submit(
     )
 
 
-def execute_submit(
+def execute_guarded(
     *,
     pr_value: str,
     expected_head: str,
@@ -544,7 +548,7 @@ def execute_submit(
 ) -> SubmitResult:
     """Execute submit while freezing refs and rejecting unsafe metadata."""
     command_runner = runner or CommandRunner()
-    return _execute_submit(
+    return execute_submit(
         pr_value=pr_value,
         expected_head=expected_head,
         repo_dir=repo_dir,

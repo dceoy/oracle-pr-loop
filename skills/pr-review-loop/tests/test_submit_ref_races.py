@@ -8,7 +8,7 @@ import pytest
 from test_submit_command import ScenarioRunner, _fixture_repo, _git
 
 from scripts.models import EXIT_RACE, JsonObject, LooprError
-from scripts.submit import execute_submit
+from scripts.submit import execute_guarded as execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

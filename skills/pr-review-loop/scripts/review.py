@@ -120,16 +120,20 @@ def _persist_best_effort(
     try:
         writer.json(relative, value)
     except LooprError as exc:
-        sys.stderr.write(
-            f"pr-review-loop review: warning: failed to persist artifact {relative}: {exc}\n"
+        message = (
+            "pr-review-loop review: warning: failed to persist artifact "
+            f"{relative}: {exc}"
         )
+        sys.stderr.write(f"{message}\n")
     except BaseException as exc:
         if not suppress_interrupts:
             raise
         detail = str(exc) or type(exc).__name__
-        sys.stderr.write(
-            f"pr-review-loop review: warning: failed to persist artifact {relative}: {detail}\n"
+        message = (
+            "pr-review-loop review: warning: failed to persist artifact "
+            f"{relative}: {detail}"
         )
+        sys.stderr.write(f"{message}\n")
 
 
 MAX_POSTED_BODY_BYTES = 65_000
