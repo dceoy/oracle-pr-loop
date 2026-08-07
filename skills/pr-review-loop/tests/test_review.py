@@ -425,8 +425,6 @@ def test_interrupt_after_verification_returns_review_id(
 class _InterruptingGitHubClient(_StableGitHubClient):
     """Interrupt during the post-write snapshot verification."""
 
-    instance: ClassVar[_InterruptingGitHubClient | None] = None
-
     def __init__(
         self,
         _runner: CommandRunner,
