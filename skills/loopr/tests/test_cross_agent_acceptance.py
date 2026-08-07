@@ -132,7 +132,8 @@ class AcceptanceReviewRunner(CommandRunner):
         self.commands.append(argv)
         if argv and argv[0] == "oracle":
             if watch_path is None:
-                raise AssertionError("Oracle invocation must provide a watched output path")
+                message = "Oracle invocation must provide a watched output path"
+                raise AssertionError(message)
             watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
             return CommandResult(args=argv, returncode=0, stdout=b"", stderr="")
         return super().run(
@@ -340,6 +341,78 @@ def _runner_with_token() -> CommandRunner:
     return CommandRunner({"GH_REVIEW_TOKEN": "token"})
 
 
+def _assert_skill_discovery(client: str, discovery_path: Path) -> None:
+    """Verify one host resolves the shared canonical skill implementation."""
+    discovered = REPOSITORY_ROOT / discovery_path
+    assert discovered.is_symlink(), client
+    assert discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True)
+    assert (discovered / "scripts" / "loopr.py").samefile(
+        CANONICAL_SKILL / "scripts" / "loopr.py"
+    )
+
+
+def _assert_review_result(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fixture: AcceptanceFixture,
+    *,
+    head_sha: str,
+    verdict: str,
+    expected_patch: str,
+    rejected_patch: str,
+) -> AcceptanceReviewRunner:
+    """Run one review and verify its schema, event, artifacts, and frozen patch."""
+    pull_request = _review_snapshot(fixture, head_sha=head_sha)
+    status, payload, runner = _run_review_cli(
+        monkeypatch,
+        capsys,
+        fixture,
+        pull_request,
+        verdict,
+    )
+    assert status == 0
+    assert set(payload) == REVIEW_SUCCESS_KEYS
+    assert payload["verdict"] == verdict
+    assert payload["head_sha"] == head_sha
+
+    github = AcceptanceGitHubClient.instance
+    assert isinstance(github, AcceptanceGitHubClient)
+    assert github.posted_events == [verdict]
+
+    artifacts = Path(cast("str", payload["artifacts_dir"]))
+    for artifact in (
+        "snapshot.json",
+        "patch.diff",
+        "bundle-manifest.json",
+        "validated-review.json",
+        "github-review.json",
+        "result.json",
+    ):
+        assert (artifacts / artifact).is_file()
+    patch = (artifacts / "patch.diff").read_text(encoding="utf-8")
+    assert expected_patch in patch
+    assert rejected_patch not in patch
+    assert ".pr-loopr/" not in patch
+    return runner
+
+
+def _assert_host_programs(
+    fixture: AcceptanceFixture,
+    *review_runners: AcceptanceReviewRunner,
+) -> None:
+    """Verify the host workflow uses Git/Oracle without nested implementation agents."""
+    for review_runner in review_runners:
+        programs = {command[0] for command in review_runner.commands if command}
+        assert {"git", "oracle"} <= programs
+
+    commands = [
+        *(command for runner in review_runners for command in runner.commands),
+        *fixture.runner.commands,
+    ]
+    invoked_programs = {command[0] for command in commands if command}
+    assert not invoked_programs.intersection({"codex", "claude", "cursor"})
+
+
 @pytest.mark.parametrize(("client", "discovery_path"), CLIENTS)
 def test_cross_agent_request_submit_rereview_flow(
     client: str,
@@ -349,47 +422,24 @@ def test_cross_agent_request_submit_rereview_flow(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Every supported host uses the same request/fix/submit/re-review contract."""
-    discovered = REPOSITORY_ROOT / discovery_path
-    assert discovered.is_symlink(), client
-    assert discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True)
-    assert (discovered / "scripts" / "loopr.py").samefile(
-        CANONICAL_SKILL / "scripts" / "loopr.py"
-    )
-
+    _assert_skill_discovery(client, discovery_path)
     fixture = _acceptance_fixture(tmp_path)
-    request_status, request_payload, request_runner = _run_review_cli(
+    request_runner = _assert_review_result(
         monkeypatch,
         capsys,
         fixture,
-        _review_snapshot(fixture, head_sha=fixture.head_sha),
-        "REQUEST_CHANGES",
+        head_sha=fixture.head_sha,
+        verdict="REQUEST_CHANGES",
+        expected_patch="+feature\n",
+        rejected_patch="+fixed\n",
     )
-    assert request_status == 0
-    assert set(request_payload) == REVIEW_SUCCESS_KEYS
-    assert request_payload["verdict"] == "REQUEST_CHANGES"
-    assert request_payload["head_sha"] == fixture.head_sha
-    assert isinstance(AcceptanceGitHubClient.instance, AcceptanceGitHubClient)
-    assert AcceptanceGitHubClient.instance.posted_events == ["REQUEST_CHANGES"]
-    request_artifacts = Path(cast("str", request_payload["artifacts_dir"]))
-    for artifact in (
-        "snapshot.json",
-        "patch.diff",
-        "bundle-manifest.json",
-        "validated-review.json",
-        "github-review.json",
-        "result.json",
-    ):
-        assert (request_artifacts / artifact).is_file()
-    request_patch = (request_artifacts / "patch.diff").read_text(encoding="utf-8")
-    assert "+feature\n" in request_patch
-    assert "+fixed\n" not in request_patch
 
     (fixture.repo / "file.txt").write_text("fixed\n", encoding="utf-8")
     submit_status, submit_payload = _run_submit_cli(
         monkeypatch,
         capsys,
         fixture,
-        tmp_path / "submit",
+        Path(".pr-loopr"),
     )
     assert submit_status == 0
     assert set(submit_payload) == SUBMIT_SUCCESS_KEYS
@@ -397,35 +447,16 @@ def test_cross_agent_request_submit_rereview_flow(
     assert submit_payload["resulting_head_sha"] == submit_payload["commit_sha"]
 
     resulting_head = cast("str", submit_payload["resulting_head_sha"])
-    approve_status, approve_payload, approve_runner = _run_review_cli(
+    approve_runner = _assert_review_result(
         monkeypatch,
         capsys,
         fixture,
-        _review_snapshot(fixture, head_sha=resulting_head),
-        "APPROVE",
+        head_sha=resulting_head,
+        verdict="APPROVE",
+        expected_patch="+fixed\n",
+        rejected_patch="+feature\n",
     )
-    assert approve_status == 0
-    assert set(approve_payload) == REVIEW_SUCCESS_KEYS
-    assert approve_payload["verdict"] == "APPROVE"
-    assert approve_payload["head_sha"] == resulting_head
-    assert isinstance(AcceptanceGitHubClient.instance, AcceptanceGitHubClient)
-    assert AcceptanceGitHubClient.instance.posted_events == ["APPROVE"]
-    approve_artifacts = Path(cast("str", approve_payload["artifacts_dir"]))
-    approve_patch = (approve_artifacts / "patch.diff").read_text(encoding="utf-8")
-    assert "+fixed\n" in approve_patch
-    assert "+feature\n" not in approve_patch
-
-    for review_runner in (request_runner, approve_runner):
-        review_programs = {command[0] for command in review_runner.commands if command}
-        assert {"git", "oracle"} <= review_programs
-
-    commands = [
-        *request_runner.commands,
-        *fixture.runner.commands,
-        *approve_runner.commands,
-    ]
-    invoked_programs = {command[0] for command in commands if command}
-    assert not invoked_programs.intersection({"codex", "claude", "cursor"})
+    _assert_host_programs(fixture, request_runner, approve_runner)
 
 
 def test_operational_failure_uses_stable_nonzero_error_schema(
