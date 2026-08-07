@@ -1,43 +1,41 @@
 # loopr
 
 `loopr` is a vendor-neutral agent skill for improving one GitHub pull request
-through independent Oracle/ChatGPT review. The invoking host agent owns planning,
-editing, and repository validation; deterministic skill commands own review
-transport, patch validation, commit creation, and lease-protected pushes.
+through independent Oracle/ChatGPT review. The host agent owns planning, editing,
+and repository QA; deterministic skill commands own review transport, patch
+validation, commit creation, and lease-protected pushes.
 
-The canonical implementation lives under `skills/loopr/`. Compatible hosts
-discover it through:
+## Supported clients
 
-- `.agents/skills/loopr` for Codex CLI, Cursor CLI, and compatible clients;
-- `.claude/skills/loopr` for Claude Code.
+The canonical skill lives at `skills/loopr/`. Supported hosts discover that same
+directory through symlinks:
 
-No implementation agent is launched by the runtime code, and no compatibility
-CLI is provided at the repository root.
+- Codex CLI: `.agents/skills/loopr`
+- Claude Code: `.claude/skills/loopr`
+- Cursor CLI: `.agents/skills/loopr`
 
-## Workflow
+There is no client-specific copy, runtime fork, or repository-root compatibility
+CLI. Client-specific discovery instructions, when needed, point to the canonical
+skill rather than changing production code.
 
-1. Review the exact current PR head.
-2. When the verdict is `REQUEST_CHANGES`, let the host agent implement the
-   returned blocking findings and run the repository's QA workflow.
-3. Submit the complete workspace patch against the reviewed head.
-4. Review the resulting head and repeat until `APPROVE` or an explicit stop
-   condition.
+## Quick start
 
-## Requirements
+### 1. Prepare the checkout and reviewer
 
-- macOS or Linux
-- Python 3.10 or newer
-- Git and GitHub CLI with ordinary read authentication
-- an `origin` matching the target repository
-- Oracle with Chrome or Chromium and an authenticated browser profile
-- a dedicated reviewer account, different from the PR author
-- `GH_REVIEW_TOKEN` with pull-request review write permission
-- push access and configured Git commit identity when using `submit`
+Requirements:
 
-Only open, non-draft, same-repository GitHub.com pull requests are supported.
-Fork pull requests and GitHub Enterprise are not supported.
+- macOS or Linux;
+- Python 3.10 or newer;
+- Git and authenticated GitHub CLI;
+- an `origin` matching the target GitHub.com repository;
+- an open, non-draft, same-repository pull request;
+- push access and configured Git commit identity for `submit`;
+- Oracle with Chrome or Chromium;
+- a persistent Oracle browser profile authenticated to ChatGPT;
+- `GH_REVIEW_TOKEN` for a dedicated reviewer account that differs from the PR
+  author.
 
-Initialize Oracle's persistent browser profile before the first review:
+Initialize Oracle's browser profile once:
 
 ```console
 oracle --engine browser --browser-manual-login --browser-keep-browser \
@@ -45,59 +43,89 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
 ```
 
 The default profile is `~/.oracle/browser-profile`. Set
-`ORACLE_BROWSER_PROFILE_DIR` to select another location.
+`ORACLE_BROWSER_PROFILE_DIR` to use another persistent profile.
 
-## Commands
-
-Review one exact PR head:
+### 2. Review the exact PR head
 
 ```console
 export GH_REVIEW_TOKEN='...'
 python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
 ```
 
-`review` emits one JSON object. `APPROVE` and `REQUEST_CHANGES` are successful
-domain results; operational, schema, GitHub, and stale-state failures use a
-non-zero exit status.
+`review` emits exactly one JSON object on stdout. Both valid verdicts are
+successful process results:
 
-Submit the host agent's complete workspace patch:
+- `APPROVE`: finish successfully.
+- `REQUEST_CHANGES`: the host agent implements only the returned
+  `blocking_findings`, using `implementation_prompt` as reviewer guidance.
+
+Operational, schema, GitHub, and stale-state failures return non-zero status and
+must be resolved before continuing.
+
+### 3. Let the host edit and validate
+
+After `REQUEST_CHANGES`, the invoking Codex CLI, Claude Code, Cursor CLI, or
+other compatible host edits the current checkout and runs the repository's
+normal QA. `loopr` does not launch an implementation agent and does not select or
+run repository QA.
+
+### 4. Submit against the reviewed head
 
 ```console
 python3 skills/loopr/scripts/loopr.py submit \
   --pr <NUMBER_OR_URL> \
-  --expected-head <SHA>
+  --expected-head <REVIEWED_HEAD_SHA>
 ```
 
-`submit` verifies repository identity, the expected local and remote head,
-conflicts, whitespace, patch content, known credential values, and repeated
-base/head snapshots. It stages the complete patch, creates one hook-free
-unsigned commit, pushes with an explicit force-with-lease bound to the expected
-head, and confirms the resulting GitHub PR head.
+`submit` verifies repository identity, local and remote head binding, conflicts,
+whitespace, patch content, known credential values, and repeated base/head
+snapshots. It stages the complete intended patch, creates one hook-free unsigned
+commit, pushes with an explicit force-with-lease bound to the reviewed head, and
+confirms the resulting GitHub PR head.
 
-See `skills/loopr/references/command-contracts.md` for the complete JSON schemas,
-exit classes, race behavior, and artifact contracts.
+### 5. Re-review and stop deterministically
 
-## Safety and artifacts
+Run a fresh `review` against the resulting head. Repeat the host edit/QA and
+`submit` sequence only when the fresh verdict is `REQUEST_CHANGES`.
 
-The host agent owns editing and local QA. `review` never edits or pushes, and
-`submit` never plans changes, interprets findings, runs tests, or launches a
-model process. CI status is not an approval gate.
+Choose an iteration limit before starting. Finish only on a fresh `APPROVE`;
+otherwise stop when the configured limit is reached. The host owns this loop and
+must not manufacture approval after a limit or operational failure.
 
-Each command writes bounded, permission-restricted audit artifacts under
-`.pr-loopr/runs/`. Known credential values are rejected or redacted, review
-writes are anchored to the reviewed commit, and remote updates use explicit
-head binding and lease protection.
+## Contracts and artifacts
 
-## Codebase reduction
+The stable version-1 success and error schemas, exit classes, race behavior, and
+artifact contracts are documented in
+`skills/loopr/references/command-contracts.md`.
 
-The legacy migration removed the 4,679-line root `loopr.py` orchestrator, so
-root production code decreased from 4,679 lines to 0. The only production
-Python now lives in `skills/loopr/scripts/`.
+Each command writes bounded, permission-restricted audit artifacts below
+`.pr-loopr/runs/` by default. Review artifacts record the frozen PR snapshot,
+review evidence, validated Oracle result, GitHub review metadata, and final
+result. Submit artifacts record the staged patch, commit metadata, push metadata,
+and final result.
 
-`github.py` and `submit_core.py` remain the largest modules because they contain
-the shared GitHub snapshot/race checks and deterministic commit/push state
-machine respectively. They are focused command infrastructure rather than an
-agent orchestrator or containment framework.
+For executable cross-client smoke tests, troubleshooting, reviewer setup, and
+stale-head recovery, see `skills/loopr/references/operations.md`.
+
+## Safety and limitations
+
+- `review` never edits, commits, pushes, or launches an implementation agent.
+- `submit` never plans changes, interprets findings, runs tests, or launches a
+  model process.
+- Known credential values are rejected or redacted from review and audit paths.
+- Reviews are anchored to the exact reviewed commit; pushes are bound to the
+  expected head with an explicit lease.
+- GitHub.com only; GitHub Enterprise and fork pull requests are unsupported.
+- CI status is not an approval gate.
+- The runtime does not sandbox or contain the host agent.
+
+## Migration note
+
+The legacy migration removed the 4,679-line repository-root `loopr.py`
+orchestrator, reducing root production Python from 4,679 lines to 0. Surviving
+production code lives only under `skills/loopr/scripts/`.
+
+The completed implementation order is #15 → (#16 and #17) → #18 → #19.
 
 ## Development
 

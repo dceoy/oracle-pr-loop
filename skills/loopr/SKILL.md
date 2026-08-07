@@ -17,6 +17,8 @@ Use this skill to review and improve one pull request without embedding or launc
 6. Obtain a fresh Oracle/ChatGPT review for the resulting head.
 7. Repeat until `APPROVE`, an explicit stop condition, or the iteration limit.
 
+Choose the iteration limit before starting. The host agent owns the loop and must stop rather than manufacture approval when that limit is reached.
+
 ## Responsibilities
 
 - **Host agent:** Plan changes, edit the repository, run local validation, and decide how to address review findings.
@@ -54,4 +56,6 @@ Operational and stale-state failures use non-zero exit statuses and structured e
 
 Both commands require Python 3, Git, GitHub CLI, ordinary GitHub read authentication, a matching local `origin`, and an open non-draft same-repository GitHub.com PR. `submit` additionally requires push access and configured Git commit identity. `review` additionally requires Oracle, Chrome/Chromium, an authenticated Oracle browser profile, and `GH_REVIEW_TOKEN` for a dedicated reviewer account.
 
-Artifacts default to `.pr-loopr/runs/`. CI status is not an approval condition. Fork PRs and GitHub Enterprise are unsupported. `review` does not edit, commit, push, or launch an implementation agent. `submit` does not plan changes, edit files, run repository QA, interpret review findings, or invoke an implementation agent. The host agent owns iteration around the two commands; no repository-root compatibility wrapper is provided. See `references/command-contracts.md` for the public schemas.
+Artifacts default to `.pr-loopr/runs/`. CI status is not an approval condition. Fork PRs and GitHub Enterprise are unsupported. `review` does not edit, commit, push, or launch an implementation agent. `submit` does not plan changes, edit files, run repository QA, interpret review findings, or invoke an implementation agent. The host agent owns iteration around the two commands; no repository-root compatibility wrapper is provided.
+
+See `references/command-contracts.md` for the public JSON and exit-status contracts. See `references/operations.md` for Codex CLI, Claude Code, and Cursor CLI discovery, manual end-to-end smoke tests, Oracle login setup, troubleshooting, and stale-head recovery.
