@@ -7,7 +7,7 @@ maintainers = [{name = "dceoy", email = "1938249+dceoy@users.noreply.github.com"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">= 3.10"
+requires-python = ">= 3.12"
 dependencies = []
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -17,6 +17,7 @@ classifiers = [
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
   "Intended Audience :: Developers",
   "Topic :: Software Development :: Quality Assurance",
 ]
@@ -100,6 +101,7 @@ ignore = [
   "missing-trailing-comma",                     # COM812
   "boolean-type-hint-positional-argument",      # FBT001
   "boolean-default-value-positional-argument",  # FBT002
+  "datetime-timezone-utc",                      # UP017
 ]
 
 [tool.ruff.lint.per-file-ignores]
