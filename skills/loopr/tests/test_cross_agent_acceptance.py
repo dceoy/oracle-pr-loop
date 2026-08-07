@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
 from test_review_command import (
@@ -16,6 +16,7 @@ from test_review_command import (
 from test_submit_command import ScenarioRunner, _fixture_repo
 
 from scripts import loopr as cli, review as review_module
+from scripts.github import GitHubClient
 from scripts.models import (
     EXIT_ORACLE,
     EXIT_RACE,
@@ -104,11 +105,13 @@ class RecordingScenarioRunner(ScenarioRunner):
 
 
 class AcceptanceReviewRunner(CommandRunner):
-    """Fake only the external Oracle process while preserving review orchestration."""
+    """Fake Oracle while retaining production local subprocess execution."""
 
     def __init__(self, oracle_payload: JsonObject) -> None:
         """Initialize one deterministic Oracle response and command record."""
-        super().__init__({"GH_REVIEW_TOKEN": "token"})
+        super().__init__()
+        self.source_env["GH_REVIEW_TOKEN"] = "token"
+        self.secrets.add("token")
         self.oracle_payload = oracle_payload
         self.commands: list[tuple[str, ...]] = []
 
@@ -124,21 +127,31 @@ class AcceptanceReviewRunner(CommandRunner):
         max_output: int = 24 * 1024 * 1024,
         watch_path: Path | None = None,
     ) -> CommandResult:
-        """Materialize fake Oracle output instead of launching an external model."""
-        del cwd, env, timeout, input_text, check, max_output
+        """Fake Oracle only; execute local Git through the production runner."""
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
-        if not argv or argv[0] != "oracle":
-            message = f"unexpected review subprocess: {argv!r}"
-            raise AssertionError(message)
-        if watch_path is None:
-            raise AssertionError("Oracle invocation must provide a watched output path")
-        watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
-        return CommandResult(args=argv, returncode=0, stdout=b"", stderr="")
+        if argv and argv[0] == "oracle":
+            if watch_path is None:
+                raise AssertionError("Oracle invocation must provide a watched output path")
+            watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
+            return CommandResult(args=argv, returncode=0, stdout=b"", stderr="")
+        return super().run(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            input_text=input_text,
+            check=check,
+            max_output=max_output,
+            watch_path=watch_path,
+        )
 
 
-class AcceptanceGitHubClient(FakeGitHubClient):
-    """Fake GitHub network I/O while exposing real evidence and review contracts."""
+class AcceptanceGitHubClient(GitHubClient):
+    """Fake GitHub network I/O while retaining production immutable Git reads."""
+
+    instance: ClassVar[AcceptanceGitHubClient | None] = None
+    snapshots: ClassVar[list[PullRequest]] = []
 
     def __init__(
         self,
@@ -146,38 +159,28 @@ class AcceptanceGitHubClient(FakeGitHubClient):
         repo_dir: Path,
         token: str,
     ) -> None:
-        """Initialize one deterministic GitHub review transport."""
+        """Initialize deterministic GitHub snapshots around real local Git evidence."""
         super().__init__(runner, repo_dir, token)
+        type(self).instance = self
+        self._snapshots = list(type(self).snapshots)
+        self.post_count = 0
         self.posted_events: list[str] = []
 
-    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Return deterministic UTF-8 patch evidence without GitHub network I/O."""
-        del max_output
-        return (
-            b"diff --git a/file.txt b/file.txt\n"
-            b"--- a/file.txt\n"
-            b"+++ b/file.txt\n"
-            b"@@ -1 +1 @@\n"
-            b"-original\n"
-            b"+fixed\n"
-        )
+    def initialize(self, _pr_value: str) -> None:
+        """Bind fake network identity to the configured disposable PR snapshot."""
+        if not self._snapshots:
+            raise AssertionError("acceptance review requires at least one PR snapshot")
+        initial = self._snapshots[0]
+        self.repository = initial.repository
+        self.number = initial.number
+        self.url = initial.url
+        self.reviewer_login = "reviewer"
 
-    def tracked_paths(self, _pull_request: PullRequest) -> tuple[str, ...]:
-        """Expose only the changed fixture path as tracked evidence."""
-        return ("file.txt",)
-
-    def changed_file_bytes(
-        self,
-        _pull_request: PullRequest,
-        path: str,
-        *,
-        max_output: int,
-    ) -> bytes | None:
-        """Return bounded text evidence for the changed fixture file."""
-        del max_output
-        if path != "file.txt":
-            return None
-        return b"fixed\n"
+    def snapshot(self) -> PullRequest:
+        """Return the next deterministic GitHub snapshot."""
+        if not self._snapshots:
+            raise AssertionError("acceptance GitHub snapshot sequence was exhausted")
+        return self._snapshots.pop(0)
 
     def post_review(
         self,
@@ -285,7 +288,7 @@ def _run_review_cli(
     pull_request: PullRequest,
     verdict: str,
 ) -> tuple[int, dict[str, object], AcceptanceReviewRunner]:
-    """Run the public review CLI with only Oracle/GitHub external I/O faked."""
+    """Run the public review CLI with only Oracle/GitHub network I/O faked."""
     AcceptanceGitHubClient.snapshots = [pull_request, pull_request, pull_request]
     monkeypatch.setattr(review_module, "GitHubClient", AcceptanceGitHubClient)
     runner = AcceptanceReviewRunner(_oracle_payload(pull_request, verdict=verdict))
@@ -377,6 +380,9 @@ def test_cross_agent_request_submit_rereview_flow(
         "result.json",
     ):
         assert (request_artifacts / artifact).is_file()
+    request_patch = (request_artifacts / "patch.diff").read_text(encoding="utf-8")
+    assert "+feature\n" in request_patch
+    assert "+fixed\n" not in request_patch
 
     (fixture.repo / "file.txt").write_text("fixed\n", encoding="utf-8")
     submit_status, submit_payload = _run_submit_cli(
@@ -404,6 +410,14 @@ def test_cross_agent_request_submit_rereview_flow(
     assert approve_payload["head_sha"] == resulting_head
     assert isinstance(AcceptanceGitHubClient.instance, AcceptanceGitHubClient)
     assert AcceptanceGitHubClient.instance.posted_events == ["APPROVE"]
+    approve_artifacts = Path(cast("str", approve_payload["artifacts_dir"]))
+    approve_patch = (approve_artifacts / "patch.diff").read_text(encoding="utf-8")
+    assert "+fixed\n" in approve_patch
+    assert "+feature\n" not in approve_patch
+
+    for review_runner in (request_runner, approve_runner):
+        review_programs = {command[0] for command in review_runner.commands if command}
+        assert {"git", "oracle"} <= review_programs
 
     commands = [
         *request_runner.commands,
@@ -411,7 +425,6 @@ def test_cross_agent_request_submit_rereview_flow(
         *approve_runner.commands,
     ]
     invoked_programs = {command[0] for command in commands if command}
-    assert "oracle" in invoked_programs
     assert not invoked_programs.intersection({"codex", "claude", "cursor"})
 
 
