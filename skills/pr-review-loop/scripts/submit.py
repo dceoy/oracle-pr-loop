@@ -122,8 +122,7 @@ class _PushAwareRunner(CommandRunner):
         )
         retry_deadline = (
             time.monotonic() + submission.POLL_TIMEOUT_SECONDS
-            if self._pushed_commit_sha is not None
-            and argv[:3] == ("gh", "pr", "view")
+            if self._pushed_commit_sha is not None and argv[:3] == ("gh", "pr", "view")
             else None
         )
         while True:
@@ -402,9 +401,7 @@ class _SubmitBoundaryRunner(CommandRunner):
     ) -> CommandResult:
         """Freeze PR refs and reject unsafe staged metadata or gitlinks."""
         argv = tuple(str(value) for value in args)
-        is_real_push = (
-            argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
-        )
+        is_real_push = argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
         if is_real_push:
             self._reject_gitlink_changes(
                 argv=argv,
@@ -424,10 +421,9 @@ class _SubmitBoundaryRunner(CommandRunner):
             max_output=max_output,
             watch_path=watch_path,
         )
-        if (
-            argv[: len(STAGED_RAW_COMMAND)] == STAGED_RAW_COMMAND
-            and self.contains_secret(result.stdout)
-        ):
+        if argv[
+            : len(STAGED_RAW_COMMAND)
+        ] == STAGED_RAW_COMMAND and self.contains_secret(result.stdout):
             raise LooprError(
                 EXIT_PRECONDITION,
                 "credentials",

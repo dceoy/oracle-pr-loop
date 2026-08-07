@@ -28,20 +28,18 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
-PR_FIELDS = ",".join(
-    (
-        "url",
-        "number",
-        "state",
-        "isDraft",
-        "baseRefName",
-        "baseRefOid",
-        "headRefName",
-        "headRefOid",
-        "headRepository",
-        "headRepositoryOwner",
-    )
-)
+PR_FIELDS = ",".join((
+    "url",
+    "number",
+    "state",
+    "isDraft",
+    "baseRefName",
+    "baseRefOid",
+    "headRefName",
+    "headRefOid",
+    "headRepository",
+    "headRepositoryOwner",
+))
 MAX_PATCH_BYTES = 20 * 1024 * 1024
 MAX_STAGED_CONTENT_BYTES = MAX_PATCH_BYTES
 GITLINK_MODE = b"160000"
@@ -82,9 +80,7 @@ class SubmitGitHubClient:
         """Resolve and cross-check the local repository and target PR."""
         root = self._git_text(["rev-parse", "--show-toplevel"]).strip()
         self.repo_dir = Path(root).resolve()
-        fetch_repo = normalize_repo(
-            self._git_text(["remote", "get-url", "origin"])
-        )
+        fetch_repo = normalize_repo(self._git_text(["remote", "get-url", "origin"]))
         push_repo = normalize_repo(
             self._git_text(["remote", "get-url", "--push", "origin"])
         )
@@ -131,9 +127,7 @@ class SubmitGitHubClient:
 
     def snapshot(self) -> SubmissionSnapshot:
         """Return one strictly validated remote PR snapshot."""
-        payload = self._gh_text(
-            ["pr", "view", self.url, "--json", PR_FIELDS]
-        )
+        payload = self._gh_text(["pr", "view", self.url, "--json", PR_FIELDS])
         data = _json_object(payload)
         head_repository = _object(
             data.get("headRepository"),
@@ -673,9 +667,7 @@ def _json_object(text: str) -> JsonObject:
             "github_schema",
             "GitHub returned malformed JSON",
         ) from exc
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise LooprError(
             EXIT_GITHUB,
             "github_schema",

@@ -139,13 +139,11 @@ def _requested_command(argv: Sequence[str] | None) -> str:
 
 def _emit_error(command: str, category: str, message: str) -> None:
     """Emit the stable structured failure schema."""
-    _emit(
-        {
-            "schema_version": 1,
-            "command": command,
-            "error": {"category": category, "message": message},
-        }
-    )
+    _emit({
+        "schema_version": 1,
+        "command": command,
+        "error": {"category": category, "message": message},
+    })
 
 
 def _emit(value: JsonObject) -> None:
