@@ -1,4 +1,4 @@
-"""Regression tests for Oracle review resource bounds."""
+"""Regression tests for review resource bounds."""
 
 from __future__ import annotations
 
@@ -78,50 +78,41 @@ def test_bundle_rejects_excessive_instruction_file_inventory(tmp_path: Path) -> 
     assert "instruction-file limit" in str(captured.value)
 
 
-class _HugeArgsGitHub:
-    """Expose valid but individually bounded attachments whose argv is too large."""
-
-    def __init__(self, repo_dir: Path) -> None:
-        self.repo_dir = repo_dir
-
-    def tracked_paths(self, _pull_request: PullRequest) -> tuple[str, ...]:
-        """Return enough long instruction paths to overflow the Oracle argv budget."""
-        return tuple(
-            f"docs/{index:04d}-{'x' * 170}/AGENTS.md"
-            for index in range(MAX_ORACLE_ATTACHMENTS - 2)
-        )
-
-    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Return a minimal valid patch."""
-        del max_output
-        return b"diff --git a/file.py b/file.py\n"
-
-    def changed_file_bytes(
-        self,
-        _pull_request: PullRequest,
-        _path: str,
-        *,
-        max_output: int,
-    ) -> bytes:
-        """Return one tiny instruction file body."""
-        del max_output
-        return b"instruction\n"
-
-
-def test_bundle_rejects_oracle_argument_budget(tmp_path: Path) -> None:
-    """Attachment argv growth is bounded before Oracle is launched."""
+def test_oracle_review_rejects_excessive_attachment_count(tmp_path: Path) -> None:
+    """The Oracle command cannot receive an unbounded number of --file arguments."""
     runner = CommandRunner()
     writer = ArtifactWriter(tmp_path / "artifacts", runner)
-    github = cast("GitHubClient", _HugeArgsGitHub(tmp_path))
+    github = GitHubClient(runner, tmp_path, "token")
     oracle = OracleClient(runner, github, writer, "heavy")
-
-    attachments = oracle.build_bundle(_sample_pr())
-    argv_bytes = sum(len(str(path).encode("utf-8")) + 1 for path in attachments)
-    assert len(attachments) <= MAX_ORACLE_ATTACHMENTS
-    assert argv_bytes > MAX_ORACLE_ARG_BYTES
+    attachments = tuple(
+        Path(f"attachment-{index}.txt") for index in range(MAX_ORACLE_ATTACHMENTS + 1)
+    )
 
     with pytest.raises(LooprError) as captured:
         oracle.review(_sample_pr(), attachments)
 
-    assert captured.value.category == "oracle"
-    assert "argument budget" in str(captured.value)
+    assert captured.value.category == "bundle"
+    assert "attachment count" in str(captured.value)
+
+
+def test_oracle_review_rejects_excessive_argument_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The complete Oracle argv is byte-bounded before subprocess execution."""
+    runner = CommandRunner()
+    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    github = GitHubClient(runner, tmp_path, "token")
+    oracle = OracleClient(runner, github, writer, "heavy")
+    oversized_path = Path("x" * MAX_ORACLE_ARG_BYTES)
+
+    def unexpected_run(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Oracle subprocess must not run with oversized arguments")
+
+    monkeypatch.setattr(runner, "run", unexpected_run)
+
+    with pytest.raises(LooprError) as captured:
+        oracle.review(_sample_pr(), (oversized_path,))
+
+    assert captured.value.category == "bundle"
+    assert "arguments exceed" in str(captured.value)
