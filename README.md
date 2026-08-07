@@ -1,123 +1,110 @@
 # loopr
 
-The current root `loopr.py` executable runs a synchronous
-Oracle-ChatGPT-Codex review-and-fix loop for one GitHub pull request:
+`loopr` is a vendor-neutral agent skill for improving one GitHub pull request
+through independent Oracle/ChatGPT review. The invoking host agent owns planning,
+editing, and repository validation; deterministic skill commands own review
+transport, patch validation, commit creation, and lease-protected pushes.
 
-1. Snapshot the exact PR head.
-2. Ask ChatGPT through Oracle for an independent review.
-3. Post the review with a dedicated GitHub reviewer account.
-4. Let Codex fix validated blockers in a disposable worktree.
-5. Validate, commit, and lease-protect the push before reviewing again.
-
-The legacy orchestrator owns GitHub access and Git operations. Codex receives
-neither GitHub credentials nor push authority.
-
-## Agent skill transition
-
-`skills/loopr/` is the canonical location for the vendor-neutral agent skill.
-Compatible hosts discover the same directory through:
+The canonical implementation lives under `skills/loopr/`. Compatible hosts
+discover it through:
 
 - `.agents/skills/loopr` for Codex CLI, Cursor CLI, and compatible clients;
 - `.claude/skills/loopr` for Claude Code.
 
-The host agent plans, edits, and runs repository validation. Oracle/ChatGPT
-independently reviews the exact pull-request head and returns a structured
-verdict. Deterministic skill scripts inspect the pull request, transport
-reviews, validate the complete workspace patch, create one commit, and push the
-PR branch with an explicit lease. GitHub and Git remain the sources of
-pull-request identity, commit state, reviews, and remote branch updates.
+No implementation agent is launched by the runtime code, and no compatibility
+CLI is provided at the repository root.
 
-The vendor-neutral commands are:
+## Workflow
 
-```console
-python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
-python3 skills/loopr/scripts/loopr.py submit \
-  --pr <NUMBER_OR_URL> \
-  --expected-head <SHA>
-```
-
-The root executable remains unchanged until issue #18 removes the legacy
-orchestrator and wires the complete host-driven iteration around these command
-contracts.
+1. Review the exact current PR head.
+2. When the verdict is `REQUEST_CHANGES`, let the host agent implement the
+   returned blocking findings and run the repository's QA workflow.
+3. Submit the complete workspace patch against the reviewed head.
+4. Review the resulting head and repeat until `APPROVE` or an explicit stop
+   condition.
 
 ## Requirements
 
-- Linux
+- macOS or Linux
 - Python 3.10 or newer
-- Node.js 24 or newer
-- `git` and an authenticated, push-capable `origin`
-- [GitHub CLI](https://cli.github.com/) authenticated for read access
-- [Oracle](https://github.com/steipete/oracle) with Chrome or Chromium
-- [Codex CLI](https://github.com/openai/codex) with `codex login` completed
-- A dedicated reviewer account, different from the PR author, with repository
-  administrator access
-- A reviewer token in `GH_REVIEW_TOKEN` with pull-request review write
-  permission
+- Git and GitHub CLI with ordinary read authentication
+- an `origin` matching the target repository
+- Oracle with Chrome or Chromium and an authenticated browser profile
+- a dedicated reviewer account, different from the PR author
+- `GH_REVIEW_TOKEN` with pull-request review write permission
+- push access and configured Git commit identity when using `submit`
 
 Only open, non-draft, same-repository GitHub.com pull requests are supported.
-The local user must be able to push the PR head branch.
+Fork pull requests and GitHub Enterprise are not supported.
 
-## Oracle login
-
-Initialize Oracle's persistent browser profile and sign in to ChatGPT:
+Initialize Oracle's persistent browser profile before the first review:
 
 ```console
 oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-The default profile is `~/.oracle/browser-profile`. Use
+The default profile is `~/.oracle/browser-profile`. Set
 `ORACLE_BROWSER_PROFILE_DIR` to select another location.
 
-## Usage
+## Commands
+
+Review one exact PR head:
 
 ```console
 export GH_REVIEW_TOKEN='...'
-python3 loopr.py --pr 123
+python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
 ```
 
-A canonical PR URL is also accepted:
+`review` emits one JSON object. `APPROVE` and `REQUEST_CHANGES` are successful
+domain results; operational, schema, GitHub, and stale-state failures use a
+non-zero exit status.
+
+Submit the host agent's complete workspace patch:
 
 ```console
-python3 loopr.py --pr https://github.com/OWNER/REPO/pull/123
+python3 skills/loopr/scripts/loopr.py submit \
+  --pr <NUMBER_OR_URL> \
+  --expected-head <SHA>
 ```
 
-Validate the environment without invoking models or changing GitHub:
+`submit` verifies repository identity, the expected local and remote head,
+conflicts, whitespace, patch content, known credential values, and repeated
+base/head snapshots. It stages the complete patch, creates one hook-free
+unsigned commit, pushes with an explicit force-with-lease bound to the expected
+head, and confirms the resulting GitHub PR head.
+
+See `skills/loopr/references/command-contracts.md` for the complete JSON schemas,
+exit classes, race behavior, and artifact contracts.
+
+## Safety and artifacts
+
+The host agent owns editing and local QA. `review` never edits or pushes, and
+`submit` never plans changes, interprets findings, runs tests, or launches a
+model process. CI status is not an approval gate.
+
+Each command writes bounded, permission-restricted audit artifacts under
+`.pr-loopr/runs/`. Known credential values are rejected or redacted, review
+writes are anchored to the reviewed commit, and remote updates use explicit
+head binding and lease protection.
+
+## Codebase reduction
+
+The legacy migration removed the 4,679-line root `loopr.py` orchestrator, so
+root production code decreased from 4,679 lines to 0. The only production
+Python now lives in `skills/loopr/scripts/`.
+
+`github.py` and `submit_core.py` remain the largest modules because they contain
+the shared GitHub snapshot/race checks and deterministic commit/push state
+machine respectively. They are focused command infrastructure rather than an
+agent orchestrator or containment framework.
+
+## Development
 
 ```console
-python3 loopr.py --pr 123 --dry-run
-```
-
-### Options
-
-- `--repo-dir DIR`: local checkout; defaults to the current directory.
-- `--max-iterations N`: maximum Oracle reviews; defaults to `5`.
-- `--oracle-thinking-time LEVEL`: `light`, `standard`, `extended`, or `heavy`;
-  defaults to `heavy`.
-- `--artifacts-dir DIR`: audit directory; defaults to `.pr-loopr`.
-- `--dry-run`: run preflight validation only.
-
-## Safety model
-
-`loopr` is intended for trusted internal repositories. Pull-request content and
-model output are treated as untrusted data, but Codex's workspace sandbox does
-not prevent reads outside the worktree. Run it only where the PR may safely read
-files available to the operator account.
-
-The loop fails closed on malformed reviews, credential collisions, unsafe
-patches, context limits, stale approvals, concurrent head changes, or failed
-pushes. It does not automatically merge, support forks, remediate CI, resolve
-human review threads, or run as a daemon.
-
-CI status is not an approval gate; failing or missing checks do not prevent
-approval.
-
-Each run writes permission-restricted audit artifacts under `.pr-loopr/runs/`,
-including the PR snapshot, review inputs and outputs, state transitions,
-resulting patch, and pushed commit SHA.
-
-## Tests
-
-```console
-python3 -m unittest discover -s tests -v
+uv sync --dev
+uv run pytest
+uv run ruff check skills/loopr
+uv run ruff format --check skills/loopr
+uv run pyright
 ```

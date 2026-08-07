@@ -1,7 +1,7 @@
 [project]
 name = "loopr"
 version = "0.1.0"
-description = "Synchronous, local Oracle-ChatGPT-Codex review loop for a single GitHub pull request"
+description = "Vendor-neutral Oracle/ChatGPT pull-request review and submission skill"
 authors = [{name = "dceoy", email = "1938249+dceoy@users.noreply.github.com"}]
 maintainers = [{name = "dceoy", email = "1938249+dceoy@users.noreply.github.com"}]
 license = "AGPL-3.0-or-later"
@@ -13,6 +13,7 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python",
   "Programming Language :: Python :: 3",
@@ -25,10 +26,6 @@ Repository = "https://github.com/dceoy/loopr.git"
 
 [tool.uv]
 package = false
-# Prefer an existing system interpreter over uv's managed python-build-standalone
-# downloads: some python-build-standalone builds omit os.pidfd_open, which this
-# project's process supervisor requires and fails closed without.
-python-preference = "system"
 
 [dependency-groups]
 dev = [
@@ -106,21 +103,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = [
-  "docstring-missing-returns",    # DOC201
-  "docstring-missing-exception",  # DOC501
-  "import-private-name",          # PLC2701
-  "too-many-public-methods",      # PLR0904
-  "magic-value-comparison",       # PLR2004
-  "no-self-use",                  # PLR6301
-  "assert",                       # S101
-  "hardcoded-password-string",    # S105
-  "hardcoded-password-func-arg",  # S106
-  "private-member-access",        # SLF001
-  "unused-function-argument",     # ARG001
-  "unused-method-argument",       # ARG002
-  "unused-lambda-argument",       # ARG005
-]
 "skills/loopr/scripts/**/*.py" = [
   "docstring-missing-returns",              # DOC201
   "docstring-missing-exception",           # DOC501
@@ -176,12 +158,6 @@ venv = ".venv"
 typeCheckingMode = "strict"
 
 [[tool.pyright.executionEnvironments]]
-root = "tests"
-extraPaths = ["."]
-reportPrivateUsage = "none"
-reportUnknownLambdaType = "none"
-
-[[tool.pyright.executionEnvironments]]
 root = "skills/loopr"
 extraPaths = ["skills/loopr"]
 reportPrivateUsage = "none"
@@ -190,21 +166,21 @@ reportUnknownVariableType = "none"
 
 [tool.pytest.ini_options]
 addopts = [
-  "--cov=loopr",
+  "--cov=scripts",
   "--cov-branch",
   "--doctest-modules",
   "--capture=no",
 ]
-pythonpath = [".", "skills/loopr"]
-testpaths = ["tests", "skills/loopr/tests"]
+pythonpath = ["skills/loopr"]
+testpaths = ["skills/loopr/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 minversion = "9.0"
 
 [tool.coverage.run]
-source = ["loopr"]
-omit = ["tests/**", "skills/loopr/tests/**"]
+source = ["scripts"]
+omit = ["skills/loopr/tests/**"]
 
 [tool.coverage.report]
 show_missing = true

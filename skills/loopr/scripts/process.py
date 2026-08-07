@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -167,11 +166,8 @@ class CommandRunner:
         When `watch_path` is given, its on-disk size is polled alongside the
         stdout/stderr spools so a process that writes its real payload to a
         side file (rather than stdout) cannot exhaust disk during a long
-        timeout window; the process group is terminated as soon as it grows
-        past `max_output`. Because the child runs in its own session, a
-        `KeyboardInterrupt` raised anywhere during monitoring is caught to
-        terminate and reap the child before propagating, so an interrupt
-        cannot leave it running past the command's lifetime.
+        timeout window. A timeout, output overflow, or `KeyboardInterrupt`
+        terminates and reaps the direct child before control returns.
         """
         argv = tuple(str(value) for value in args)
         if not argv or any("\0" in value for value in argv):
@@ -198,7 +194,6 @@ class CommandRunner:
                 stdin=stdin_file if input_text is not None else subprocess.DEVNULL,
                 stdout=stdout_file,
                 stderr=stderr_file,
-                start_new_session=True,
                 shell=False,
             )
             try:
@@ -215,7 +210,7 @@ class CommandRunner:
                         watch_path,
                     )
                     if time.monotonic() >= deadline:
-                        self._terminate_group(proc)
+                        self._terminate_process(proc)
                         command = self.redact(" ".join(argv))
                         message = f"command timed out after {timeout}s: {command}"
                         raise CommandError(message)
@@ -230,20 +225,10 @@ class CommandRunner:
                     argv,
                     watch_path,
                 )
-                self._terminate_group(proc)
-                self._enforce_output_bounds(
-                    proc,
-                    stdout_file,
-                    stderr_file,
-                    max_output,
-                    stderr_limit,
-                    argv,
-                    watch_path,
-                )
                 stdout = self._read_spool(stdout_file, max_output)
                 stderr_bytes = self._read_spool(stderr_file, stderr_limit)
             except BaseException:
-                self._terminate_group(proc)
+                self._terminate_process(proc)
                 raise
 
         stderr = self.redact(stderr_bytes.decode("utf-8", "replace"))
@@ -267,7 +252,7 @@ class CommandRunner:
         argv: tuple[str, ...],
         watch_path: Path | None = None,
     ) -> None:
-        """Terminate the process group as soon as a spool exceeds its bound."""
+        """Terminate the direct child as soon as a spool exceeds its bound."""
         stdout_size = os.fstat(stdout_file.fileno()).st_size
         stderr_size = os.fstat(stderr_file.fileno()).st_size
         watch_size = 0
@@ -280,7 +265,7 @@ class CommandRunner:
             and watch_size <= stdout_limit
         ):
             return
-        self._terminate_group(proc)
+        self._terminate_process(proc)
         command = self.redact(" ".join(argv))
         message = f"command output exceeded bound: {command}"
         raise CommandError(message)
@@ -292,27 +277,8 @@ class CommandRunner:
         return handle.read(limit)
 
     @staticmethod
-    def _group_exists(pgid: int) -> bool:
-        """Return whether the isolated process group still has any members."""
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return False
-        return True
-
-    @classmethod
-    def _wait_for_group_exit(cls, pgid: int, timeout: float) -> bool:
-        """Poll until the isolated process group is gone or the bound expires."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not cls._group_exists(pgid):
-                return True
-            time.sleep(POLL_INTERVAL_SECONDS)
-        return not cls._group_exists(pgid)
-
-    @staticmethod
     def _wait_for_process_exit(proc: subprocess.Popen[bytes], timeout: float) -> bool:
-        """Wait at most the cleanup budget for the group leader to be reaped."""
+        """Wait at most the cleanup budget for the direct child to be reaped."""
         if proc.poll() is not None:
             return True
         try:
@@ -322,29 +288,16 @@ class CommandRunner:
         return True
 
     @classmethod
-    def _terminate_group(cls, proc: subprocess.Popen[bytes]) -> None:
-        """Terminate and prove exit of the complete subprocess group.
-
-        The group leader exiting does not imply the group is empty: a
-        same-session descendant can outlive it. Every leader wait is bounded,
-        the complete group is signaled by pgid, and cleanup fails closed unless
-        both the leader is reaped and the process group is confirmed absent.
-        """
-        pgid = proc.pid
-        leader_reaped = proc.poll() is not None
-        with suppress(ProcessLookupError):
-            os.killpg(pgid, signal.SIGTERM)
-        if not leader_reaped:
-            leader_reaped = cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS)
-
-        if leader_reaped and cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS):
+    def _terminate_process(cls, proc: subprocess.Popen[bytes]) -> None:
+        """Terminate and reap the direct child within the cleanup budget."""
+        if proc.poll() is not None:
             return
-
         with suppress(ProcessLookupError):
-            os.killpg(pgid, signal.SIGKILL)
-        if not leader_reaped:
-            leader_reaped = cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS)
-        group_gone = cls._wait_for_group_exit(pgid, TERMINATION_GRACE_SECONDS)
-        if leader_reaped and group_gone:
+            proc.terminate()
+        if cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS):
             return
-        raise CommandError("could not prove subprocess group termination")
+        with suppress(ProcessLookupError):
+            proc.kill()
+        if cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS):
+            return
+        raise CommandError("could not reap subprocess")

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from .models import EXIT_PRECONDITION, EXIT_RACE, LooprError, SubmitResult
+from .models import EXIT_PRECONDITION, EXIT_RACE, JsonObject, LooprError, SubmitResult
 from .process import CommandError, CommandResult, CommandRunner
 from .submit import execute_submit as _execute_submit
 
@@ -68,9 +68,7 @@ class _SubmitBoundaryRunner(CommandRunner):
     ) -> CommandResult:
         """Freeze PR refs and reject unsafe staged metadata or gitlinks."""
         argv = tuple(str(value) for value in args)
-        is_real_push = (
-            argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
-        )
+        is_real_push = argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
         if is_real_push:
             self._reject_gitlink_changes(
                 argv=argv,
@@ -105,13 +103,16 @@ class _SubmitBoundaryRunner(CommandRunner):
     def _require_stable_pr_refs(self, output: bytes) -> None:
         """Reject base or head ref rebinding while SHAs remain unchanged."""
         try:
-            payload = json.loads(output.decode("utf-8", "strict"))
+            payload: object = json.loads(output.decode("utf-8", "strict"))
         except (json.JSONDecodeError, UnicodeError):
             return
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) or not all(
+            isinstance(key, str) for key in payload
+        ):
             return
-        base_ref = payload.get("baseRefName")
-        head_ref = payload.get("headRefName")
+        data = cast(JsonObject, payload)
+        base_ref = data.get("baseRefName")
+        head_ref = data.get("headRefName")
         if not isinstance(base_ref, str) or not isinstance(head_ref, str):
             return
         current_refs = (base_ref, head_ref)
@@ -232,7 +233,7 @@ def _contains_gitlink_change(raw: bytes) -> bool:
             )
         old_mode = parts[0][1:]
         new_mode = parts[1]
-        if old_mode == GITLINK_MODE or new_mode == GITLINK_MODE:
+        if GITLINK_MODE in {old_mode, new_mode}:
             return True
         index += path_count
     return False

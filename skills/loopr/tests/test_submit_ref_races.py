@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from test_submit_command import ScenarioRunner, _fixture_repo, _git
 
 from scripts.models import EXIT_RACE, JsonObject, LooprError
-from scripts.process import CommandResult
 from scripts.submit_guard import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
+
+    from scripts.process import CommandResult
 
 
 class RefRebindingRunner(ScenarioRunner):
@@ -66,10 +67,10 @@ class RefRebindingRunner(ScenarioRunner):
 
 @pytest.mark.parametrize(
     ("field", "replacement"),
-    (
+    [
         ("baseRefName", "renamed-main"),
         ("headRefName", "renamed-feature"),
-    ),
+    ],
 )
 def test_ref_rebinding_fails_before_staging(
     tmp_path: Path,
@@ -98,7 +99,7 @@ def test_ref_rebinding_fails_before_staging(
 
     assert captured.value.code == EXIT_RACE
     assert captured.value.category == "stale_state"
-    assert _git(repo, "diff", "--cached", "--name-only") == ""
+    assert not _git(repo, "diff", "--cached", "--name-only")
     assert _git(repo, "rev-parse", "HEAD") == head
     remote_head = _git(
         repo,

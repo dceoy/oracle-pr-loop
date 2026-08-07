@@ -44,6 +44,7 @@ PR_FIELDS = ",".join(
 )
 MAX_PATCH_BYTES = 20 * 1024 * 1024
 MAX_STAGED_CONTENT_BYTES = MAX_PATCH_BYTES
+GITLINK_MODE = b"160000"
 POLL_TIMEOUT_SECONDS = 90
 POLL_INTERVAL_SECONDS = 2
 COMMIT_MESSAGE = "loopr: apply reviewed changes"
@@ -511,8 +512,29 @@ def _require_no_known_credentials_in_staged_blobs(
             )
 
 
+def _staged_object_id(parts: list[bytes]) -> str | None:
+    """Return the staged blob ID, excluding gitlinks from blob scanning."""
+    if parts[1] == GITLINK_MODE:
+        return None
+    try:
+        object_id = parts[3].decode("ascii", "strict")
+    except UnicodeError as exc:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "git",
+            "Git returned a non-ASCII staged object ID",
+        ) from exc
+    if not _is_sha(object_id):
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "git",
+            "Git returned an invalid staged object ID",
+        )
+    return object_id
+
+
 def _staged_object_ids(raw: bytes) -> list[str]:
-    """Parse new object IDs from NUL-delimited staged raw diff records."""
+    """Parse new blob object IDs from NUL-delimited staged raw diff records."""
     if not raw:
         return []
     fields = raw.split(b"\0")
@@ -553,21 +575,8 @@ def _staged_object_ids(raw: bytes) -> list[str]:
                 "Git returned malformed staged diff paths",
             )
         index += path_count
-        try:
-            object_id = parts[3].decode("ascii", "strict")
-        except UnicodeError as exc:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned a non-ASCII staged object ID",
-            ) from exc
-        if not _is_sha(object_id):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned an invalid staged object ID",
-            )
-        if object_id not in seen:
+        object_id = _staged_object_id(parts)
+        if object_id is not None and object_id not in seen:
             seen.add(object_id)
             object_ids.append(object_id)
     return object_ids

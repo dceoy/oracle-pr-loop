@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from test_submit_command import ScenarioRunner, _fixture_repo, _git
 
 from scripts.models import EXIT_PRECONDITION, LooprError
 from scripts.submit_guard import execute_submit
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_escaped_credential_in_path_fails_before_commit(tmp_path: Path) -> None:
