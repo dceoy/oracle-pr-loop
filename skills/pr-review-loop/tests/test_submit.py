@@ -11,7 +11,7 @@ from test_submission import GIT, ScenarioRunner, _fixture_repo, _git, _run_proce
 from scripts import submission as submission_module
 from scripts.models import EXIT_PRECONDITION, EXIT_RACE, JsonObject, LooprError
 from scripts.process import CommandError, CommandResult
-from scripts.submit import execute_guarded as execute_submit
+from scripts.submit import execute_guarded, execute_submit
 
 
 class MultiplePushUrlRunner(ScenarioRunner):
@@ -190,10 +190,6 @@ class BranchOnlyLeaseLossRunner(ScenarioRunner):
             _run_process(
                 [
                     GIT,
-                    "-c",
-                    "push.followTags=false",
-                    "-c",
-                    "push.recurseSubmodules=no",
                     "push",
                     str(self.remote),
                     f"{self.competitor}:refs/heads/feature",
@@ -708,7 +704,7 @@ def test_escaped_credential_in_path_fails_before_commit(tmp_path: Path) -> None:
     runner.secrets.add(credential)
 
     with pytest.raises(LooprError) as captured:
-        execute_submit(
+        execute_guarded(
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
@@ -764,7 +760,7 @@ def test_ref_rebinding_fails_before_staging(
     )
 
     with pytest.raises(LooprError) as captured:
-        execute_submit(
+        execute_guarded(
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
@@ -817,7 +813,7 @@ def test_forged_tracking_ref_cannot_publish_an_unpublished_gitlink(tmp_path: Pat
     _git(submodule, "update-ref", "refs/remotes/origin/main", unpublished_submodule_head)
 
     with pytest.raises(LooprError) as captured:
-        execute_submit(
+        execute_guarded(
             pr_value="1",
             expected_head=expected_head,
             repo_dir=repo,
