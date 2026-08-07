@@ -1,9 +1,9 @@
 ---
-name: loopr
+name: pr-review-loop
 description: Review and improve a pull request through independent Oracle/ChatGPT review while the invoking host agent owns implementation work.
 ---
 
-# loopr
+# pr-review-loop
 
 Use this skill to review and improve one pull request without embedding or launching a particular implementation agent. The canonical skill is compatible with Codex CLI, Claude Code, Cursor CLI, and other clients that support agent skills.
 
@@ -33,7 +33,7 @@ Production skill code must not launch, select, or detect Codex CLI, Claude Code,
 Review one exact PR head:
 
 ```console
-python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
+python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
 `review` validates an open, non-draft, same-repository GitHub.com pull request; binds the operation to exact base and head commits; builds deterministic evidence from immutable Git objects; strictly validates Oracle output; posts one aggregate review anchored to the reviewed head; and emits exactly one machine-readable JSON object on stdout.
@@ -41,7 +41,7 @@ python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
 Submit the host agent's complete workspace patch:
 
 ```console
-python3 skills/loopr/scripts/loopr.py submit \
+python3 skills/pr-review-loop/scripts/cli.py submit \
   --pr <NUMBER_OR_URL> \
   --expected-head <SHA>
 ```
@@ -56,6 +56,6 @@ Operational and stale-state failures use non-zero exit statuses and structured e
 
 Both commands require Python 3, Git, GitHub CLI, ordinary GitHub read authentication, a matching local `origin`, and an open non-draft same-repository GitHub.com PR. `submit` additionally requires push access and configured Git commit identity. `review` additionally requires Oracle, Chrome/Chromium, an authenticated Oracle browser profile, and `GH_REVIEW_TOKEN` for a dedicated reviewer account.
 
-Artifacts default to `.pr-loopr/runs/`. CI status is not an approval condition. Fork PRs and GitHub Enterprise are unsupported. `review` does not edit, commit, push, or launch an implementation agent. `submit` does not plan changes, edit files, run repository QA, interpret review findings, or invoke an implementation agent. The host agent owns iteration around the two commands; no repository-root compatibility wrapper is provided.
+Artifacts default to `.pr-review-loop/runs/`. CI status is not an approval condition. Fork PRs and GitHub Enterprise are unsupported. `review` does not edit, commit, push, or launch an implementation agent. `submit` does not plan changes, edit files, run repository QA, interpret review findings, or invoke an implementation agent. The host agent owns iteration around the two commands; no repository-root compatibility wrapper is provided.
 
 See `references/command-contracts.md` for the public JSON and exit-status contracts. See `references/operations.md` for Codex CLI, Claude Code, and Cursor CLI discovery, manual end-to-end smoke tests, Oracle login setup, troubleshooting, and stale-head recovery.

@@ -1,14 +1,14 @@
-"""Structural tests for the canonical loopr skill layout."""
+"""Structural tests for the canonical pr-review-loop skill layout."""
 
 from __future__ import annotations
 
 import pathlib
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
-CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "loopr"
+CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "pr-review-loop"
 DISCOVERY_LINKS = (
-    REPOSITORY_ROOT / ".agents" / "skills" / "loopr",
-    REPOSITORY_ROOT / ".claude" / "skills" / "loopr",
+    REPOSITORY_ROOT / ".agents" / "skills" / "pr-review-loop",
+    REPOSITORY_ROOT / ".claude" / "skills" / "pr-review-loop",
 )
 UNRELATED_DISCOVERY = (
     (
@@ -51,10 +51,19 @@ def test_legacy_root_orchestrator_is_deleted() -> None:
     )
 
 
-def test_loopr_discovery_links_are_direct_and_canonical() -> None:
+def test_cli_module_is_named_by_responsibility() -> None:
+    """The command entrypoint uses a responsibility-based module name."""
+    _require((CANONICAL_SKILL / "scripts" / "cli.py").is_file(), "missing cli.py")
+    _require(
+        not (CANONICAL_SKILL / "scripts" / "loopr.py").exists(),
+        "legacy branded CLI module still exists",
+    )
+
+
+def test_pr_review_loop_discovery_links_are_direct_and_canonical() -> None:
     """Both clients discover the canonical directory through direct symlinks."""
     canonical = CANONICAL_SKILL.resolve(strict=True)
-    expected_target = pathlib.Path("../../skills/loopr")
+    expected_target = pathlib.Path("../../skills/pr-review-loop")
     for link in DISCOVERY_LINKS:
         _require(link.is_symlink(), f"not a symlink: {link}")
         _require(link.readlink() == expected_target, f"unexpected target: {link}")
@@ -70,7 +79,7 @@ def test_skill_contract_is_vendor_neutral_and_complete() -> None:
     text = (CANONICAL_SKILL / "SKILL.md").read_text(encoding="utf-8")
     normalized = " ".join(text.split())
     required = (
-        "name: loopr",
+        "name: pr-review-loop",
         "Host agent",
         "Oracle/ChatGPT",
         "Skill scripts",
@@ -130,6 +139,10 @@ def test_docs_do_not_advertise_the_legacy_interface() -> None:
     )
     forbidden = (
         "python3 loopr.py",
+        "skills/loopr/",
+        ".agents/skills/loopr",
+        ".claude/skills/loopr",
+        ".pr-loopr/",
         "node.js 24",
         "codex login",
         "disposable worktree",

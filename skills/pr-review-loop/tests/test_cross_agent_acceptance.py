@@ -1,4 +1,4 @@
-"""Cross-agent acceptance tests for the canonical loopr skill workflow."""
+"""Cross-agent acceptance tests for the canonical pr-review-loop skill workflow."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from test_review_command import (
 )
 from test_submit_command import ScenarioRunner, _fixture_repo
 
-from scripts import loopr as cli, review as review_module
+from scripts import cli, review as review_module
 from scripts.github import GitHubClient
 from scripts.models import (
     EXIT_ORACLE,
@@ -35,11 +35,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "loopr"
+CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "pr-review-loop"
 CLIENTS = (
-    ("Codex CLI", Path(".agents/skills/loopr")),
-    ("Claude Code", Path(".claude/skills/loopr")),
-    ("Cursor CLI", Path(".agents/skills/loopr")),
+    ("Codex CLI", Path(".agents/skills/pr-review-loop")),
+    ("Claude Code", Path(".claude/skills/pr-review-loop")),
+    ("Cursor CLI", Path(".agents/skills/pr-review-loop")),
 )
 REVIEW_SUCCESS_KEYS = {
     "schema_version",
@@ -342,8 +342,8 @@ def _assert_skill_discovery(client: str, discovery_path: Path) -> None:
     discovered = REPOSITORY_ROOT / discovery_path
     assert discovered.is_symlink(), client
     assert discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True)
-    assert (discovered / "scripts" / "loopr.py").samefile(
-        CANONICAL_SKILL / "scripts" / "loopr.py"
+    assert (discovered / "scripts" / "cli.py").samefile(
+        CANONICAL_SKILL / "scripts" / "cli.py"
     )
 
 
@@ -388,7 +388,7 @@ def _assert_review_result(
     patch = (artifacts / "patch.diff").read_text(encoding="utf-8")
     assert expected_patch in patch
     assert rejected_patch not in patch
-    assert ".pr-loopr/" not in patch
+    assert ".pr-review-loop/" not in patch
     return runner
 
 
@@ -435,7 +435,7 @@ def test_cross_agent_request_submit_rereview_flow(
         monkeypatch,
         capsys,
         fixture,
-        Path(".pr-loopr"),
+        Path(".pr-review-loop"),
     )
     assert submit_status == 0
     assert set(submit_payload) == SUBMIT_SUCCESS_KEYS
@@ -539,14 +539,14 @@ def test_manual_smoke_documentation_covers_all_supported_clients() -> None:
         "Codex CLI smoke test",
         "Claude Code smoke test",
         "Cursor CLI smoke test",
-        ".agents/skills/loopr",
-        ".claude/skills/loopr",
+        ".agents/skills/pr-review-loop",
+        ".claude/skills/pr-review-loop",
         "REQUEST_CHANGES",
         "blocking_findings",
         "--expected-head",
         "fresh `review`",
         "iteration limit",
-        ".pr-loopr/runs/",
+        ".pr-review-loop/runs/",
         "stale_head",
     )
     for concept in required:

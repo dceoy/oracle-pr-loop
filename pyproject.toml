@@ -1,5 +1,5 @@
 [project]
-name = "loopr"
+name = "pr-review-loop"
 version = "0.1.0"
 description = "Vendor-neutral Oracle/ChatGPT pull-request review and submission skill"
 authors = [{name = "dceoy", email = "1938249+dceoy@users.noreply.github.com"}]
@@ -22,7 +22,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/dceoy/loopr.git"
+Repository = "https://github.com/dceoy/pr-review-loop.git"
 
 [tool.uv]
 package = false
@@ -103,7 +103,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"skills/loopr/scripts/**/*.py" = [
+"skills/pr-review-loop/scripts/**/*.py" = [
   "docstring-missing-returns",              # DOC201
   "docstring-missing-exception",           # DOC501
   "typing-only-standard-library-import",   # TCH003
@@ -123,7 +123,7 @@ ignore = [
   "blind-except",                          # BLE001
   "unnecessary-literal-within-tuple-call", # C409
 ]
-"skills/loopr/tests/**/*.py" = [
+"skills/pr-review-loop/tests/**/*.py" = [
   "unsorted-imports",              # I001
   "docstring-missing-returns",    # DOC201
   "docstring-missing-exception",  # DOC501
@@ -158,8 +158,8 @@ venv = ".venv"
 typeCheckingMode = "strict"
 
 [[tool.pyright.executionEnvironments]]
-root = "skills/loopr"
-extraPaths = ["skills/loopr"]
+root = "skills/pr-review-loop"
+extraPaths = ["skills/pr-review-loop"]
 reportPrivateUsage = "none"
 reportUnknownLambdaType = "none"
 reportUnknownVariableType = "none"
@@ -171,8 +171,8 @@ addopts = [
   "--doctest-modules",
   "--capture=no",
 ]
-pythonpath = ["skills/loopr"]
-testpaths = ["skills/loopr/tests"]
+pythonpath = ["skills/pr-review-loop"]
+testpaths = ["skills/pr-review-loop/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -180,7 +180,7 @@ minversion = "9.0"
 
 [tool.coverage.run]
 source = ["scripts"]
-omit = ["skills/loopr/tests/**"]
+omit = ["skills/pr-review-loop/tests/**"]
 
 [tool.coverage.report]
 show_missing = true

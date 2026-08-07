@@ -1,4 +1,4 @@
-"""Vendor-neutral loopr command entrypoint."""
+"""Vendor-neutral pull-request review skill CLI."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class StructuredArgumentParser(argparse.ArgumentParser):
 
 
 def parser() -> argparse.ArgumentParser:
-    """Build the stable loopr command parser."""
+    """Build the stable skill command parser."""
     root = StructuredArgumentParser(
         description="Review or submit one exact GitHub pull-request head."
     )
@@ -51,7 +51,7 @@ def parser() -> argparse.ArgumentParser:
     )
     review.add_argument(
         "--artifacts-dir",
-        default=".pr-loopr",
+        default=".pr-review-loop",
         help="private artifact directory",
     )
     review.add_argument(
@@ -81,7 +81,7 @@ def parser() -> argparse.ArgumentParser:
     )
     submit.add_argument(
         "--artifacts-dir",
-        default=".pr-loopr",
+        default=".pr-review-loop",
         help="private artifact directory",
     )
     return root
@@ -115,17 +115,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LooprError as exc:
         message = runner.redact(str(exc))
         _emit_error(command, exc.category, message)
-        sys.stderr.write(f"loopr {command}: {message}\n")
+        sys.stderr.write(f"pr-review-loop {command}: {message}\n")
         return exc.code
     except KeyboardInterrupt:
         message = "interrupted; failed closed"
         _emit_error(command, "interrupted", message)
-        sys.stderr.write(f"loopr {command}: {message}\n")
+        sys.stderr.write(f"pr-review-loop {command}: {message}\n")
         return EXIT_PRECONDITION
     except Exception as exc:
         message = runner.redact(f"{type(exc).__name__}: {exc}")
         _emit_error(command, "internal", message)
-        sys.stderr.write(f"loopr {command}: {message}\n")
+        sys.stderr.write(f"pr-review-loop {command}: {message}\n")
         return EXIT_PRECONDITION
 
 

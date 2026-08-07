@@ -1,18 +1,18 @@
-# loopr
+# pr-review-loop
 
-`loopr` is a vendor-neutral agent skill for improving one GitHub pull request
+`pr-review-loop` is a vendor-neutral agent skill for improving one GitHub pull request
 through independent Oracle/ChatGPT review. The host agent owns planning, editing,
 and repository QA; deterministic skill commands own review transport, patch
 validation, commit creation, and lease-protected pushes.
 
 ## Supported clients
 
-The canonical skill lives at `skills/loopr/`. Supported hosts discover that same
+The canonical skill lives at `skills/pr-review-loop/`. Supported hosts discover that same
 directory through symlinks:
 
-- Codex CLI: `.agents/skills/loopr`
-- Claude Code: `.claude/skills/loopr`
-- Cursor CLI: `.agents/skills/loopr`
+- Codex CLI: `.agents/skills/pr-review-loop`
+- Claude Code: `.claude/skills/pr-review-loop`
+- Cursor CLI: `.agents/skills/pr-review-loop`
 
 There is no client-specific copy, runtime fork, or repository-root compatibility
 CLI. Client-specific discovery instructions, when needed, point to the canonical
@@ -49,7 +49,7 @@ The default profile is `~/.oracle/browser-profile`. Set
 
 ```console
 export GH_REVIEW_TOKEN='...'
-python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
+python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
 `review` emits exactly one JSON object on stdout. Both valid verdicts are
@@ -66,13 +66,13 @@ must be resolved before continuing.
 
 After `REQUEST_CHANGES`, the invoking Codex CLI, Claude Code, Cursor CLI, or
 other compatible host edits the current checkout and runs the repository's
-normal QA. `loopr` does not launch an implementation agent and does not select or
-run repository QA.
+normal QA. `pr-review-loop` does not launch an implementation agent and does not
+select or run repository QA.
 
 ### 4. Submit against the reviewed head
 
 ```console
-python3 skills/loopr/scripts/loopr.py submit \
+python3 skills/pr-review-loop/scripts/cli.py submit \
   --pr <NUMBER_OR_URL> \
   --expected-head <REVIEWED_HEAD_SHA>
 ```
@@ -96,16 +96,16 @@ must not manufacture approval after a limit or operational failure.
 
 The stable version-1 success and error schemas, exit classes, race behavior, and
 artifact contracts are documented in
-`skills/loopr/references/command-contracts.md`.
+`skills/pr-review-loop/references/command-contracts.md`.
 
 Each command writes bounded, permission-restricted audit artifacts below
-`.pr-loopr/runs/` by default. Review artifacts record the frozen PR snapshot,
+`.pr-review-loop/runs/` by default. Review artifacts record the frozen PR snapshot,
 review evidence, validated Oracle result, GitHub review metadata, and final
 result. Submit artifacts record the staged patch, commit metadata, push metadata,
 and final result.
 
 For executable cross-client smoke tests, troubleshooting, reviewer setup, and
-stale-head recovery, see `skills/loopr/references/operations.md`.
+stale-head recovery, see `skills/pr-review-loop/references/operations.md`.
 
 ## Safety and limitations
 
@@ -123,7 +123,7 @@ stale-head recovery, see `skills/loopr/references/operations.md`.
 
 The legacy migration removed the 4,679-line repository-root `loopr.py`
 orchestrator, reducing root production Python from 4,679 lines to 0. Surviving
-production code lives only under `skills/loopr/scripts/`.
+production code lives only under `skills/pr-review-loop/scripts/`.
 
 The completed implementation order is #15 → (#16 and #17) → #18 → #19.
 
@@ -132,7 +132,7 @@ The completed implementation order is #15 → (#16 and #17) → #18 → #19.
 ```console
 uv sync --dev
 uv run pytest
-uv run ruff check skills/loopr
-uv run ruff format --check skills/loopr
+uv run ruff check skills/pr-review-loop
+uv run ruff format --check skills/pr-review-loop
 uv run pyright
 ```
