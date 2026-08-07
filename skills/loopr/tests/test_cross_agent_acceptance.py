@@ -167,8 +167,9 @@ class AcceptanceGitHubClient(GitHubClient):
         self.post_count = 0
         self.posted_events: list[str] = []
 
-    def initialize(self, _pr_value: str) -> None:
+    def initialize(self, pr_value: str) -> None:
         """Bind fake network identity to the configured disposable PR snapshot."""
+        del pr_value
         if not self._snapshots:
             raise AssertionError("acceptance review requires at least one PR snapshot")
         initial = self._snapshots[0]
@@ -186,21 +187,23 @@ class AcceptanceGitHubClient(GitHubClient):
     def post_review(
         self,
         pull_request: PullRequest,
-        event: str,
-        _body: str,
+        verdict: str,
+        body: str,
     ) -> tuple[int, JsonObject]:
         """Record the GitHub write that production review orchestration requested."""
+        del body
         self.post_count += 1
-        self.posted_events.append(event)
-        review_id = 101 if event == "REQUEST_CHANGES" else 102
+        self.posted_events.append(verdict)
+        review_id = 101 if verdict == "REQUEST_CHANGES" else 102
         return review_id, {"id": review_id, "commit_id": pull_request.head_sha}
 
     def verify_posted(
         self,
-        _pull_request: PullRequest,
-        _review_id: int,
+        pull_request: PullRequest,
+        review_id: int,
     ) -> JsonObject:
         """Return the state corresponding to the event posted by the real flow."""
+        del pull_request, review_id
         if not self.posted_events:
             raise AssertionError("review verification occurred before posting")
         state = (
