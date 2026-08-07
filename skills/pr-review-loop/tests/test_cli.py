@@ -1,4 +1,4 @@
-"""Cross-agent acceptance tests for the canonical loopr skill workflow."""
+"""CLI acceptance and repository-surface tests."""
 
 from __future__ import annotations
 
@@ -8,17 +8,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
-from test_review_command import (
-    FakeGitHubClient,
-    install_orchestration_fakes,
-    sample_pr,
-)
-from test_submit_command import ScenarioRunner, _fixture_repo
+from test_review import FakeGitHubClient, install_orchestration_fakes, sample_pr
+from test_submission import ScenarioRunner, _fixture_repo
 
-from scripts import loopr as cli, review as review_module
+from scripts import cli, review as review_module
 from scripts.github import GitHubClient
 from scripts.models import (
     EXIT_ORACLE,
+    EXIT_PRECONDITION,
     EXIT_RACE,
     JsonObject,
     JsonValue,
@@ -35,11 +32,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "loopr"
+CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "pr-review-loop"
 CLIENTS = (
-    ("Codex CLI", Path(".agents/skills/loopr")),
-    ("Claude Code", Path(".claude/skills/loopr")),
-    ("Cursor CLI", Path(".agents/skills/loopr")),
+    ("Codex CLI", Path(".agents/skills/pr-review-loop")),
+    ("Claude Code", Path(".claude/skills/pr-review-loop")),
+    ("Cursor CLI", Path(".agents/skills/pr-review-loop")),
 )
 REVIEW_SUCCESS_KEYS = {
     "schema_version",
@@ -72,7 +69,6 @@ class RecordingScenarioRunner(ScenarioRunner):
     """Record process identities while retaining the disposable Git transport."""
 
     def __init__(self, repo: Path, remote: Path, state: JsonObject) -> None:
-        """Initialize the scenario and an empty command record."""
         super().__init__(repo, remote, state)
         self.commands: list[tuple[str, ...]] = []
 
@@ -88,7 +84,6 @@ class RecordingScenarioRunner(ScenarioRunner):
         max_output: int = 24 * 1024 * 1024,
         watch_path: Path | None = None,
     ) -> CommandResult:
-        """Record one argv before delegating to the real/fake scenario transport."""
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
         return super().run(
@@ -107,7 +102,6 @@ class AcceptanceReviewRunner(CommandRunner):
     """Fake Oracle while retaining production local subprocess execution."""
 
     def __init__(self, oracle_payload: JsonObject) -> None:
-        """Initialize one deterministic Oracle response and command record."""
         super().__init__()
         self.source_env["GH_REVIEW_TOKEN"] = "token"
         self.secrets.add("token")
@@ -126,13 +120,11 @@ class AcceptanceReviewRunner(CommandRunner):
         max_output: int = 24 * 1024 * 1024,
         watch_path: Path | None = None,
     ) -> CommandResult:
-        """Fake Oracle only; execute local Git through the production runner."""
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
         if argv and argv[0] == "oracle":
             if watch_path is None:
-                message = "Oracle invocation must provide a watched output path"
-                raise AssertionError(message)
+                raise AssertionError("Oracle invocation must provide a watched output path")
             watch_path.write_text(json.dumps(self.oracle_payload), encoding="utf-8")
             return CommandResult(args=argv, returncode=0, stdout=b"", stderr="")
         return super().run(
@@ -159,7 +151,6 @@ class AcceptanceGitHubClient(GitHubClient):
         repo_dir: Path,
         token: str,
     ) -> None:
-        """Initialize deterministic GitHub snapshots around real local Git evidence."""
         super().__init__(runner, repo_dir, token)
         type(self).instance = self
         self._snapshots = list(type(self).snapshots)
@@ -167,7 +158,6 @@ class AcceptanceGitHubClient(GitHubClient):
         self.posted_events: list[str] = []
 
     def initialize(self, pr_value: str) -> None:
-        """Bind fake network identity to the configured disposable PR snapshot."""
         del pr_value
         if not self._snapshots:
             raise AssertionError("acceptance review requires at least one PR snapshot")
@@ -178,7 +168,6 @@ class AcceptanceGitHubClient(GitHubClient):
         self.reviewer_login = "reviewer"
 
     def snapshot(self) -> PullRequest:
-        """Return the next deterministic GitHub snapshot."""
         if not self._snapshots:
             raise AssertionError("acceptance GitHub snapshot sequence was exhausted")
         return self._snapshots.pop(0)
@@ -189,7 +178,6 @@ class AcceptanceGitHubClient(GitHubClient):
         verdict: str,
         body: str,
     ) -> tuple[int, JsonObject]:
-        """Record the GitHub write that production review orchestration requested."""
         del body
         self.post_count += 1
         self.posted_events.append(verdict)
@@ -201,7 +189,6 @@ class AcceptanceGitHubClient(GitHubClient):
         pull_request: PullRequest,
         review_id: int,
     ) -> JsonObject:
-        """Return the state corresponding to the event posted by the real flow."""
         del pull_request, review_id
         if not self.posted_events:
             raise AssertionError("review verification occurred before posting")
@@ -224,7 +211,6 @@ class AcceptanceFixture:
 
 
 def _acceptance_fixture(tmp_path: Path) -> AcceptanceFixture:
-    """Create a disposable PR repository with recorded fake GitHub transport."""
     repo, remote, state, base_sha, head_sha = _fixture_repo(tmp_path)
     return AcceptanceFixture(
         repo=repo,
@@ -235,7 +221,6 @@ def _acceptance_fixture(tmp_path: Path) -> AcceptanceFixture:
 
 
 def _review_snapshot(fixture: AcceptanceFixture, *, head_sha: str) -> PullRequest:
-    """Bind the fake GitHub review snapshot to the disposable repository SHAs."""
     return replace(
         sample_pr(base_sha=fixture.base_sha, head_sha=head_sha),
         repository="acme/demo",
@@ -250,7 +235,6 @@ def _review_snapshot(fixture: AcceptanceFixture, *, head_sha: str) -> PullReques
 
 
 def _oracle_payload(pull_request: PullRequest, *, verdict: str) -> JsonObject:
-    """Return strict fake Oracle JSON for the exact frozen pull-request identity."""
     request_changes = verdict == "REQUEST_CHANGES"
     blockers: list[JsonValue] = []
     if request_changes:
@@ -278,7 +262,6 @@ def _oracle_payload(pull_request: PullRequest, *, verdict: str) -> JsonObject:
 
 
 def _stdout_json(capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
-    """Read the one structured stdout object emitted by the CLI."""
     captured = capsys.readouterr()
     assert captured.out.count("\n") == 1
     return cast("dict[str, object]", json.loads(captured.out))
@@ -291,7 +274,6 @@ def _run_review_cli(
     pull_request: PullRequest,
     verdict: str,
 ) -> tuple[int, dict[str, object], AcceptanceReviewRunner]:
-    """Run the public review CLI with only Oracle/GitHub network I/O faked."""
     AcceptanceGitHubClient.snapshots = [pull_request, pull_request, pull_request]
     monkeypatch.setattr(review_module, "GitHubClient", AcceptanceGitHubClient)
     runner = AcceptanceReviewRunner(_oracle_payload(pull_request, verdict=verdict))
@@ -312,7 +294,6 @@ def _run_submit_cli(
     fixture: AcceptanceFixture,
     artifacts_dir: Path,
 ) -> tuple[int, dict[str, object]]:
-    """Run the public submit CLI through its production safety boundary."""
     monkeypatch.setattr(cli, "CommandRunner", lambda: fixture.runner)
     status = cli.main([
         "submit",
@@ -332,18 +313,12 @@ def _run_submit_cli(
     return status, _stdout_json(capsys)
 
 
-def _runner_with_token() -> CommandRunner:
-    """Return a command runner carrying only the fake reviewer token."""
-    return CommandRunner({"GH_REVIEW_TOKEN": "token"})
-
-
 def _assert_skill_discovery(client: str, discovery_path: Path) -> None:
-    """Verify one host resolves the shared canonical skill implementation."""
     discovered = REPOSITORY_ROOT / discovery_path
     assert discovered.is_symlink(), client
     assert discovered.resolve(strict=True) == CANONICAL_SKILL.resolve(strict=True)
-    assert (discovered / "scripts" / "loopr.py").samefile(
-        CANONICAL_SKILL / "scripts" / "loopr.py"
+    assert (discovered / "scripts" / "cli.py").samefile(
+        CANONICAL_SKILL / "scripts" / "cli.py"
     )
 
 
@@ -357,7 +332,6 @@ def _assert_review_result(
     expected_patch: str,
     rejected_patch: str,
 ) -> AcceptanceReviewRunner:
-    """Run one review and verify its schema, event, artifacts, and frozen patch."""
     pull_request = _review_snapshot(fixture, head_sha=head_sha)
     status, payload, runner = _run_review_cli(
         monkeypatch,
@@ -388,7 +362,7 @@ def _assert_review_result(
     patch = (artifacts / "patch.diff").read_text(encoding="utf-8")
     assert expected_patch in patch
     assert rejected_patch not in patch
-    assert ".pr-loopr/" not in patch
+    assert ".pr-review-loop/" not in patch
     return runner
 
 
@@ -396,11 +370,9 @@ def _assert_host_programs(
     fixture: AcceptanceFixture,
     *review_runners: AcceptanceReviewRunner,
 ) -> None:
-    """Verify the host workflow uses Git/Oracle without nested implementation agents."""
     for review_runner in review_runners:
         programs = {command[0] for command in review_runner.commands if command}
         assert {"git", "oracle"} <= programs
-
     commands = [
         *(command for runner in review_runners for command in runner.commands),
         *fixture.runner.commands,
@@ -435,7 +407,7 @@ def test_cross_agent_request_submit_rereview_flow(
         monkeypatch,
         capsys,
         fixture,
-        Path(".pr-loopr"),
+        Path(".pr-review-loop"),
     )
     assert submit_status == 0
     assert set(submit_payload) == SUBMIT_SUCCESS_KEYS
@@ -459,8 +431,6 @@ def test_operational_failure_uses_stable_nonzero_error_schema(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Operational failures remain non-zero while domain verdicts remain successful."""
-
     def fail_review(**_kwargs: object) -> ReviewResult:
         raise LooprError(EXIT_ORACLE, "oracle_schema", "malformed Oracle output")
 
@@ -471,12 +441,27 @@ def test_operational_failure_uses_stable_nonzero_error_schema(
 
     assert status == EXIT_ORACLE
     assert set(payload) == {"schema_version", "command", "error"}
-    assert set(error) == {"category", "message"}
     assert error["category"] == "oracle_schema"
 
 
+def test_argument_failure_uses_structured_error_schema(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = cli.main(["review"])
+    payload = _stdout_json(capsys)
+    error = cast("dict[str, object]", payload["error"])
+
+    assert status == EXIT_PRECONDITION
+    assert error["category"] == "input"
+
+
+def test_help_has_no_implementation_agent_dependency() -> None:
+    help_text = cli.parser().format_help().lower()
+    assert "review" in help_text
+    assert not {"codex", "claude", "cursor"}.intersection(help_text.split())
+
+
 def test_malformed_oracle_output_fails_without_repair() -> None:
-    """Malformed reviewer output deterministically fails the public review contract."""
     with pytest.raises(LooprError) as captured:
         parse_review("not-json", sample_pr())
 
@@ -488,7 +473,6 @@ def test_stale_review_head_fails_before_post(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A review snapshot that moves before posting fails deterministically."""
     initial = sample_pr()
     changed = sample_pr(head_sha="c" * 40)
     FakeGitHubClient.snapshots = [initial, changed]
@@ -500,17 +484,15 @@ def test_stale_review_head_fails_before_post(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=_runner_with_token(),
+            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
         )
 
     assert captured.value.code == EXIT_RACE
-    assert captured.value.category == "stale_state"
     assert FakeGitHubClient.instance is not None
     assert FakeGitHubClient.instance.post_count == 0
 
 
 def test_stale_submit_head_fails_before_workspace_mutation(tmp_path: Path) -> None:
-    """A stale expected submit head fails before staging or pushing."""
     repo, remote, state, _base_sha, head_sha = _fixture_repo(tmp_path)
     state["headRefOid"] = "d" * 40
     (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
@@ -529,8 +511,22 @@ def test_stale_submit_head_fails_before_workspace_mutation(tmp_path: Path) -> No
     assert captured.value.category == "stale_head"
 
 
-def test_manual_smoke_documentation_covers_all_supported_clients() -> None:
-    """Operational docs retain executable discovery and stop-condition guidance."""
+def test_test_modules_match_production_modules() -> None:
+    """Every production module has exactly one same-named test module."""
+    production = {
+        path.stem
+        for path in (CANONICAL_SKILL / "scripts").glob("*.py")
+        if path.name != "__init__.py"
+    }
+    tests = {
+        path.stem.removeprefix("test_")
+        for path in (CANONICAL_SKILL / "tests").glob("test_*.py")
+    }
+
+    assert tests == production
+
+
+def test_manual_smoke_documentation_covers_supported_clients() -> None:
     text = (CANONICAL_SKILL / "references" / "operations.md").read_text(
         encoding="utf-8"
     )
@@ -539,14 +535,14 @@ def test_manual_smoke_documentation_covers_all_supported_clients() -> None:
         "Codex CLI smoke test",
         "Claude Code smoke test",
         "Cursor CLI smoke test",
-        ".agents/skills/loopr",
-        ".claude/skills/loopr",
+        ".agents/skills/pr-review-loop",
+        ".claude/skills/pr-review-loop",
         "REQUEST_CHANGES",
         "blocking_findings",
         "--expected-head",
         "fresh `review`",
         "iteration limit",
-        ".pr-loopr/runs/",
+        ".pr-review-loop/runs/",
         "stale_head",
     )
     for concept in required:

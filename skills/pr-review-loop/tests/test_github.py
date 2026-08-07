@@ -1,4 +1,4 @@
-"""Focused regression tests for immutable review evidence safety."""
+"""Focused regression tests for immutable GitHub and Git evidence safety."""
 
 from __future__ import annotations
 

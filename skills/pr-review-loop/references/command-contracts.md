@@ -3,7 +3,7 @@
 ## `review` — implemented
 
 ```console
-python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
+python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
 Optional arguments are `--repo-dir`, `--artifacts-dir`, and `--oracle-thinking-time`. The command writes exactly one JSON object followed by a newline to stdout. Subprocess output and diagnostics never share stdout.
@@ -62,7 +62,7 @@ Only GitHub.com, same-repository, open non-draft PRs are supported. Runtime code
 ## `submit` — implemented
 
 ```console
-python3 skills/loopr/scripts/loopr.py submit \
+python3 skills/pr-review-loop/scripts/cli.py submit \
   --pr <NUMBER_OR_URL> \
   --expected-head <SHA>
 ```

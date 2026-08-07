@@ -1,19 +1,19 @@
 # Operations and cross-agent smoke tests
 
-This reference describes the manual end-to-end workflow for the canonical `loopr`
-skill. The runtime is identical for every supported host; only the discovery path
-used by the host differs.
+This reference describes the manual end-to-end workflow for the canonical
+`pr-review-loop` skill. The runtime is identical for every supported host; only
+the discovery path used by the host differs.
 
 ## Supported host discovery
 
 | Host | Discovery path | Client-specific requirement |
 | --- | --- | --- |
-| Codex CLI | `.agents/skills/loopr` | Invoke the repository skill named `loopr`. |
-| Claude Code | `.claude/skills/loopr` | Invoke the repository skill named `loopr`. |
-| Cursor CLI | `.agents/skills/loopr` | If repository instructions are needed for discovery, point them at the existing `loopr` skill instead of copying or wrapping it. |
+| Codex CLI | `.agents/skills/pr-review-loop` | Invoke the repository skill named `pr-review-loop`. |
+| Claude Code | `.claude/skills/pr-review-loop` | Invoke the repository skill named `pr-review-loop`. |
+| Cursor CLI | `.agents/skills/pr-review-loop` | If repository instructions are needed for discovery, point them at the existing `pr-review-loop` skill instead of copying or wrapping it. |
 
-Both discovery links resolve to `skills/loopr`. Do not create a client-specific
-runtime, wrapper, or fork of the skill.
+Both discovery links resolve to `skills/pr-review-loop`. Do not create a
+client-specific runtime, wrapper, or fork of the skill.
 
 ## Prerequisites
 
@@ -43,15 +43,15 @@ The default profile is `~/.oracle/browser-profile`. Set
 ## Common acceptance flow
 
 Choose the iteration limit before starting. A manual smoke test should normally
-use a small limit such as 3. The host agent owns this loop; `loopr` itself does
-not launch or manage an implementation agent.
+use a small limit such as 3. The host agent owns this loop; `pr-review-loop`
+itself does not launch or manage an implementation agent.
 
-1. Discover and invoke the canonical `loopr` skill through the host-specific
-   discovery path above.
+1. Discover and invoke the canonical `pr-review-loop` skill through the
+   host-specific discovery path above.
 2. Run a review against the exact current pull-request head:
 
    ```console
-   python3 skills/loopr/scripts/loopr.py review --pr <NUMBER_OR_URL>
+   python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
    ```
 
 3. Inspect the single JSON object on stdout.
@@ -62,11 +62,12 @@ not launch or manage an implementation agent.
    - An `error` object is an operational failure; stop and resolve it before
      editing or submitting.
 4. After `REQUEST_CHANGES`, let the host agent edit the current checkout and run
-   the repository's normal QA workflow. `loopr` does not select or run QA.
+   the repository's normal QA workflow. `pr-review-loop` does not select or run
+   QA.
 5. Submit the complete intended workspace patch against the reviewed head:
 
    ```console
-   python3 skills/loopr/scripts/loopr.py submit \
+   python3 skills/pr-review-loop/scripts/cli.py submit \
      --pr <NUMBER_OR_URL> \
      --expected-head <REVIEWED_HEAD_SHA>
    ```
@@ -85,8 +86,9 @@ Oracle/schema, GitHub/write, and stale-state failures use non-zero statuses. See
 ## Codex CLI smoke test
 
 1. Open the repository from its pull-request head.
-2. Confirm `.agents/skills/loopr` resolves to `skills/loopr`.
-3. Ask Codex CLI to use the repository `loopr` skill for the target pull request.
+2. Confirm `.agents/skills/pr-review-loop` resolves to `skills/pr-review-loop`.
+3. Ask Codex CLI to use the repository `pr-review-loop` skill for the target pull
+   request.
 4. Execute the common acceptance flow without adding Codex-specific scripts or
    runtime branches.
 5. Pass when the flow reaches a fresh `APPROVE`, or record an iteration-limit
@@ -95,9 +97,9 @@ Oracle/schema, GitHub/write, and stale-state failures use non-zero statuses. See
 ## Claude Code smoke test
 
 1. Open the repository from its pull-request head.
-2. Confirm `.claude/skills/loopr` resolves to `skills/loopr`.
-3. Ask Claude Code to use the repository `loopr` skill for the target pull
-   request.
+2. Confirm `.claude/skills/pr-review-loop` resolves to `skills/pr-review-loop`.
+3. Ask Claude Code to use the repository `pr-review-loop` skill for the target
+   pull request.
 4. Execute the common acceptance flow without adding Claude-specific scripts or
    runtime branches.
 5. Pass when the flow reaches a fresh `APPROVE`, or record an iteration-limit
@@ -106,10 +108,11 @@ Oracle/schema, GitHub/write, and stale-state failures use non-zero statuses. See
 ## Cursor CLI smoke test
 
 1. Open the repository from its pull-request head.
-2. Confirm `.agents/skills/loopr` resolves to `skills/loopr`.
-3. Ask Cursor CLI to use the repository `loopr` skill. If the local Cursor setup
-   requires repository instructions to surface the skill, reference the existing
-   `.agents/skills/loopr` path there; do not duplicate the skill.
+2. Confirm `.agents/skills/pr-review-loop` resolves to `skills/pr-review-loop`.
+3. Ask Cursor CLI to use the repository `pr-review-loop` skill. If the local
+   Cursor setup requires repository instructions to surface the skill, reference
+   the existing `.agents/skills/pr-review-loop` path there; do not duplicate the
+   skill.
 4. Execute the common acceptance flow without adding Cursor-specific production
    code.
 5. Pass when the flow reaches a fresh `APPROVE`, or record an iteration-limit
@@ -117,11 +120,11 @@ Oracle/schema, GitHub/write, and stale-state failures use non-zero statuses. See
 
 ## Audit artifacts
 
-Each command creates a private run directory below `.pr-loopr/runs/` by default.
-Review artifacts capture the frozen pull-request snapshot, evidence bundle,
-validated Oracle result, posted review metadata, and final result. Submit
-artifacts capture the validated staged patch, commit metadata, push metadata,
-and final result.
+Each command creates a private run directory below `.pr-review-loop/runs/` by
+default. Review artifacts capture the frozen pull-request snapshot, evidence
+bundle, validated Oracle result, posted review metadata, and final result. Submit
+artifacts capture the validated staged patch, commit metadata, push metadata, and
+final result.
 
 Treat artifacts as diagnostic evidence, not as a second source of truth for the
 current pull-request head. Re-read GitHub state by running a fresh command after
@@ -163,7 +166,7 @@ than the pull request's same-repository head.
 - Fork pull requests are not supported.
 - CI status is not an approval gate.
 - Review posting is aggregate rather than inline.
-- The host agent, not `loopr`, owns editing, repository QA, iteration count, and
-  interpretation of non-blocking notes.
-- `loopr` does not sandbox or contain the host agent and does not launch Codex,
-  Claude Code, Cursor CLI, or another implementation agent.
+- The host agent, not `pr-review-loop`, owns editing, repository QA, iteration
+  count, and interpretation of non-blocking notes.
+- `pr-review-loop` does not sandbox or contain the host agent and does not launch
+  Codex, Claude Code, Cursor CLI, or another implementation agent.

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactWriter
-from .github_client import GitHubClient
+from .github import GitHubClient
 from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
 from .oracle import OracleClient
 from .process import CommandRunner
@@ -120,16 +120,20 @@ def _persist_best_effort(
     try:
         writer.json(relative, value)
     except LooprError as exc:
-        sys.stderr.write(
-            f"loopr review: warning: failed to persist artifact {relative}: {exc}\n"
+        message = (
+            "pr-review-loop review: warning: failed to persist artifact "
+            f"{relative}: {exc}"
         )
+        sys.stderr.write(f"{message}\n")
     except BaseException as exc:
         if not suppress_interrupts:
             raise
         detail = str(exc) or type(exc).__name__
-        sys.stderr.write(
-            f"loopr review: warning: failed to persist artifact {relative}: {detail}\n"
+        message = (
+            "pr-review-loop review: warning: failed to persist artifact "
+            f"{relative}: {detail}"
         )
+        sys.stderr.write(f"{message}\n")
 
 
 MAX_POSTED_BODY_BYTES = 65_000
@@ -139,15 +143,15 @@ _RUN_DIRECTORY_ATTEMPTS = 8
 def _trusted_runs_root(repo_dir: Path, artifacts_dir: Path) -> Path:
     """Descend to the run root from a trusted anchor without following symlinks.
 
-    `artifacts_dir` is typically a repository-relative path (e.g. `.pr-loopr`),
-    and the checked-out pull request controls its own repository contents, so a
-    malicious head could plant a symlink there to redirect artifact writes
-    outside the intended root. Each path component is created fresh or
-    verified to already be a real directory before descending into it, and
-    this applies to every component of `artifacts_dir` itself (not just a
-    `runs` child) so an absolute path, or a symlink anywhere in its ancestry,
-    cannot redirect the run root either. `..` components are rejected outright
-    because they could otherwise walk the trusted anchor back out of it.
+    `artifacts_dir` is typically a repository-relative path (for example,
+    `.pr-review-loop`), and the checked-out pull request controls its own repository
+    contents, so a malicious head could plant a symlink there to redirect artifact
+    writes outside the intended root. Each path component is created fresh or
+    verified to already be a real directory before descending into it, and this
+    applies to every component of `artifacts_dir` itself (not just a `runs` child)
+    so an absolute path, or a symlink anywhere in its ancestry, cannot redirect the
+    run root either. `..` components are rejected outright because they could
+    otherwise walk the trusted anchor back out of it.
     """
     if ".." in artifacts_dir.parts:
         raise LooprError(

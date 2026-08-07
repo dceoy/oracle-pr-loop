@@ -1,4 +1,4 @@
-"""Validated models and stable errors for loopr skill commands."""
+"""Validated models and stable errors for skill commands."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ class LooprError(RuntimeError):
     """A stable command failure with an exit code and machine category."""
 
     def __init__(self, code: int, category: str, message: str) -> None:
-        """Initialize a stable loopr failure."""
+        """Initialize a stable command failure."""
         super().__init__(message)
         self.code = code
         self.category = category

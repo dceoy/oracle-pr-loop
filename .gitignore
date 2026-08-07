@@ -1,5 +1,5 @@
-# loopr skill audit artifacts
-.pr-loopr/
+# pr-review-loop skill audit artifacts
+.pr-review-loop/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

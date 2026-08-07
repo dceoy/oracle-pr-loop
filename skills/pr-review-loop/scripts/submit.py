@@ -1,20 +1,28 @@
-"""Hardened public entrypoint for deterministic PR submission."""
+"""Deterministic pull-request submission safety and transport."""
 
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from . import submit_core
-from .models import EXIT_PRECONDITION, LooprError, SubmitResult
+from . import submission
+from .models import (
+    EXIT_PRECONDITION,
+    EXIT_RACE,
+    JsonObject,
+    LooprError,
+    SubmitResult,
+)
 from .process import CommandError, CommandResult, CommandRunner
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 MAX_REMOTE_OUTPUT = 1024 * 1024
+MAX_GITLINK_DIFF_BYTES = 1024 * 1024
+GITLINK_MODE = b"160000"
 STAGE_COMMAND = ("git", "add", "--all", "--")
 WORKSPACE_STATUS_COMMAND = (
     "git",
@@ -54,7 +62,7 @@ COMMIT_COMMAND = (
     "--no-verify",
     "--no-gpg-sign",
     "-m",
-    submit_core.COMMIT_MESSAGE,
+    submission.COMMIT_MESSAGE,
 )
 
 
@@ -113,7 +121,7 @@ class _PushAwareRunner(CommandRunner):
             timeout=timeout,
         )
         retry_deadline = (
-            time.monotonic() + submit_core.POLL_TIMEOUT_SECONDS
+            time.monotonic() + submission.POLL_TIMEOUT_SECONDS
             if self._pushed_commit_sha is not None and argv[:3] == ("gh", "pr", "view")
             else None
         )
@@ -131,7 +139,7 @@ class _PushAwareRunner(CommandRunner):
                 )
             except CommandError:
                 if retry_deadline is not None and time.monotonic() < retry_deadline:
-                    time.sleep(submit_core.POLL_INTERVAL_SECONDS)
+                    time.sleep(submission.POLL_INTERVAL_SECONDS)
                     continue
                 target = _push_target(argv)
                 if target is None:
@@ -167,7 +175,7 @@ class _PushAwareRunner(CommandRunner):
         return self._normalize_post_push_snapshot(argv, result)
 
     def _exclude_artifacts(self, argv: tuple[str, ...]) -> tuple[str, ...]:
-        """Keep private loopr artifacts outside every workspace pathspec."""
+        """Keep private skill artifacts outside every workspace pathspec."""
         if self._artifact_exclusion is None:
             return argv
         if argv in {
@@ -281,7 +289,7 @@ class _PushAwareRunner(CommandRunner):
         timeout: int,
     ) -> bool:
         """Retry expected or inconclusive remote reads after a push error."""
-        deadline = time.monotonic() + submit_core.POLL_TIMEOUT_SECONDS
+        deadline = time.monotonic() + submission.POLL_TIMEOUT_SECONDS
         while True:
             matches = self._remote_matches(
                 remote=remote,
@@ -296,7 +304,7 @@ class _PushAwareRunner(CommandRunner):
                 return matches
             if time.monotonic() >= deadline:
                 return False
-            time.sleep(submit_core.POLL_INTERVAL_SECONDS)
+            time.sleep(submission.POLL_INTERVAL_SECONDS)
 
     def _normalize_post_push_snapshot(
         self,
@@ -352,6 +360,156 @@ class _PushAwareRunner(CommandRunner):
         return False
 
 
+class _SubmitBoundaryRunner(CommandRunner):
+    """Freeze PR refs and reject unsafe candidate metadata before remote writes."""
+
+    def __init__(self, delegate: CommandRunner) -> None:
+        """Wrap one command runner without changing its environment state."""
+        self._delegate = delegate
+        self.source_env = delegate.source_env
+        self.secrets = delegate.secrets
+        self._initial_refs: tuple[str, str] | None = None
+        self._push_started = False
+
+    def redact(self, text: str) -> str:
+        """Delegate redaction to the caller-supplied runner."""
+        return self._delegate.redact(text)
+
+    def contains_secret(self, value: str | bytes) -> bool:
+        """Delegate credential detection to the caller-supplied runner."""
+        return self._delegate.contains_secret(value)
+
+    def base_env(self) -> dict[str, str]:
+        """Delegate the base environment."""
+        return self._delegate.base_env()
+
+    def gh_env(self, reviewer_token: str | None = None) -> dict[str, str]:
+        """Delegate the GitHub environment."""
+        return self._delegate.gh_env(reviewer_token)
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Freeze PR refs and reject unsafe staged metadata or gitlinks."""
+        argv = tuple(str(value) for value in args)
+        is_real_push = argv[:2] == ("git", "push") and "--recurse-submodules=no" in argv
+        if is_real_push:
+            self._reject_gitlink_changes(
+                argv=argv,
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+            )
+            self._push_started = True
+
+        result = self._delegate.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            input_text=input_text,
+            check=check,
+            max_output=max_output,
+            watch_path=watch_path,
+        )
+        if argv[
+            : len(STAGED_RAW_COMMAND)
+        ] == STAGED_RAW_COMMAND and self.contains_secret(result.stdout):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "credentials",
+                "staged path metadata contains a known credential value",
+            )
+        if not self._push_started and argv[:3] == ("gh", "pr", "view"):
+            self._require_stable_pr_refs(result.stdout)
+        return result
+
+    def _require_stable_pr_refs(self, output: bytes) -> None:
+        """Reject base or head ref rebinding while SHAs remain unchanged."""
+        try:
+            payload: object = json.loads(output.decode("utf-8", "strict"))
+        except (json.JSONDecodeError, UnicodeError):
+            return
+        if not isinstance(payload, dict) or not all(
+            isinstance(key, str) for key in payload
+        ):
+            return
+        data = cast(JsonObject, payload)
+        base_ref = data.get("baseRefName")
+        head_ref = data.get("headRefName")
+        if not isinstance(base_ref, str) or not isinstance(head_ref, str):
+            return
+        current_refs = (base_ref, head_ref)
+        if self._initial_refs is None:
+            self._initial_refs = current_refs
+            return
+        if current_refs != self._initial_refs:
+            raise LooprError(
+                EXIT_RACE,
+                "stale_state",
+                "pull request base or head ref changed before push",
+            )
+
+    def _reject_gitlink_changes(
+        self,
+        *,
+        argv: tuple[str, ...],
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int,
+    ) -> None:
+        """Fail closed when the exact candidate commit changes a gitlink."""
+        commit_sha = _pushed_commit(argv)
+        if commit_sha is None:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "submodule",
+                "could not identify the exact commit selected for push",
+            )
+        try:
+            result = self._delegate.run(
+                [
+                    "git",
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--raw",
+                    "-z",
+                    "--no-abbrev",
+                    "--no-renames",
+                    "-r",
+                    f"{commit_sha}^",
+                    commit_sha,
+                    "--",
+                ],
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+                check=True,
+                max_output=MAX_GITLINK_DIFF_BYTES,
+            )
+        except CommandError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "submodule",
+                str(exc),
+            ) from exc
+        if _contains_gitlink_change(result.stdout):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "submodule",
+                "submit does not support gitlink changes",
+            )
+
+
 def execute_submit(
     *,
     pr_value: str,
@@ -360,19 +518,38 @@ def execute_submit(
     artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Validate the push destination, then execute one guarded submission."""
+    """Validate the push destination, then execute one transport-safe submission."""
     command_runner = runner or CommandRunner()
     _require_single_push_url(command_runner, repo_dir)
     repo_root = _repo_root(command_runner, repo_dir)
     artifact_exclusion = _artifact_exclusion(repo_root, artifacts_dir)
     if artifact_exclusion is not None:
         _require_artifacts_unstaged(command_runner, repo_root, artifact_exclusion)
-    return submit_core.execute_submit(
+    return submission.execute_submit(
         pr_value=pr_value,
         expected_head=expected_head,
         repo_dir=repo_root,
         artifacts_dir=artifacts_dir,
         runner=_PushAwareRunner(command_runner, artifact_exclusion),
+    )
+
+
+def execute_guarded(
+    *,
+    pr_value: str,
+    expected_head: str,
+    repo_dir: Path,
+    artifacts_dir: Path,
+    runner: CommandRunner | None = None,
+) -> SubmitResult:
+    """Execute submit while freezing refs and rejecting unsafe metadata."""
+    command_runner = runner or CommandRunner()
+    return execute_submit(
+        pr_value=pr_value,
+        expected_head=expected_head,
+        repo_dir=repo_dir,
+        artifacts_dir=artifacts_dir,
+        runner=_SubmitBoundaryRunner(command_runner),
     )
 
 
@@ -525,6 +702,67 @@ def _push_target(argv: tuple[str, ...]) -> tuple[str, str, str, str] | None:
     ):
         return None
     return remote, source, destination, expected_head
+
+
+def _pushed_commit(argv: tuple[str, ...]) -> str | None:
+    """Extract the exact source commit from the constrained push refspec."""
+    if len(argv) < 4:
+        return None
+    source, separator, destination = argv[-1].partition(":")
+    if (
+        separator != ":"
+        or not destination.startswith("refs/heads/")
+        or not _is_sha(source)
+    ):
+        return None
+    return source
+
+
+def _contains_gitlink_change(raw: bytes) -> bool:
+    """Parse a bounded NUL-delimited raw diff and detect mode 160000."""
+    if not raw:
+        return False
+    fields = raw.split(b"\0")
+    if fields[-1]:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "submodule",
+            "Git returned malformed commit diff metadata",
+        )
+    fields.pop()
+    index = 0
+    while index < len(fields):
+        header = fields[index]
+        index += 1
+        parts = header.split()
+        if len(parts) != 5 or not parts[0].startswith(b":"):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "submodule",
+                "Git returned malformed commit diff metadata",
+            )
+        status = parts[4][:1]
+        path_count = 2 if status in {b"C", b"R"} else 1
+        if status not in {b"A", b"C", b"D", b"M", b"R", b"T"}:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "submodule",
+                "Git returned an unexpected commit diff status",
+            )
+        if index + path_count > len(fields) or any(
+            not value for value in fields[index : index + path_count]
+        ):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "submodule",
+                "Git returned malformed commit diff paths",
+            )
+        old_mode = parts[0][1:]
+        new_mode = parts[1]
+        if GITLINK_MODE in {old_mode, new_mode}:
+            return True
+        index += path_count
+    return False
 
 
 def _is_sha(value: str) -> bool:
