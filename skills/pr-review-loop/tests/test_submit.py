@@ -11,7 +11,7 @@ from test_submission import GIT, ScenarioRunner, _fixture_repo, _git, _run_proce
 from scripts import submission as submission_module
 from scripts.models import EXIT_PRECONDITION, EXIT_RACE, JsonObject, LooprError
 from scripts.process import CommandError, CommandResult
-from scripts.submit import execute_submit
+from scripts.submit import execute_guarded as execute_submit
 
 
 class MultiplePushUrlRunner(ScenarioRunner):
