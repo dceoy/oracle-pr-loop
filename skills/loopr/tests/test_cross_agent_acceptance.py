@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from test_review_command import (
@@ -20,6 +20,7 @@ from scripts.models import (
     EXIT_ORACLE,
     EXIT_RACE,
     JsonObject,
+    JsonValue,
     LooprError,
     PullRequest,
     ReviewResult,
@@ -139,9 +140,6 @@ class AcceptanceReviewRunner(CommandRunner):
 class AcceptanceGitHubClient(FakeGitHubClient):
     """Fake GitHub network I/O while exposing real evidence and review contracts."""
 
-    instance: ClassVar[AcceptanceGitHubClient | None] = None
-    snapshots: ClassVar[list[PullRequest]] = []
-
     def __init__(
         self,
         runner: CommandRunner,
@@ -248,18 +246,15 @@ def _review_snapshot(fixture: AcceptanceFixture, *, head_sha: str) -> PullReques
 def _oracle_payload(pull_request: PullRequest, *, verdict: str) -> JsonObject:
     """Return strict fake Oracle JSON for the exact frozen pull-request identity."""
     request_changes = verdict == "REQUEST_CHANGES"
-    blockers = (
-        [
-            {
-                "id": "B1",
-                "title": "Fix the fixture",
-                "description": "The fixture still contains the review blocker.",
-                "required_change": "Replace feature content with fixed content.",
-            }
-        ]
-        if request_changes
-        else []
-    )
+    blockers: list[JsonValue] = []
+    if request_changes:
+        finding: JsonObject = {
+            "id": "B1",
+            "title": "Fix the fixture",
+            "description": "The fixture still contains the review blocker.",
+            "required_change": "Replace feature content with fixed content.",
+        }
+        blockers.append(finding)
     return {
         "schema_version": 1,
         "repository": pull_request.repository,
@@ -370,7 +365,7 @@ def test_cross_agent_request_submit_rereview_flow(
     assert set(request_payload) == REVIEW_SUCCESS_KEYS
     assert request_payload["verdict"] == "REQUEST_CHANGES"
     assert request_payload["head_sha"] == fixture.head_sha
-    assert AcceptanceGitHubClient.instance is not None
+    assert isinstance(AcceptanceGitHubClient.instance, AcceptanceGitHubClient)
     assert AcceptanceGitHubClient.instance.posted_events == ["REQUEST_CHANGES"]
     request_artifacts = Path(cast("str", request_payload["artifacts_dir"]))
     for artifact in (
@@ -407,7 +402,7 @@ def test_cross_agent_request_submit_rereview_flow(
     assert set(approve_payload) == REVIEW_SUCCESS_KEYS
     assert approve_payload["verdict"] == "APPROVE"
     assert approve_payload["head_sha"] == resulting_head
-    assert AcceptanceGitHubClient.instance is not None
+    assert isinstance(AcceptanceGitHubClient.instance, AcceptanceGitHubClient)
     assert AcceptanceGitHubClient.instance.posted_events == ["APPROVE"]
 
     commands = [
