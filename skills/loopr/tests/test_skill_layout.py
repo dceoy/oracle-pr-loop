@@ -114,7 +114,10 @@ def test_runtime_has_no_legacy_agent_or_linux_containment() -> None:
     for path in scripts.glob("*.py"):
         text = path.read_text(encoding="utf-8").lower()
         for concept in forbidden:
-            _require(concept not in text, f"legacy runtime concept in {path}: {concept}")
+            _require(
+                concept not in text,
+                f"legacy runtime concept in {path}: {concept}",
+            )
 
 
 def test_docs_do_not_advertise_the_legacy_interface() -> None:
