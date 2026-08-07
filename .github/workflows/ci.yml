@@ -50,3 +50,19 @@ jobs:
     with:
       language: >
         ["python"]
+  dependabot-auto-merge:
+    if: >
+      github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+    needs:
+      - python-lint-and-scan
+      - python-test
+      - python-test-macos
+    uses: dceoy/gha-for-devops/.github/workflows/dependabot-auto-merge.yml@main  # zizmor: ignore[unpinned-uses]
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+      statuses: read
+    with:
+      unconditional: true
