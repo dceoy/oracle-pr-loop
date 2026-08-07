@@ -1,172 +1,49 @@
 # Operations and cross-agent smoke tests
 
-This reference describes the manual end-to-end workflow for the canonical
-`pr-review-loop` skill. The runtime is identical for every supported host; only
-the discovery path used by the host differs.
+The runtime is identical for every supported host. Codex CLI and Cursor CLI use `.agents/skills/pr-review-loop`; Claude Code uses `.claude/skills/pr-review-loop`. Both discovery locations resolve to the canonical `skills/pr-review-loop` directory.
 
-## Supported host discovery
+## Common flow
 
-| Host | Discovery path | Client-specific requirement |
-| --- | --- | --- |
-| Codex CLI | `.agents/skills/pr-review-loop` | Invoke the repository skill named `pr-review-loop`. |
-| Claude Code | `.claude/skills/pr-review-loop` | Invoke the repository skill named `pr-review-loop`. |
-| Cursor CLI | `.agents/skills/pr-review-loop` | If repository instructions are needed for discovery, point them at the existing `pr-review-loop` skill instead of copying or wrapping it. |
+Choose an iteration limit before starting.
 
-Both discovery links resolve to `skills/pr-review-loop`. Do not create a
-client-specific runtime, wrapper, or fork of the skill.
+1. Run `review` on the exact current PR head.
+2. Finish on `APPROVE`.
+3. On `REQUEST_CHANGES`, let the host implement only `blocking_findings` and run repository QA.
+4. Submit the complete patch with `submit --pr <NUMBER_OR_URL> --expected-head <REVIEWED_HEAD_SHA>`.
+5. Confirm `resulting_head_sha == commit_sha`.
+6. Run a fresh `review` on that head and repeat only when another `REQUEST_CHANGES` is returned.
 
-## Prerequisites
+Operational errors are stop conditions. Do not reinterpret them as review verdicts.
 
-Before a manual smoke test, verify all of the following:
+## Codex CLI smoke test
 
-- Python 3.10 or newer and Git are available.
-- GitHub CLI is authenticated for ordinary pull-request reads.
-- `origin` identifies the same GitHub.com repository as the target pull request.
-- The pull request is open, non-draft, and same-repository.
-- The local checkout is on the exact pull-request head that will be reviewed.
-- The host has local push access and a configured Git commit identity.
-- Oracle is installed and Chrome or Chromium is available.
-- Oracle has a persistent browser profile authenticated to ChatGPT.
-- `GH_REVIEW_TOKEN` belongs to a dedicated reviewer account that is different
-  from the pull-request author and can write pull-request reviews.
+Confirm `.agents/skills/pr-review-loop` resolves to the canonical skill and execute the common flow without adding Codex-specific runtime code.
 
-Initialize Oracle's browser profile once before the first review:
+## Claude Code smoke test
+
+Confirm `.claude/skills/pr-review-loop` resolves to the canonical skill and execute the same common flow without a Claude-specific wrapper.
+
+## Cursor CLI smoke test
+
+Use `.agents/skills/pr-review-loop` and execute the same common flow. Repository instructions may point to this skill but must not duplicate it.
+
+## Reviewer setup
+
+`review` requires Oracle, Chrome/Chromium, an authenticated persistent Oracle browser profile, and `GH_REVIEW_TOKEN` for a dedicated reviewer account distinct from the PR author. Initialize the browser profile when necessary:
 
 ```console
 oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-The default profile is `~/.oracle/browser-profile`. Set
-`ORACLE_BROWSER_PROFILE_DIR` when a different persistent profile is required.
+## Recovery
 
-## Common acceptance flow
+Artifacts are private diagnostic evidence under `.pr-review-loop/runs/`; GitHub remains the source of truth.
 
-Choose the iteration limit before starting. A manual smoke test should normally
-use a small limit such as 3. The host agent owns this loop; `pr-review-loop`
-itself does not launch or manage an implementation agent.
+- `stale_head`, other stale-state failures, or lease loss: refresh the checkout and PR state, run a new review, and use the newly reviewed head.
+- `empty_patch`: return to the review result; do not create an empty commit.
+- reviewer identity failure: verify `GH_REVIEW_TOKEN` belongs to the dedicated reviewer.
+- Oracle/schema failure: restore the browser/session or reviewer output; do not weaken schema validation.
+- repository/origin mismatch: stop rather than redirect the patch.
 
-1. Discover and invoke the canonical `pr-review-loop` skill through the
-   host-specific discovery path above.
-2. Run a review against the exact current pull-request head:
-
-   ```console
-   python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
-   ```
-
-3. Inspect the single JSON object on stdout.
-   - `APPROVE` is a successful terminal result.
-   - `REQUEST_CHANGES` is also a successful command result. The host implements
-     only the returned `blocking_findings`, using `implementation_prompt` as
-     reviewer guidance rather than as an instruction to launch another agent.
-   - An `error` object is an operational failure; stop and resolve it before
-     editing or submitting.
-4. After `REQUEST_CHANGES`, let the host agent edit the current checkout and run
-   the repository's normal QA workflow. `pr-review-loop` does not select or run
-   QA.
-5. Submit the complete intended workspace patch against the reviewed head:
-
-   ```console
-   python3 skills/pr-review-loop/scripts/cli.py submit \
-     --pr <NUMBER_OR_URL> \
-     --expected-head <REVIEWED_HEAD_SHA>
-   ```
-
-6. Confirm that `submit` reports one new `resulting_head_sha` and that it equals
-   `commit_sha`.
-7. Run a fresh `review` against the resulting head.
-8. Finish on `APPROVE`. On another `REQUEST_CHANGES`, repeat from step 4 until
-   approval or the chosen iteration limit. If the limit is reached, stop without
-   manufacturing an approval.
-
-A valid verdict exits with status `0`, including `REQUEST_CHANGES`. Input,
-Oracle/schema, GitHub/write, and stale-state failures use non-zero statuses. See
-`command-contracts.md` for the normative JSON fields and exit classes.
-
-## Codex CLI smoke test
-
-1. Open the repository from its pull-request head.
-2. Confirm `.agents/skills/pr-review-loop` resolves to `skills/pr-review-loop`.
-3. Ask Codex CLI to use the repository `pr-review-loop` skill for the target pull
-   request.
-4. Execute the common acceptance flow without adding Codex-specific scripts or
-   runtime branches.
-5. Pass when the flow reaches a fresh `APPROVE`, or record an iteration-limit
-   stop as an incomplete smoke test rather than success.
-
-## Claude Code smoke test
-
-1. Open the repository from its pull-request head.
-2. Confirm `.claude/skills/pr-review-loop` resolves to `skills/pr-review-loop`.
-3. Ask Claude Code to use the repository `pr-review-loop` skill for the target
-   pull request.
-4. Execute the common acceptance flow without adding Claude-specific scripts or
-   runtime branches.
-5. Pass when the flow reaches a fresh `APPROVE`, or record an iteration-limit
-   stop as incomplete.
-
-## Cursor CLI smoke test
-
-1. Open the repository from its pull-request head.
-2. Confirm `.agents/skills/pr-review-loop` resolves to `skills/pr-review-loop`.
-3. Ask Cursor CLI to use the repository `pr-review-loop` skill. If the local
-   Cursor setup requires repository instructions to surface the skill, reference
-   the existing `.agents/skills/pr-review-loop` path there; do not duplicate the
-   skill.
-4. Execute the common acceptance flow without adding Cursor-specific production
-   code.
-5. Pass when the flow reaches a fresh `APPROVE`, or record an iteration-limit
-   stop as incomplete.
-
-## Audit artifacts
-
-Each command creates a private run directory below `.pr-review-loop/runs/` by
-default. Review artifacts capture the frozen pull-request snapshot, evidence
-bundle, validated Oracle result, posted review metadata, and final result. Submit
-artifacts capture the validated staged patch, commit metadata, push metadata, and
-final result.
-
-Treat artifacts as diagnostic evidence, not as a second source of truth for the
-current pull-request head. Re-read GitHub state by running a fresh command after
-any race or manual intervention.
-
-## Troubleshooting
-
-### Oracle cannot produce a review
-
-Re-run the manual-login command and confirm the persistent browser profile is
-usable. Do not weaken Oracle schema validation or repair malformed output.
-
-### Reviewer identity is rejected
-
-Confirm `GH_REVIEW_TOKEN` belongs to the dedicated reviewer and not to the
-pull-request author. Keep reviewer credentials out of Oracle input and repository
-files.
-
-### `stale_head`, another stale-state error, or lease loss
-
-Do not force the previous result through. Refresh the checkout and pull-request
-state, run a new `review`, and use the newly reviewed head as the next
-`--expected-head`.
-
-### `empty_patch`
-
-The host made no submit-worthy workspace change. Do not create an empty commit;
-return to the review result and determine whether a blocking finding still needs
-implementation.
-
-### Repository or origin mismatch
-
-Stop. `submit` intentionally refuses to redirect a patch to a repository other
-than the pull request's same-repository head.
-
-## Known limitations
-
-- GitHub.com only; GitHub Enterprise is not supported.
-- Fork pull requests are not supported.
-- CI status is not an approval gate.
-- Review posting is aggregate rather than inline.
-- The host agent, not `pr-review-loop`, owns editing, repository QA, iteration
-  count, and interpretation of non-blocking notes.
-- `pr-review-loop` does not sandbox or contain the host agent and does not launch
-  Codex, Claude Code, Cursor CLI, or another implementation agent.
+GitHub.com same-repository PRs only. Forks and GitHub Enterprise are unsupported; CI status is not an approval gate.

@@ -39,50 +39,37 @@ def parser() -> argparse.ArgumentParser:
         "review",
         help="review and post one exact pull-request snapshot",
     )
-    review.add_argument(
-        "--pr",
-        required=True,
-        help="positive PR number or canonical GitHub pull URL",
+    submit = subcommands.add_parser(
+        "submit",
+        help="validate, commit, and lease-protect a workspace patch",
     )
-    review.add_argument(
-        "--repo-dir",
-        default=".",
-        help="local checkout used for immutable Git object reads",
-    )
-    review.add_argument(
-        "--artifacts-dir",
-        default=".pr-review-loop",
-        help="private artifact directory",
-    )
+
+    for command in (review, submit):
+        command.add_argument(
+            "--pr",
+            required=True,
+            help="positive PR number or canonical GitHub pull URL",
+        )
+        command.add_argument(
+            "--repo-dir",
+            default=".",
+            help="local checkout containing the target pull request",
+        )
+        command.add_argument(
+            "--artifacts-dir",
+            default=".pr-review-loop",
+            help="private artifact directory",
+        )
+
     review.add_argument(
         "--oracle-thinking-time",
         choices=("light", "standard", "extended", "heavy"),
         default="heavy",
     )
-
-    submit = subcommands.add_parser(
-        "submit",
-        help="validate, commit, and lease-protect a workspace patch",
-    )
-    submit.add_argument(
-        "--pr",
-        required=True,
-        help="positive PR number or canonical GitHub pull URL",
-    )
     submit.add_argument(
         "--expected-head",
         required=True,
         help="full PR head SHA on which the workspace is based",
-    )
-    submit.add_argument(
-        "--repo-dir",
-        default=".",
-        help="local checkout containing the host-agent patch",
-    )
-    submit.add_argument(
-        "--artifacts-dir",
-        default=".pr-review-loop",
-        help="private artifact directory",
     )
     return root
 
