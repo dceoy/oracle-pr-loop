@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import stat
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-
 from scripts.artifacts import ArtifactWriter
 from scripts.models import LooprError
 from scripts.process import CommandRunner
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_json_redacts_secrets_before_serialization(tmp_path: Path) -> None:

@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
-from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-
 from scripts import cli
 from scripts.models import (
     EXIT_PRECONDITION,
@@ -21,12 +20,16 @@ from scripts.models import (
 from scripts.process import CommandError, CommandResult, CommandRunner
 from scripts.submit import execute_submit
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
 
 def _git_executable() -> str:
     """Return the Git executable required by integration tests."""
     executable = shutil.which("git")
     if executable is None:
-        raise RuntimeError("git is required for submit integration tests")
+        msg = "git is required for submit integration tests"
+        raise RuntimeError(msg)
     return executable
 
 
@@ -97,7 +100,8 @@ class ScenarioRunner(CommandRunner):
         stdout = completed.stdout
         stderr = self.redact(completed.stderr.decode("utf-8", "replace"))
         if len(stdout) > max_output:
-            raise CommandError("command output exceeded bound")
+            msg = "command output exceeded bound"
+            raise CommandError(msg)
         if check and completed.returncode != 0:
             detail = stderr.strip() or stdout.decode("utf-8", "replace").strip()
             raise CommandError(detail or f"command failed: {' '.join(argv)}")

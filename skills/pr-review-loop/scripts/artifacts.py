@@ -7,12 +7,13 @@ import os
 import stat
 import uuid
 from contextlib import suppress
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .models import EXIT_PRECONDITION, JsonValue, LooprError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .process import CommandRunner
 
 
@@ -20,7 +21,12 @@ class ArtifactWriter:
     """Write redacted artifacts atomically into a private real directory."""
 
     def __init__(self, root: Path, runner: CommandRunner) -> None:
-        """Create and validate the private artifact root."""
+        """Create and validate the private artifact root.
+
+        Raises:
+            LooprError: The directory could not be created, inspected, or is
+                not a private real directory.
+        """
         self.root = root.resolve()
         self.runner = runner
         try:
@@ -44,7 +50,14 @@ class ArtifactWriter:
             )
 
     def _path(self, relative: str) -> Path:
-        """Resolve an artifact path without permitting root escape."""
+        """Resolve an artifact path without permitting root escape.
+
+        Returns:
+            The resolved path under the private artifact root.
+
+        Raises:
+            LooprError: The resolved path escapes the artifact root.
+        """
         path = self.root / relative
         try:
             path.parent.resolve().relative_to(self.root)
@@ -57,19 +70,19 @@ class ArtifactWriter:
         return path
 
     def text(self, relative: str, value: str) -> Path:
-        """Atomically write redacted UTF-8 text with mode 0600."""
+        """Atomically write redacted UTF-8 text with mode 0600.
+
+        Returns:
+            The path the artifact was written to.
+
+        Raises:
+            LooprError: The write failed.
+        """
         path = self._path(relative)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        safe = self.runner.redact(value)
         try:
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            safe = self.runner.redact(value)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(temporary, flags, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(safe)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(path)
+            self._atomic_write(path, temporary, safe)
         except OSError as exc:
             raise LooprError(
                 EXIT_PRECONDITION,
@@ -81,8 +94,24 @@ class ArtifactWriter:
                 temporary.unlink(missing_ok=True)
         return path
 
+    @staticmethod
+    def _atomic_write(path: Path, temporary: Path, content: str) -> None:
+        """Write content to a private temporary file, then atomically publish it."""
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+
     def json(self, relative: str, value: JsonValue) -> Path:
-        """Write canonical indented JSON as a private artifact."""
+        """Write canonical indented JSON as a private artifact.
+
+        Returns:
+            The path the artifact was written to.
+        """
         serialized = json.dumps(
             self._redact(value),
             sort_keys=True,
@@ -99,6 +128,9 @@ class ArtifactWriter:
         secret containing one of those characters no longer matches the
         known secret value by the time `text()` scans it. Redacting each
         string leaf before serialization catches it while it is still exact.
+
+        Returns:
+            A copy of value with every string leaf redacted.
         """
         if isinstance(value, str):
             return self.runner.redact(value)

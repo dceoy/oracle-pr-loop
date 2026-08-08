@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from test_submission import GIT, ScenarioRunner, _fixture_repo, _git, _run_process
-
 from scripts import submission as submission_module
 from scripts.models import EXIT_PRECONDITION, EXIT_RACE, JsonObject, LooprError
 from scripts.process import CommandError, CommandResult
 from scripts.submit import execute_guarded, execute_submit
+from test_submission import GIT, ScenarioRunner, _fixture_repo, _git, _run_process
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 class MultiplePushUrlRunner(ScenarioRunner):
@@ -82,7 +84,8 @@ class AmbiguousPushRunner(ScenarioRunner):
         )
         if argv[:2] == ["git", "push"] and self.fail_after_push:
             self.fail_after_push = False
-            raise CommandError("connection dropped after remote update")
+            msg = "connection dropped after remote update"
+            raise CommandError(msg)
         return result
 
 
@@ -144,7 +147,8 @@ class TransientGitHubAfterPushRunner(ScenarioRunner):
             and self.fail_next_snapshot
         ):
             self.fail_next_snapshot = False
-            raise CommandError("temporary GitHub API failure")
+            msg = "temporary GitHub API failure"
+            raise CommandError(msg)
         result = super().run(
             argv,
             cwd=cwd,
@@ -242,7 +246,8 @@ class TransientRemoteConfirmationRunner(ScenarioRunner):
             and self.fail_first_recovery
         ):
             self.fail_first_recovery = False
-            raise CommandError("temporary remote confirmation failure")
+            msg = "temporary remote confirmation failure"
+            raise CommandError(msg)
         result = super().run(
             argv,
             cwd=cwd,
@@ -256,7 +261,8 @@ class TransientRemoteConfirmationRunner(ScenarioRunner):
         if argv[:2] == ["git", "push"] and self.fail_after_push:
             self.fail_after_push = False
             self.remote_updated = True
-            raise CommandError("connection dropped after remote update")
+            msg = "connection dropped after remote update"
+            raise CommandError(msg)
         return result
 
 
@@ -283,7 +289,8 @@ class DelayedRemoteAcceptanceRunner(ScenarioRunner):
         argv = [str(value) for value in args]
         if argv[:2] == ["git", "push"]:
             self.pending_commit = argv[-1].split(":", 1)[0]
-            raise CommandError("connection dropped before remote confirmation")
+            msg = "connection dropped before remote confirmation"
+            raise CommandError(msg)
         if (
             argv[:4] == ["git", "ls-remote", "--refs", "origin"]
             and self.pending_commit is not None
@@ -334,7 +341,8 @@ class RecoveryDeadlineRunner(ScenarioRunner):
         argv = [str(value) for value in args]
         if argv[:2] == ["git", "push"]:
             self.pending_commit = argv[-1].split(":", 1)[0]
-            raise CommandError("connection dropped before remote confirmation")
+            msg = "connection dropped before remote confirmation"
+            raise CommandError(msg)
         if (
             argv[:4] == ["git", "ls-remote", "--refs", "origin"]
             and self.pending_commit is not None
@@ -507,7 +515,9 @@ def test_lease_loss_does_not_write_tags_or_submodule_remotes(tmp_path: Path) -> 
     submodule_remote = tmp_path / "submodule.git"
     submodule_source = tmp_path / "submodule-source"
     _run_process([GIT, "init", "--bare", str(submodule_remote)], cwd=tmp_path)
-    _run_process([GIT, "clone", str(submodule_remote), str(submodule_source)], cwd=tmp_path)
+    _run_process(
+        [GIT, "clone", str(submodule_remote), str(submodule_source)], cwd=tmp_path
+    )
     _git(submodule_source, "config", "user.name", "PR Review Loop Test")
     _git(submodule_source, "config", "user.email", "pr-review-loop@example.invalid")
     (submodule_source / "submodule.txt").write_text("published\n", encoding="utf-8")
@@ -590,7 +600,9 @@ def test_previous_artifacts_are_excluded_from_submit(tmp_path: Path) -> None:
         runner=ScenarioRunner(repo, remote, state),
     )
 
-    committed_paths = _git(repo, "ls-tree", "-r", "--name-only", result.commit_sha).splitlines()
+    committed_paths = _git(
+        repo, "ls-tree", "-r", "--name-only", result.commit_sha
+    ).splitlines()
     assert "file.txt" in committed_paths
     assert not any(path.startswith(".pr-review-loop/") for path in committed_paths)
 
@@ -776,12 +788,16 @@ def test_ref_rebinding_fails_before_staging(
     assert captured.value.category == "stale_state"
 
 
-def test_forged_tracking_ref_cannot_publish_an_unpublished_gitlink(tmp_path: Path) -> None:
+def test_forged_tracking_ref_cannot_publish_an_unpublished_gitlink(
+    tmp_path: Path,
+) -> None:
     repo, remote, state, _base, _head = _fixture_repo(tmp_path)
     submodule_remote = tmp_path / "submodule.git"
     submodule_source = tmp_path / "submodule-source"
     _run_process([GIT, "init", "--bare", str(submodule_remote)], cwd=tmp_path)
-    _run_process([GIT, "clone", str(submodule_remote), str(submodule_source)], cwd=tmp_path)
+    _run_process(
+        [GIT, "clone", str(submodule_remote), str(submodule_source)], cwd=tmp_path
+    )
     _git(submodule_source, "config", "user.name", "PR Review Loop Test")
     _git(submodule_source, "config", "user.email", "pr-review-loop@example.invalid")
     (submodule_source / "submodule.txt").write_text("published\n", encoding="utf-8")
@@ -814,7 +830,9 @@ def test_forged_tracking_ref_cannot_publish_an_unpublished_gitlink(tmp_path: Pat
     _git(submodule, "commit", "-am", "unpublished submodule")
     unpublished_submodule_head = _git(submodule, "rev-parse", "HEAD")
     assert unpublished_submodule_head != published_submodule_head
-    _git(submodule, "update-ref", "refs/remotes/origin/main", unpublished_submodule_head)
+    _git(
+        submodule, "update-ref", "refs/remotes/origin/main", unpublished_submodule_head
+    )
 
     with pytest.raises(LooprError) as captured:
         execute_guarded(

@@ -25,27 +25,26 @@ if TYPE_CHECKING:
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
-PR_FIELDS = ",".join((
-    "url",
-    "number",
-    "title",
-    "body",
-    "author",
-    "state",
-    "isDraft",
-    "baseRefName",
-    "baseRefOid",
-    "headRefName",
-    "headRefOid",
-    "headRepository",
-    "headRepositoryOwner",
-    "files",
-    "changedFiles",
-))
+OWNER_REPO_PART_COUNT = 2
+PR_URL_PART_COUNT = 4
+LS_TREE_FIELD_COUNT = 4
+MIN_PRINTABLE_CODEPOINT = 32
+DEL_CODEPOINT = 127
+PR_FIELDS = (
+    "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
+    "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
+)
 
 
 def normalize_repo(remote: str) -> str:
-    """Normalize one unambiguous GitHub.com repository remote."""
+    """Normalize one unambiguous GitHub.com repository remote.
+
+    Returns:
+        The `owner/name` repository identifier.
+
+    Raises:
+        LooprError: remote is not an unambiguous github.com repository URL.
+    """
     value = remote.strip()
     match = re.fullmatch(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?", value)
     if match is not None:
@@ -64,7 +63,7 @@ def normalize_repo(remote: str) -> str:
                 "origin must be an unambiguous github.com URL",
             )
         parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) != 2:
+        if len(parts) != OWNER_REPO_PART_COUNT:
             raise LooprError(
                 EXIT_PRECONDITION,
                 "repository",
@@ -82,7 +81,16 @@ def normalize_repo(remote: str) -> str:
 
 
 def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
-    """Resolve a positive PR number or canonical GitHub pull URL."""
+    """Resolve a positive PR number or canonical GitHub pull URL.
+
+    Returns:
+        The repository, PR number, and canonical pull URL.
+
+    Raises:
+        LooprError: value is not a positive number or canonical GitHub pull
+            URL, a numeric value is given without origin_repo, or the
+            resolved PR number is not positive.
+    """
     if value.isdecimal():
         if origin_repo is None:
             raise LooprError(
@@ -99,7 +107,7 @@ def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
             or parsed.netloc.lower() != "github.com"
             or parsed.query
             or parsed.fragment
-            or len(parts) != 4
+            or len(parts) != PR_URL_PART_COUNT
             or parts[2] != "pull"
             or not parts[3].isdecimal()
         ):
@@ -121,9 +129,15 @@ def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
 
 
 def validate_ref(ref: str) -> None:
-    """Reject Git refs that can alter command interpretation or traversal."""
+    """Reject Git refs that can alter command interpretation or traversal.
+
+    Raises:
+        LooprError: ref is unsafe.
+    """
     forbidden = any(
-        ord(character) < 32 or ord(character) == 127 or character in " ~^:?*[\\"
+        ord(character) < MIN_PRINTABLE_CODEPOINT
+        or ord(character) == DEL_CODEPOINT
+        or character in " ~^:?*[\\"
         for character in ref
     )
     if (
@@ -138,12 +152,22 @@ def validate_ref(ref: str) -> None:
 
 
 def validate_path(path: str) -> str:
-    """Reject changed paths that can escape the immutable Git snapshot."""
+    """Reject changed paths that can escape the immutable Git snapshot.
+
+    Returns:
+        path, unchanged.
+
+    Raises:
+        LooprError: path is unsafe.
+    """
     if (
         not path
         or "\\" in path
         or "\0" in path
-        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        or any(
+            ord(character) < MIN_PRINTABLE_CODEPOINT or ord(character) == DEL_CODEPOINT
+            for character in path
+        )
     ):
         raise LooprError(EXIT_PRECONDITION, "path", "invalid changed path")
     pure = PurePosixPath(path)
@@ -158,7 +182,14 @@ def validate_path(path: str) -> str:
 
 
 def _json_object(text: str, *, category: str) -> JsonObject:
-    """Decode exactly one JSON object without repairing malformed data."""
+    """Decode exactly one JSON object without repairing malformed data.
+
+    Returns:
+        The decoded JSON object.
+
+    Raises:
+        LooprError: text is not exactly one JSON object.
+    """
     try:
         value: object = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -173,11 +204,18 @@ def _json_object(text: str, *, category: str) -> JsonObject:
             category,
             "GitHub returned a non-object JSON response",
         )
-    return cast(JsonObject, value)
+    return cast("JsonObject", value)
 
 
 def _object(value: JsonValue | None, *, field: str) -> JsonObject:
-    """Require a JSON object field."""
+    """Require a JSON object field.
+
+    Returns:
+        value.
+
+    Raises:
+        LooprError: value is not an object.
+    """
     if not isinstance(value, dict):
         message = f"GitHub field {field} must be an object"
         raise LooprError(EXIT_GITHUB, "github_schema", message)
@@ -185,7 +223,14 @@ def _object(value: JsonValue | None, *, field: str) -> JsonObject:
 
 
 def _string(value: JsonValue | None, *, field: str, allow_empty: bool = False) -> str:
-    """Require a JSON string field."""
+    """Require a JSON string field.
+
+    Returns:
+        value.
+
+    Raises:
+        LooprError: value is not a string, or is empty and allow_empty is false.
+    """
     if not isinstance(value, str) or (not allow_empty and not value):
         message = f"GitHub field {field} must be a string"
         raise LooprError(EXIT_GITHUB, "github_schema", message)
@@ -193,7 +238,14 @@ def _string(value: JsonValue | None, *, field: str, allow_empty: bool = False) -
 
 
 def _integer(value: JsonValue | None, *, field: str) -> int:
-    """Require a non-Boolean JSON integer field."""
+    """Require a non-Boolean JSON integer field.
+
+    Returns:
+        value.
+
+    Raises:
+        LooprError: value is not a non-Boolean integer.
+    """
     if isinstance(value, bool) or not isinstance(value, int):
         message = f"GitHub field {field} must be an integer"
         raise LooprError(EXIT_GITHUB, "github_schema", message)
@@ -226,7 +278,14 @@ class GitHubClient:
         input_text: str | None = None,
         max_output: int = 24 * 1024 * 1024,
     ) -> str:
-        """Run a GitHub CLI command and decode strict UTF-8 output."""
+        """Run a GitHub CLI command and decode strict UTF-8 output.
+
+        Returns:
+            The command's decoded stdout.
+
+        Raises:
+            LooprError: The command failed or its output was not UTF-8.
+        """
         try:
             result = self.runner.run(
                 ["gh", *args],
@@ -250,7 +309,12 @@ class GitHubClient:
         return env
 
     def initialize(self, pr_value: str) -> None:
-        """Resolve the local repository, target PR, and reviewer identity."""
+        """Resolve the local repository, target PR, and reviewer identity.
+
+        Raises:
+            LooprError: The repository, PR, or reviewer identity could not
+                be resolved or is inconsistent.
+        """
         origin_repo: str | None = None
         try:
             root = self.runner.run(
@@ -300,7 +364,15 @@ class GitHubClient:
             )
 
     def snapshot(self) -> PullRequest:
-        """Collect and validate one complete PR snapshot."""
+        """Collect and validate one complete PR snapshot.
+
+        Returns:
+            The validated pull-request snapshot.
+
+        Raises:
+            LooprError: GitHub's response was malformed, inconsistent, or
+                failed identity validation.
+        """
         data = _json_object(
             self._text(
                 ["pr", "view", self.url, "--json", PR_FIELDS],
@@ -375,7 +447,11 @@ class GitHubClient:
         return pull_request
 
     def _validate_snapshot_identity(self, pull_request: PullRequest) -> None:
-        """Validate state, repository identity, refs, and commit IDs."""
+        """Validate state, repository identity, refs, and commit IDs.
+
+        Raises:
+            LooprError: pull_request fails any identity, state, or safety check.
+        """
         if (
             pull_request.number != self.number
             or pull_request.url.rstrip("/").lower() != self.url.lower()
@@ -418,7 +494,14 @@ class GitHubClient:
         validate_ref(pull_request.head_ref)
 
     def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
-        """Read immutable Git data with a strict output bound."""
+        """Read immutable Git data with a strict output bound.
+
+        Returns:
+            The command's raw stdout bytes.
+
+        Raises:
+            LooprError: The command failed.
+        """
         try:
             return self.runner.run(
                 ["git", *args],
@@ -430,7 +513,11 @@ class GitHubClient:
             raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
 
     def ensure_objects(self, pull_request: PullRequest) -> None:
-        """Require both frozen SHAs to name local commit objects."""
+        """Require both frozen SHAs to name local commit objects.
+
+        Raises:
+            LooprError: Either SHA does not name a local commit object.
+        """
         for sha in (pull_request.base_sha, pull_request.head_sha):
             object_type = self.git_bytes(
                 ["cat-file", "-t", sha],
@@ -447,7 +534,16 @@ class GitHubClient:
         *,
         max_output: int,
     ) -> bytes | None:
-        """Read one changed blob, or return None for an explicit omission."""
+        """Read one changed blob, or return None for an explicit omission.
+
+        Returns:
+            The blob's exact bytes, or None if it is absent, not a blob, or
+            exceeds max_output.
+
+        Raises:
+            LooprError: Git returned ambiguous, malformed, or mismatched
+                changed-file metadata.
+        """
         listing = self.git_bytes(
             [
                 "ls-tree",
@@ -472,7 +568,7 @@ class GitHubClient:
             )
         metadata, raw_path = records[0].split(b"\t", 1)
         fields = metadata.split()
-        if len(fields) != 4:
+        if len(fields) != LS_TREE_FIELD_COUNT:
             raise LooprError(
                 EXIT_PRECONDITION,
                 "git",
@@ -512,7 +608,11 @@ class GitHubClient:
         return data
 
     def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Read the exact base-to-head merge-base patch."""
+        """Read the exact base-to-head merge-base patch.
+
+        Returns:
+            The patch's raw bytes.
+        """
         return self.git_bytes(
             [
                 "diff",
@@ -526,7 +626,14 @@ class GitHubClient:
         )
 
     def tracked_paths(self, pull_request: PullRequest) -> tuple[str, ...]:
-        """List every tracked UTF-8 path in the frozen head tree."""
+        """List every tracked UTF-8 path in the frozen head tree.
+
+        Returns:
+            The sorted, distinct tracked paths.
+
+        Raises:
+            LooprError: A tracked path is non-UTF-8, unsafe, or duplicated.
+        """
         output = self.git_bytes(
             ["ls-tree", "-r", "-z", "--name-only", pull_request.head_sha],
             max_output=4 * 1024 * 1024,
@@ -558,7 +665,14 @@ class GitHubClient:
         verdict: str,
         body: str,
     ) -> tuple[int, JsonObject]:
-        """Post one aggregate review anchored to the frozen head SHA."""
+        """Post one aggregate review anchored to the frozen head SHA.
+
+        Returns:
+            The posted review's ID and the raw GitHub response.
+
+        Raises:
+            LooprError: GitHub did not anchor the review to the expected head.
+        """
         payload: JsonObject = {
             "commit_id": pull_request.head_sha,
             "body": body,
@@ -624,7 +738,14 @@ class GitHubClient:
         pull_request: PullRequest,
         review_id: int,
     ) -> JsonObject:
-        """Re-read and validate the posted review identity and commit."""
+        """Re-read and validate the posted review identity and commit.
+
+        Returns:
+            The re-read, validated review response.
+
+        Raises:
+            LooprError: The re-read review's identity or commit does not match.
+        """
         data = _json_object(
             self._text(
                 [

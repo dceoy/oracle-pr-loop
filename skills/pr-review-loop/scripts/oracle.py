@@ -62,7 +62,14 @@ work."""
 
 
 def _json_object(text: str) -> JsonObject:
-    """Decode exactly one Oracle JSON object."""
+    """Decode exactly one Oracle JSON object.
+
+    Returns:
+        The decoded JSON object.
+
+    Raises:
+        LooprError: text is not exactly one JSON object.
+    """
     try:
         value: object = json.loads(text.strip())
     except json.JSONDecodeError as exc:
@@ -77,11 +84,18 @@ def _json_object(text: str) -> JsonObject:
             "oracle_schema",
             "Oracle output must be exactly one JSON object",
         )
-    return cast(JsonObject, value)
+    return cast("JsonObject", value)
 
 
 def _string(value: JsonValue | None, *, field: str) -> str:
-    """Require one non-empty Oracle string field."""
+    """Require one non-empty Oracle string field.
+
+    Returns:
+        The stripped string value.
+
+    Raises:
+        LooprError: value is not a non-empty string.
+    """
     if not isinstance(value, str) or not value.strip():
         message = f"Oracle field {field} must be a non-empty string"
         raise LooprError(EXIT_ORACLE, "oracle_schema", message)
@@ -89,7 +103,14 @@ def _string(value: JsonValue | None, *, field: str) -> str:
 
 
 def _integer(value: JsonValue | None, *, field: str) -> int:
-    """Require one non-Boolean Oracle integer field."""
+    """Require one non-Boolean Oracle integer field.
+
+    Returns:
+        The integer value.
+
+    Raises:
+        LooprError: value is not a non-Boolean integer.
+    """
     if isinstance(value, bool) or not isinstance(value, int):
         message = f"Oracle field {field} must be an integer"
         raise LooprError(EXIT_ORACLE, "oracle_schema", message)
@@ -97,7 +118,14 @@ def _integer(value: JsonValue | None, *, field: str) -> int:
 
 
 def _blocking_findings(value: JsonValue | None) -> tuple[dict[str, str], ...]:
-    """Validate the complete blocking-finding collection."""
+    """Validate the complete blocking-finding collection.
+
+    Returns:
+        The validated blocking findings.
+
+    Raises:
+        LooprError: value is not a well-formed blocking-finding array.
+    """
     if not isinstance(value, list):
         raise LooprError(
             EXIT_ORACLE,
@@ -121,7 +149,14 @@ def _blocking_findings(value: JsonValue | None) -> tuple[dict[str, str], ...]:
 
 
 def _notes(value: JsonValue | None) -> tuple[str, ...]:
-    """Validate the non-blocking note collection."""
+    """Validate the non-blocking note collection.
+
+    Returns:
+        The validated non-blocking notes.
+
+    Raises:
+        LooprError: value is not a well-formed string array.
+    """
     if not isinstance(value, list):
         raise LooprError(
             EXIT_ORACLE,
@@ -132,7 +167,14 @@ def _notes(value: JsonValue | None) -> tuple[str, ...]:
 
 
 def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
-    """Validate Oracle output without inference, repair, or field coercion."""
+    """Validate Oracle output without inference, repair, or field coercion.
+
+    Returns:
+        The validated Oracle review.
+
+    Raises:
+        LooprError: text is not a well-formed Oracle review for pull_request.
+    """
     value = _json_object(text)
     if set(value) != TOP_KEYS:
         raise LooprError(
@@ -200,8 +242,23 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
     )
 
 
+def _require_regular_file(descriptor: int) -> None:
+    """Reject an open file descriptor that is not a regular file.
+
+    Raises:
+        OSError: The descriptor does not refer to a regular file.
+    """
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        msg = "Oracle output path is not a regular file"
+        raise OSError(msg)
+
+
 def _validate_oracle_command(command: list[str]) -> None:
-    """Reject an Oracle command whose aggregate argv exceeds its byte bound."""
+    """Reject an Oracle command whose aggregate argv exceeds its byte bound.
+
+    Raises:
+        LooprError: command's aggregate argv exceeds the byte bound.
+    """
     argument_bytes = sum(len(os.fsencode(argument)) + 1 for argument in command)
     if argument_bytes > MAX_ORACLE_ARG_BYTES:
         raise LooprError(
@@ -209,6 +266,27 @@ def _validate_oracle_command(command: list[str]) -> None:
             "bundle",
             "Oracle command arguments exceed the byte bound",
         )
+
+
+def _snapshot(pull_request: PullRequest) -> JsonObject:
+    """Return the stable pull-request metadata snapshot.
+
+    Returns:
+        The JSON-serializable snapshot object.
+    """
+    return {
+        "repository": pull_request.repository,
+        "pr_number": pull_request.number,
+        "url": pull_request.url,
+        "title": pull_request.title,
+        "body": pull_request.body,
+        "author": pull_request.author,
+        "base_ref": pull_request.base_ref,
+        "base_sha": pull_request.base_sha,
+        "head_ref": pull_request.head_ref,
+        "head_sha": pull_request.head_sha,
+        "changed_paths": list(pull_request.changed_paths),
+    }
 
 
 class OracleClient:
@@ -228,7 +306,15 @@ class OracleClient:
         self.thinking_time = thinking_time
 
     def build_bundle(self, pull_request: PullRequest) -> tuple[Path, ...]:
-        """Build a deterministic bounded review bundle from immutable Git data."""
+        """Build a deterministic bounded review bundle from immutable Git data.
+
+        Returns:
+            The bundle's artifact paths, core files first.
+
+        Raises:
+            LooprError: pull_request or its repository exceeds a bundle limit,
+                or the patch is not clean UTF-8 or contains a known credential.
+        """
         if len(pull_request.changed_paths) > MAX_CHANGED_FILES:
             raise LooprError(
                 EXIT_PRECONDITION,
@@ -262,26 +348,12 @@ class OracleClient:
                 "bundle",
                 "repository exceeds instruction-file limit",
             )
-        snapshot: JsonObject = {
-            "repository": pull_request.repository,
-            "pr_number": pull_request.number,
-            "url": pull_request.url,
-            "title": pull_request.title,
-            "body": pull_request.body,
-            "author": pull_request.author,
-            "base_ref": pull_request.base_ref,
-            "base_sha": pull_request.base_sha,
-            "head_ref": pull_request.head_ref,
-            "head_sha": pull_request.head_sha,
-            "changed_paths": list(pull_request.changed_paths),
-        }
-        changed_paths_text = "\n".join(pull_request.changed_paths) + "\n"
         core = [
-            self.writer.json("snapshot.json", snapshot),
+            self.writer.json("snapshot.json", _snapshot(pull_request)),
             self.writer.text("patch.diff", patch_text),
             self.writer.text(
                 "changed-paths.txt",
-                changed_paths_text,
+                "\n".join(pull_request.changed_paths) + "\n",
             ),
         ]
         manifest: list[JsonValue] = []
@@ -307,7 +379,7 @@ class OracleClient:
                 attachments.append(attachment)
                 total += size
         manifest_path = self.writer.json("bundle-manifest.json", manifest)
-        return tuple([*core, manifest_path, *attachments])
+        return (*core, manifest_path, *attachments)
 
     def _attachment(
         self,
@@ -317,7 +389,15 @@ class OracleClient:
         index: int,
         current_total: int,
     ) -> tuple[JsonObject, tuple[Path, int] | None]:
-        """Create one bounded text attachment or an explicit omission record."""
+        """Create one bounded text attachment or an explicit omission record.
+
+        Returns:
+            The manifest entry, paired with the written attachment path and
+            its size, or None if the file was omitted instead of written.
+
+        Raises:
+            LooprError: path could not be read from the immutable snapshot.
+        """
         data = self.github.changed_file_bytes(
             pull_request,
             path,
@@ -385,7 +465,15 @@ class OracleClient:
         pull_request: PullRequest,
         attachments: tuple[Path, ...],
     ) -> OracleReview:
-        """Invoke Oracle once and strictly validate its bounded output."""
+        """Invoke Oracle once and strictly validate its bounded output.
+
+        Returns:
+            The validated Oracle review.
+
+        Raises:
+            LooprError: attachments exceed a bound, the Oracle command failed,
+                or its output is missing, oversized, or fails validation.
+        """
         if len(attachments) > MAX_ORACLE_ATTACHMENTS:
             raise LooprError(
                 EXIT_PRECONDITION,
@@ -441,8 +529,7 @@ class OracleClient:
                 raw_path,
                 os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0),
             )
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise OSError("Oracle output path is not a regular file")
+            _require_regular_file(descriptor)
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = None
                 raw_bytes = handle.read(MAX_ORACLE_OUTPUT + 1)

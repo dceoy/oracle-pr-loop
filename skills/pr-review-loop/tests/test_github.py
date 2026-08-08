@@ -8,7 +8,6 @@ import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercis
 from typing import TYPE_CHECKING, cast
 
 import pytest
-
 from scripts.artifacts import ArtifactWriter
 from scripts.github import GitHubClient
 from scripts.models import EXIT_PRECONDITION, LooprError, PullRequest
@@ -147,17 +146,19 @@ class _FailingGitHub:
     def __init__(self, repo_dir: Path) -> None:
         self.repo_dir = repo_dir
 
-    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
+    @staticmethod
+    def patch(_pull_request: PullRequest, *, max_output: int) -> bytes:
         """Return a minimal valid UTF-8 patch."""
         del max_output
         return b"diff --git a/file.py b/file.py\n"
 
-    def tracked_paths(self, _pull_request: PullRequest) -> tuple[str, ...]:
+    @staticmethod
+    def tracked_paths(_pull_request: PullRequest) -> tuple[str, ...]:
         """Return the changed path as a tracked head path."""
         return ("file.py",)
 
+    @staticmethod
     def changed_file_bytes(
-        self,
         _pull_request: PullRequest,
         _path: str,
         *,

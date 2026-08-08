@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
+import subprocess  # ruff: ignore[suspicious-subprocess-import] -- this module is the sole, argv-validated, shell=False subprocess boundary
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, NoReturn
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 MAX_OUTPUT = 24 * 1024 * 1024
 MAX_INPUT = 4 * 1024 * 1024
 MAX_STDERR = 1024 * 1024
 POLL_INTERVAL_SECONDS = 0.01
 TERMINATION_GRACE_SECONDS = 2
+MIN_SECRET_LENGTH = 4
 
 
 @dataclass(frozen=True)
@@ -44,7 +47,7 @@ class CommandRunner:
             value
             for key, value in self.source_env.items()
             if value
-            and len(value) >= 4
+            and len(value) >= MIN_SECRET_LENGTH
             and any(
                 marker in key.upper()
                 for marker in (
@@ -61,7 +64,11 @@ class CommandRunner:
         }
 
     def redact(self, text: str) -> str:
-        """Replace every known secret value in text."""
+        """Replace every known secret value in text.
+
+        Returns:
+            text with every known secret value replaced by a placeholder.
+        """
         redacted = text
         for secret in sorted(self.secrets, key=len, reverse=True):
             redacted = redacted.replace(secret, "[REDACTED]")
@@ -74,7 +81,14 @@ class CommandRunner:
         return any(secret in value for secret in self.secrets)
 
     def trusted(self, name: str) -> str:
-        """Resolve an executable only through absolute PATH entries."""
+        """Resolve an executable only through absolute PATH entries.
+
+        Returns:
+            The resolved absolute path to the executable.
+
+        Raises:
+            CommandError: No matching executable was found.
+        """
         candidate = Path(name)
         if candidate.is_absolute():
             return str(candidate)
@@ -168,17 +182,28 @@ class CommandRunner:
         side file (rather than stdout) cannot exhaust disk during a long
         timeout window. A timeout, output overflow, or `KeyboardInterrupt`
         terminates and reaps the direct child before control returns.
+
+        Returns:
+            The completed command's bounded stdout, stderr, and return code.
+
+        Raises:
+            CommandError: The argument vector or bounds were invalid, the
+                command timed out, its output exceeded a bound, or `check`
+                is true and it exited non-zero.
         """
         argv = tuple(str(value) for value in args)
         if not argv or any("\0" in value for value in argv):
-            raise CommandError("invalid subprocess argument vector")
+            msg = "invalid subprocess argument vector"
+            raise CommandError(msg)
         if timeout <= 0 or max_output <= 0:
-            raise CommandError("subprocess bounds must be positive")
+            msg = "subprocess bounds must be positive"
+            raise CommandError(msg)
         executable = self.trusted(argv[0])
         argv = (executable, *argv[1:])
         input_bytes = b"" if input_text is None else input_text.encode()
         if len(input_bytes) > MAX_INPUT:
-            raise CommandError("command input exceeded bound")
+            msg = "command input exceeded bound"
+            raise CommandError(msg)
 
         with (
             tempfile.TemporaryFile(mode="w+b") as stdin_file,
@@ -187,7 +212,7 @@ class CommandRunner:
         ):
             stdin_file.write(input_bytes)
             stdin_file.seek(0)
-            proc = subprocess.Popen(
+            proc = subprocess.Popen(  # ruff: ignore[subprocess-without-shell-equals-true] -- argv is a validated, non-shell tuple
                 argv,
                 cwd=cwd,
                 env=dict(env),
@@ -196,27 +221,9 @@ class CommandRunner:
                 stderr=stderr_file,
                 shell=False,
             )
+            stderr_limit = min(max_output, MAX_STDERR)
             try:
-                deadline = time.monotonic() + timeout
-                stderr_limit = min(max_output, MAX_STDERR)
-                while proc.poll() is None:
-                    self._enforce_output_bounds(
-                        proc,
-                        stdout_file,
-                        stderr_file,
-                        max_output,
-                        stderr_limit,
-                        argv,
-                        watch_path,
-                    )
-                    if time.monotonic() >= deadline:
-                        self._terminate_process(proc)
-                        command = self.redact(" ".join(argv))
-                        message = f"command timed out after {timeout}s: {command}"
-                        raise CommandError(message)
-                    time.sleep(POLL_INTERVAL_SECONDS)
-
-                self._enforce_output_bounds(
+                self._await_completion(
                     proc,
                     stdout_file,
                     stderr_file,
@@ -224,6 +231,7 @@ class CommandRunner:
                     stderr_limit,
                     argv,
                     watch_path,
+                    timeout,
                 )
                 stdout = self._read_spool(stdout_file, max_output)
                 stderr_bytes = self._read_spool(stderr_file, stderr_limit)
@@ -242,6 +250,47 @@ class CommandRunner:
             raise CommandError(message)
         return result
 
+    def _await_completion(
+        self,
+        proc: subprocess.Popen[bytes],
+        stdout_file: BinaryIO,
+        stderr_file: BinaryIO,
+        max_output: int,
+        stderr_limit: int,
+        argv: tuple[str, ...],
+        watch_path: Path | None,
+        timeout: float,
+    ) -> None:
+        """Poll a running child until it exits, its bounds break, or it times out."""
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            self._enforce_output_bounds(
+                proc,
+                stdout_file,
+                stderr_file,
+                max_output,
+                stderr_limit,
+                argv,
+                watch_path,
+            )
+            if time.monotonic() >= deadline:
+                self._terminate_process(proc)
+                self._raise_timeout(argv, timeout)
+            time.sleep(POLL_INTERVAL_SECONDS)
+        self._enforce_output_bounds(
+            proc, stdout_file, stderr_file, max_output, stderr_limit, argv, watch_path
+        )
+
+    def _raise_timeout(self, argv: tuple[str, ...], timeout: float) -> NoReturn:
+        """Raise for a child that missed its wall-clock deadline.
+
+        Raises:
+            CommandError: Always.
+        """
+        command = self.redact(" ".join(argv))
+        message = f"command timed out after {timeout}s: {command}"
+        raise CommandError(message)
+
     def _enforce_output_bounds(
         self,
         proc: subprocess.Popen[bytes],
@@ -252,7 +301,11 @@ class CommandRunner:
         argv: tuple[str, ...],
         watch_path: Path | None = None,
     ) -> None:
-        """Terminate the direct child as soon as a spool exceeds its bound."""
+        """Terminate the direct child as soon as a spool exceeds its bound.
+
+        Raises:
+            CommandError: A bounded spool or the watched path exceeded its limit.
+        """
         stdout_size = os.fstat(stdout_file.fileno()).st_size
         stderr_size = os.fstat(stderr_file.fileno()).st_size
         watch_size = 0
@@ -272,13 +325,21 @@ class CommandRunner:
 
     @staticmethod
     def _read_spool(handle: BinaryIO, limit: int) -> bytes:
-        """Read a previously bounded private spool."""
+        """Read a previously bounded private spool.
+
+        Returns:
+            The spool's contents, from the start, up to limit bytes.
+        """
         handle.seek(0)
         return handle.read(limit)
 
     @staticmethod
     def _wait_for_process_exit(proc: subprocess.Popen[bytes], timeout: float) -> bool:
-        """Wait at most the cleanup budget for the direct child to be reaped."""
+        """Wait at most the cleanup budget for the direct child to be reaped.
+
+        Returns:
+            Whether the process exited within the given timeout.
+        """
         if proc.poll() is not None:
             return True
         try:
@@ -289,7 +350,11 @@ class CommandRunner:
 
     @classmethod
     def _terminate_process(cls, proc: subprocess.Popen[bytes]) -> None:
-        """Terminate and reap the direct child within the cleanup budget."""
+        """Terminate and reap the direct child within the cleanup budget.
+
+        Raises:
+            CommandError: The child could not be reaped within the budget.
+        """
         if proc.poll() is not None:
             return
         with suppress(ProcessLookupError):
@@ -300,4 +365,5 @@ class CommandRunner:
             proc.kill()
         if cls._wait_for_process_exit(proc, TERMINATION_GRACE_SECONDS):
             return
-        raise CommandError("could not reap subprocess")
+        msg = "could not reap subprocess"
+        raise CommandError(msg)
