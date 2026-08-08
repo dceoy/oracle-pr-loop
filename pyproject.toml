@@ -105,14 +105,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**/*.py" = [
+"skills/pr-review-loop/tests/**/*.py" = [
   "undocumented-public-method",     # D102
   "undocumented-public-function",   # D103
   "undocumented-public-init",       # D107
   "docstring-missing-returns",      # DOC201
   "docstring-missing-exception",    # DOC501
   "import-private-name",            # PLC2701
-  "too-many-public-methods",        # PLR0904
   "magic-value-comparison",         # PLR2004
   "no-self-use",                    # PLR6301
   "assert",                         # S101
