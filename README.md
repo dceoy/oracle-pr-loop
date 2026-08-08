@@ -75,30 +75,6 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-## Workflow details
-
-### Start from an Issue
-
-`bootstrap` reads one open Issue and asks Oracle/ChatGPT to turn the Issue plus bounded repository evidence into an implementation-ready prompt. The result is bound to the Issue and an exact default-branch commit snapshot.
-
-Before `bootstrap`, the host must use a clean local branch at the current default-branch tip and ensure `.pr-review-loop/` (or the `--artifacts-dir` override) is excluded from ordinary Git staging, for example through `.git/info/exclude`. `bootstrap` fails closed if the workspace is dirty, the local `HEAD` differs from the bound `base_sha`, or the artifact directory could be staged accidentally.
-
-The host then validates the returned prompt against the bound repository/base metadata, implements the change, runs repository QA, commits, pushes, and opens a PR. `bootstrap` never edits files, implements the Issue, commits, pushes, or creates a PR.
-
-Once the PR exists, Issue-specific state is no longer needed; the normal PR review loop takes over.
-
-### Review and improve a PR
-
-1. Run `review` against the exact current PR head.
-2. Finish on `APPROVE`.
-3. On `REQUEST_CHANGES`, deduplicate and triage each blocking finding against the reviewed head.
-4. Classify each distinct finding as `fix`, `already_addressed`, `outdated`, `clarify`, or `defer`.
-5. Apply only `fix` findings, keeping edits minimal and scoped, then run normal repository QA.
-6. Run `submit` only if triage produced a real workspace patch.
-7. Run a fresh `review` on the new head and repeat as needed.
-
-If triage produces no `fix` disposition, stop rather than submitting or re-reviewing an unchanged head. Report the dispositions and leave any still-open `REQUEST_CHANGES` review for the user or a maintainer to dismiss or override.
-
 ## Internal command interface
 
 Start from an Issue:
