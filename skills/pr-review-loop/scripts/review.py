@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import sys
-import uuid
 from typing import TYPE_CHECKING
 
-from .artifacts import ArtifactWriter, trusted_runs_root
+from .artifacts import ArtifactWriter, claim_run_directory
 from .github import GitHubClient
 from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
 from .oracle import OracleClient
@@ -46,7 +44,11 @@ def execute_review(
     initial = github.snapshot()
     github.ensure_objects(initial)
     writer = ArtifactWriter(
-        _run_directory(repo_dir, artifacts_dir, initial),
+        claim_run_directory(
+            repo_dir,
+            artifacts_dir,
+            f"review-pr-{initial.number}-{initial.head_sha[:12]}",
+        ),
         command_runner,
     )
     writer.json("initial-snapshot.json", initial.raw)
@@ -159,38 +161,6 @@ def _require_fresh_state(
 
 
 MAX_POSTED_BODY_BYTES = 65_000
-_RUN_DIRECTORY_ATTEMPTS = 8
-
-
-def _run_directory(
-    repo_dir: Path,
-    artifacts_dir: Path,
-    pull_request: PullRequest,
-) -> Path:
-    """Atomically claim a collision-resistant, unique run directory.
-
-    Returns:
-        The newly created, exclusively claimed run directory.
-
-    Raises:
-        LooprError: `artifacts_dir` is untrusted, or no unique directory
-            name could be claimed within the retry budget.
-    """
-    root = trusted_runs_root(repo_dir, artifacts_dir)
-    prefix = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}"
-    for _ in range(_RUN_DIRECTORY_ATTEMPTS):
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        candidate = root / f"{prefix}-{stamp}-{uuid.uuid4().hex}"
-        try:
-            candidate.mkdir(mode=0o700)
-        except FileExistsError:
-            continue
-        return candidate
-    raise LooprError(
-        EXIT_RACE,
-        "artifacts",
-        "could not allocate a unique review run directory",
-    )
 
 
 def _dismiss_stale(

@@ -132,6 +132,21 @@ def _local_head(issue_client: IssueClient) -> str:
     )
 
 
+def _local_branch(issue_client: IssueClient) -> str:
+    """Return the local checkout's current branch, or "HEAD" if detached.
+
+    Returns:
+        The branch name `git rev-parse --abbrev-ref HEAD` reports, or the
+        literal string "HEAD" when the checkout has no attached branch.
+    """
+    return (
+        issue_client
+        .git_bytes(["rev-parse", "--abbrev-ref", "HEAD"], max_output=1024)
+        .decode("utf-8", "strict")
+        .strip()
+    )
+
+
 def _ensure_workspace_bound_to_base(
     issue_client: IssueClient,
     base_ref: str,
@@ -145,11 +160,17 @@ def _ensure_workspace_bound_to_base(
     the first commit and pull request on the wrong or contaminated history.
     No run directory has been claimed yet at this point, so the complete
     worktree is checked; nothing, including any pre-existing content under
-    a caller-controlled `--artifacts-dir`, may be excluded.
+    a caller-controlled `--artifacts-dir`, may be excluded. `bootstrap`
+    promises not to mutate Git state, so it cannot create the feature
+    branch itself; it instead requires one to already exist, since the
+    skill tells the host to commit, push, and open a pull request straight
+    from this checkout, and a checkout sitting on the default branch (or
+    detached) would let that first commit land on `base_ref` itself.
 
     Raises:
-        LooprError: local `HEAD` is not base_sha, or tracked or untracked
-            changes are pending.
+        LooprError: local `HEAD` is not base_sha, the checkout is detached
+            or sitting on base_ref itself, or tracked or untracked changes
+            are pending.
     """
     head_sha = _local_head(issue_client)
     if head_sha != base_sha:
@@ -157,6 +178,19 @@ def _ensure_workspace_bound_to_base(
             f"local HEAD ({head_sha}) is not base commit {base_sha} for "
             f"branch {base_ref}; run `git fetch origin {base_ref}` then "
             f"`git switch -c <branch> {base_sha}` before running bootstrap"
+        )
+        raise LooprError(EXIT_PRECONDITION, "workspace", message)
+    local_branch = _local_branch(issue_client)
+    if local_branch in {"HEAD", base_ref}:
+        state = (
+            "in detached HEAD state"
+            if local_branch == "HEAD"
+            else f"on the default branch {base_ref}"
+        )
+        message = (
+            f"local checkout is {state}; run `git switch -c <branch> "
+            f"{base_sha}` before running bootstrap so the first "
+            "implementation commit lands on its own branch"
         )
         raise LooprError(EXIT_PRECONDITION, "workspace", message)
     if _worktree_is_dirty(issue_client, None):

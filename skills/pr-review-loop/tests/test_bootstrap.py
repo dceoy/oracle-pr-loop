@@ -66,6 +66,7 @@ class FakeIssueClient:
     branches: ClassVar[list[str]] = []
     shas: ClassVar[list[str]] = []
     heads: ClassVar[list[bytes]] = []
+    local_branches: ClassVar[list[bytes]] = []
     statuses: ClassVar[list[bytes]] = []
     ignored: ClassVar[bool] = True
 
@@ -76,6 +77,7 @@ class FakeIssueClient:
         self._branches = list(type(self).branches)
         self._shas = list(type(self).shas)
         self._heads = list(type(self).heads)
+        self._local_branches = list(type(self).local_branches)
         self._statuses = list(type(self).statuses)
         self.ensure_calls: list[str] = []
         self.status_args: list[list[str]] = []
@@ -108,6 +110,8 @@ class FakeIssueClient:
     def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
         """Return the next deterministic local `HEAD`/status probe result."""
         del max_output
+        if args[:3] == ["rev-parse", "--abbrev-ref", "HEAD"]:
+            return self._local_branches.pop(0)
         if args[:2] == ["rev-parse", "HEAD"]:
             return self._heads.pop(0)
         if args[:1] == ["status"]:
@@ -176,6 +180,7 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b"", b""]
     install_orchestration_fakes(monkeypatch)
 
@@ -225,6 +230,7 @@ def test_execute_bootstrap_rejects_stale_issue_update(
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
@@ -264,6 +270,7 @@ def test_execute_bootstrap_rejects_comment_edited_during_generation(
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
@@ -290,6 +297,7 @@ def test_execute_bootstrap_rejects_stale_base_branch(
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_B]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
@@ -316,6 +324,7 @@ def test_execute_bootstrap_rejects_renamed_default_branch(
     FakeIssueClient.branches = ["main", "trunk"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
@@ -342,6 +351,7 @@ def test_execute_bootstrap_rejects_head_drift_during_generation(
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_B.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
@@ -368,6 +378,7 @@ def test_execute_bootstrap_rejects_head_mismatched_with_base(
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
     FakeIssueClient.heads = [SHA_B.encode()]
+    FakeIssueClient.local_branches = []
     FakeIssueClient.statuses = []
     install_orchestration_fakes(monkeypatch)
 
@@ -385,6 +396,74 @@ def test_execute_bootstrap_rejects_head_mismatched_with_base(
     assert "git switch" in str(captured.value)
 
 
+def test_execute_bootstrap_rejects_default_branch_as_implementation_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkout sitting directly on the default branch fails closed.
+
+    `bootstrap` never mutates Git state, so it cannot create the feature
+    branch itself; a host that skips creating one and instead commits,
+    pushes, and opens a pull request straight from `main` would either
+    push the implementation to the default branch or fail to open the
+    intended pull request at all.
+    """
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue]
+    FakeIssueClient.branches = ["main"]
+    FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"main"]
+    FakeIssueClient.statuses = []
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "workspace"
+    assert "default branch" in str(captured.value)
+    assert "git switch" in str(captured.value)
+
+
+def test_execute_bootstrap_rejects_detached_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A detached-HEAD checkout at base_sha still fails closed.
+
+    A detached checkout has no branch identity to distinguish it from
+    `base_ref`, so the same handoff hazard applies as sitting on main.
+    """
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue]
+    FakeIssueClient.branches = ["main"]
+    FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"HEAD"]
+    FakeIssueClient.statuses = []
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "workspace"
+    assert "detached HEAD" in str(captured.value)
+
+
 def test_execute_bootstrap_rejects_dirty_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -395,6 +474,7 @@ def test_execute_bootstrap_rejects_dirty_workspace(
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
     FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b" M some-tracked-file.py\n"]
     install_orchestration_fakes(monkeypatch)
 
@@ -427,6 +507,7 @@ def test_execute_bootstrap_rejects_untracked_files_on_base_commit(
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
     FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b"?? untracked-file.py\n"]
     install_orchestration_fakes(monkeypatch)
 
@@ -693,6 +774,7 @@ def test_execute_bootstrap_rejects_unignored_artifact_directory(
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
     FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
     monkeypatch.setattr(FakeIssueClient, "ignored", False)
@@ -729,6 +811,7 @@ def test_execute_bootstrap_rejects_workspace_dirtied_during_generation(
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b"", b"?? new-file.py\n"]
     install_orchestration_fakes(monkeypatch)
 
@@ -770,6 +853,7 @@ def test_execute_bootstrap_propagates_issue_closed_during_generation(
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
     FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     monkeypatch.setattr(bootstrap_module, "IssueClient", ClosingIssueClient)
     monkeypatch.setattr(
@@ -810,6 +894,7 @@ def test_execute_bootstrap_names_fetch_remedy_when_base_missing(
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
     FakeIssueClient.heads = []
+    FakeIssueClient.local_branches = []
     FakeIssueClient.statuses = []
     monkeypatch.setattr(bootstrap_module, "IssueClient", MissingBaseIssueClient)
     monkeypatch.setattr(
