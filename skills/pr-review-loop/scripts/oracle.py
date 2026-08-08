@@ -23,7 +23,7 @@ from .models import (
 from .process import CommandError
 
 if TYPE_CHECKING:
-    from .artifacts import ArtifactWriter
+    from .artifacts import TemporaryFileWriter
     from .github import GitHubClient, IssueClient
     from .process import CommandRunner
 
@@ -383,7 +383,7 @@ def _issue_snapshot(issue: IssueSnapshot) -> JsonObject:
 
 
 def _bounded_text_attachment(
-    writer: ArtifactWriter,
+    writer: TemporaryFileWriter,
     runner: CommandRunner,
     data: bytes | None,
     *,
@@ -461,7 +461,7 @@ def _bounded_text_attachment(
 
 def _invoke_oracle(
     runner: CommandRunner,
-    writer: ArtifactWriter,
+    writer: TemporaryFileWriter,
     repo_dir: Path,
     thinking_time: str,
     prompt: str,
@@ -487,7 +487,6 @@ def _invoke_oracle(
             "Oracle attachment count exceeds the command bound",
         )
     raw_path = writer.root / "oracle-raw.json"
-    writer.text("oracle-prompt.txt", prompt)
     command = [
         "oracle",
         "--engine",
@@ -559,7 +558,6 @@ def _invoke_oracle(
             "oracle",
             "Oracle output exceeded bounds or contained a credential",
         )
-    writer.text("oracle-raw.json", raw)
     return raw
 
 
@@ -570,7 +568,7 @@ class OracleClient:
         self,
         runner: CommandRunner,
         github: GitHubClient,
-        writer: ArtifactWriter,
+        writer: TemporaryFileWriter,
         thinking_time: str,
     ) -> None:
         """Initialize the Oracle review client."""
@@ -715,7 +713,6 @@ class OracleClient:
             max_attachments=MAX_ORACLE_ATTACHMENTS,
         )
         parsed = parse_review(raw, pull_request)
-        self.writer.json("validated-review.json", parsed.raw)
         return parsed
 
 
@@ -726,7 +723,7 @@ class BootstrapOracleClient:
         self,
         runner: CommandRunner,
         issue_client: IssueClient,
-        writer: ArtifactWriter,
+        writer: TemporaryFileWriter,
         thinking_time: str,
     ) -> None:
         """Initialize the Oracle bootstrap client."""
@@ -833,5 +830,4 @@ class BootstrapOracleClient:
             max_attachments=MAX_BOOTSTRAP_ATTACHMENTS,
         )
         parsed = parse_bootstrap(raw, issue, base_sha)
-        self.writer.json("validated-bootstrap.json", parsed.raw)
         return parsed

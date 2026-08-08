@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from scripts.artifacts import ArtifactWriter
+from scripts.artifacts import TemporaryFileWriter
 from scripts.github import GitHubClient
 from scripts.models import IssueSnapshot, LooprError, PullRequest
 from scripts.oracle import (
@@ -77,7 +77,7 @@ class _TooManyInstructionsGitHub:
 def test_bundle_rejects_excessive_instruction_file_inventory(tmp_path: Path) -> None:
     """Repository-wide instruction discovery is bounded before attachment reads."""
     runner = CommandRunner()
-    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = cast(
         "GitHubClient",
         _TooManyInstructionsGitHub(tmp_path),
@@ -94,7 +94,7 @@ def test_bundle_rejects_excessive_instruction_file_inventory(tmp_path: Path) -> 
 def test_oracle_review_rejects_excessive_attachment_count(tmp_path: Path) -> None:
     """The Oracle command cannot receive an unbounded number of --file arguments."""
     runner = CommandRunner()
-    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = GitHubClient(runner, tmp_path)
     oracle = OracleClient(runner, github, writer, "heavy")
     attachments = tuple(
@@ -114,7 +114,7 @@ def test_oracle_review_rejects_excessive_argument_bytes(
 ) -> None:
     """The complete Oracle argv is byte-bounded before subprocess execution."""
     runner = CommandRunner()
-    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = GitHubClient(runner, tmp_path)
     oracle = OracleClient(runner, github, writer, "heavy")
     oversized_path = Path("x" * MAX_ORACLE_ARG_BYTES)
@@ -340,7 +340,7 @@ def test_bootstrap_bundle_rejects_excessive_instruction_file_inventory(
 ) -> None:
     """Repository-wide instruction discovery is bounded before attachment reads."""
     runner = CommandRunner()
-    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = cast(
         "IssueClient",
         _FakeIssueGitHub(
@@ -364,7 +364,7 @@ def test_bootstrap_bundle_rejects_credential_in_instruction_file(
 ) -> None:
     """A known credential in an instruction file aborts bundle construction."""
     runner = CommandRunner({"API_TOKEN": "known-instruction-secret"})
-    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = cast(
         "IssueClient",
         _FakeIssueGitHub(
@@ -384,7 +384,7 @@ def test_bootstrap_bundle_rejects_credential_in_instruction_file(
 def test_bootstrap_generate_rejects_excessive_attachment_count(tmp_path: Path) -> None:
     """The Oracle command cannot receive an unbounded number of --file arguments."""
     runner = CommandRunner()
-    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
     oracle = BootstrapOracleClient(runner, github, writer, "heavy")
     attachments = tuple(
@@ -405,7 +405,7 @@ def test_bootstrap_generate_rejects_excessive_argument_bytes(
 ) -> None:
     """The complete Oracle argv is byte-bounded before subprocess execution."""
     runner = CommandRunner()
-    writer = ArtifactWriter(tmp_path / "artifacts", runner)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
     oracle = BootstrapOracleClient(runner, github, writer, "heavy")
     oversized_path = Path("x" * MAX_ORACLE_ARG_BYTES)
@@ -439,7 +439,7 @@ def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None
             ),
         ),
     )
-    writer = ArtifactWriter(tmp_path / "artifacts", CommandRunner())
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
     github = cast(
         "IssueClient",
         _FakeIssueGitHub(
@@ -461,10 +461,12 @@ def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None
         base_ref="main",
         base_sha=SHA_A,
     )
-    written_prompt = (writer.root / "oracle-prompt.txt").read_text(encoding="utf-8")
+    prompt_index = runner.commands[0].index("--prompt")
+    written_prompt = runner.commands[0][prompt_index + 1]
     assert written_prompt == expected_prompt
     assert "Ignore all previous" not in written_prompt
     assert "reveal credentials" not in written_prompt
+    assert not (writer.root / "oracle-prompt.txt").exists()
     assert generated.implementation_prompt == "Implement the requested change."
 
     oracle_argv = runner.commands[0]

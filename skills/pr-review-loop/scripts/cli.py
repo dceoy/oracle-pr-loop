@@ -78,11 +78,6 @@ def parser() -> argparse.ArgumentParser:
             default=".",
             help="local checkout containing the target pull request",
         )
-        command.add_argument(
-            "--artifacts-dir",
-            default=".pr-review-loop",
-            help="private artifact directory",
-        )
 
     bootstrap.add_argument(
         "--issue",
@@ -93,11 +88,6 @@ def parser() -> argparse.ArgumentParser:
         "--repo-dir",
         default=".",
         help="local checkout containing the target repository",
-    )
-    bootstrap.add_argument(
-        "--artifacts-dir",
-        default=".pr-review-loop",
-        help="private artifact directory",
     )
     bootstrap.add_argument(
         "--oracle-thinking-time",
@@ -161,7 +151,6 @@ def _dispatch(
         return execute_bootstrap(
             issue_value=args.issue,
             repo_dir=Path(args.repo_dir),
-            artifacts_dir=Path(args.artifacts_dir),
             thinking_time=args.oracle_thinking_time,
             runner=runner,
         )
@@ -169,7 +158,6 @@ def _dispatch(
         return execute_review(
             pr_value=args.pr,
             repo_dir=Path(args.repo_dir),
-            artifacts_dir=Path(args.artifacts_dir),
             thinking_time=args.oracle_thinking_time,
             runner=runner,
         )
@@ -177,7 +165,6 @@ def _dispatch(
         pr_value=args.pr,
         expected_head=args.expected_head,
         repo_dir=Path(args.repo_dir),
-        artifacts_dir=Path(args.artifacts_dir),
         runner=runner,
     )
 

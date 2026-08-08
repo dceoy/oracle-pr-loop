@@ -104,7 +104,7 @@ python3 skills/pr-review-loop/scripts/cli.py submit \
 
 ## Contracts and limits
 
-All commands emit exactly one JSON object on stdout; diagnostics go to stderr. Operational failures return a non-zero status with a structured error object. Private audit artifacts are written below `.pr-review-loop/runs/` by default.
+All commands emit exactly one JSON object on stdout; diagnostics go to stderr. Operational failures return a non-zero status with a structured error object. Oracle-only files use private command-scoped temporary storage and are removed before the command completes.
 
 CI status is not an approval gate. Production code must not launch, select, or detect Codex CLI, Claude Code, Cursor CLI, or another implementation agent.
 

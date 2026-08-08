@@ -28,17 +28,6 @@ PUSH_ARGV_MIN_LEN = 5
 PUSH_REFSPEC_ARGV_MIN_LEN = 4
 RAW_DIFF_HEADER_FIELD_COUNT = 5
 SHA_HEX_LENGTH = 40
-STAGE_COMMAND = ("git", "add", "--all", "--")
-_ARTIFACT_EXCLUDE_PREFIX = ":(exclude,top,literal)"
-WORKSPACE_STATUS_COMMAND = (
-    "git",
-    "status",
-    "--porcelain=v1",
-    "-z",
-    "--untracked-files=all",
-)
-WORKSPACE_DIFF_CHECK_COMMAND = ("git", "diff", "--check", "HEAD", "--")
-STAGED_DIFF_CHECK_COMMAND = ("git", "diff", "--cached", "--check", "--")
 STAGED_PATCH_COMMAND = (
     "git",
     "diff",
@@ -75,22 +64,11 @@ COMMIT_COMMAND = (
 class _PushAwareRunner(CommandRunner):
     """Normalize workspace scope and ambiguous post-write state safely."""
 
-    def __init__(
-        self,
-        delegate: CommandRunner,
-        artifact_exclusion: str | None,
-    ) -> None:
+    def __init__(self, delegate: CommandRunner) -> None:
         """Wrap the caller-supplied runner while preserving its state."""
         self._delegate = delegate
         self.source_env = delegate.source_env
         self.secrets = delegate.secrets
-        self._artifact_exclusion = artifact_exclusion
-        self._artifact_relpath = (
-            artifact_exclusion[len(_ARTIFACT_EXCLUDE_PREFIX) :]
-            if artifact_exclusion is not None
-            else None
-        )
-        self._artifact_already_ignored: bool | None = None
         self._pushed_commit_sha: str | None = None
 
     def redact(self, text: str) -> str:
@@ -148,7 +126,7 @@ class _PushAwareRunner(CommandRunner):
                 successful push through a lost response.
         """
         original_argv = tuple(str(value) for value in args)
-        argv = _constrain_push(self._exclude_artifacts(original_argv, cwd=cwd, env=env))
+        argv = _constrain_push(original_argv)
         env = _constrain_push_env(argv, env)
         self._guard_commit_shape(
             original_argv=original_argv,
@@ -210,65 +188,6 @@ class _PushAwareRunner(CommandRunner):
                 "staged patch metadata contains a known credential value",
             )
         return self._normalize_post_push_snapshot(argv, result)
-
-    def _exclude_artifacts(
-        self,
-        argv: tuple[str, ...],
-        *,
-        cwd: Path,
-        env: Mapping[str, str],
-    ) -> tuple[str, ...]:
-        """Keep private skill artifacts outside every workspace pathspec.
-
-        Returns:
-            argv, with the artifact exclusion pathspec appended if applicable.
-
-        `git add` itself refuses to run when a pathspec argument names a path
-        Git already ignores, even when that argument carries exclude magic.
-        Staging already skips ignored paths without any pathspec naming them,
-        so the exclusion argument is only needed there as a defense-in-depth
-        guard for a directory Git does not already recognize as ignored.
-        """
-        if self._artifact_exclusion is None:
-            return argv
-        if argv == STAGE_COMMAND:
-            if self._is_artifact_already_ignored(cwd=cwd, env=env):
-                return (*argv, ".")
-            return (*argv, ".", self._artifact_exclusion)
-        if argv in {
-            WORKSPACE_DIFF_CHECK_COMMAND,
-            STAGED_DIFF_CHECK_COMMAND,
-            STAGED_PATCH_COMMAND,
-            STAGED_RAW_COMMAND,
-        }:
-            return (*argv, ".", self._artifact_exclusion)
-        if argv == WORKSPACE_STATUS_COMMAND:
-            return (*argv, "--", ".", self._artifact_exclusion)
-        return argv
-
-    def _is_artifact_already_ignored(
-        self,
-        *,
-        cwd: Path,
-        env: Mapping[str, str],
-    ) -> bool:
-        """Return whether Git already ignores the artifact directory.
-
-        Returns:
-            Whether `git check-ignore` recognizes the artifact directory,
-            cached for the life of this runner since the ignore rules do not
-            change mid-command.
-        """
-        if self._artifact_already_ignored is None:
-            relpath = cast("str", self._artifact_relpath)
-            result = self._delegate.run(
-                ["git", "check-ignore", "-q", "--", relpath],
-                cwd=cwd,
-                env=env,
-                check=False,
-            )
-            self._artifact_already_ignored = result.returncode == 0
-        return self._artifact_already_ignored
 
     def _guard_commit_shape(
         self,
@@ -646,7 +565,6 @@ def execute_submit(
     pr_value: str,
     expected_head: str,
     repo_dir: Path,
-    artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
     """Validate the push destination, then execute one transport-safe submission.
@@ -657,15 +575,11 @@ def execute_submit(
     command_runner = runner or CommandRunner()
     _require_single_push_url(command_runner, repo_dir)
     repo_root = _repo_root(command_runner, repo_dir)
-    artifact_exclusion = _artifact_exclusion(repo_root, artifacts_dir)
-    if artifact_exclusion is not None:
-        _require_artifacts_unstaged(command_runner, repo_root, artifact_exclusion)
     return submission.execute_submit(
         pr_value=pr_value,
         expected_head=expected_head,
         repo_dir=repo_root,
-        artifacts_dir=artifacts_dir,
-        runner=_PushAwareRunner(command_runner, artifact_exclusion),
+        runner=_PushAwareRunner(command_runner),
     )
 
 
@@ -674,7 +588,6 @@ def execute_guarded(
     pr_value: str,
     expected_head: str,
     repo_dir: Path,
-    artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
     """Execute submit while freezing refs and rejecting unsafe metadata.
@@ -687,7 +600,6 @@ def execute_guarded(
         pr_value=pr_value,
         expected_head=expected_head,
         repo_dir=repo_dir,
-        artifacts_dir=artifacts_dir,
         runner=_SubmitBoundaryRunner(command_runner),
     )
 
@@ -730,61 +642,6 @@ def _repo_root(runner: CommandRunner, repo_dir: Path) -> Path:
             "Git returned an empty repository root",
         )
     return Path(root).resolve()
-
-
-def _artifact_exclusion(repo_root: Path, artifacts_dir: Path) -> str | None:
-    artifact_root = (
-        artifacts_dir if artifacts_dir.is_absolute() else repo_root / artifacts_dir
-    ).resolve()
-    try:
-        relative = artifact_root.relative_to(repo_root)
-    except ValueError:
-        return None
-    if not relative.parts or relative.parts[0] == ".git":
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "artifacts",
-            "artifact directory must not be the repository root or Git directory",
-        )
-    return f"{_ARTIFACT_EXCLUDE_PREFIX}{relative.as_posix()}"
-
-
-def _require_artifacts_unstaged(
-    runner: CommandRunner,
-    repo_root: Path,
-    artifact_exclusion: str,
-) -> None:
-    artifact_pathspec = artifact_exclusion.replace(":(exclude,", ":(", 1)
-    try:
-        index = runner.run(
-            ["git", "ls-files", "-z", "--", artifact_pathspec],
-            cwd=repo_root,
-            env=runner.base_env(),
-            max_output=MAX_REMOTE_OUTPUT,
-        )
-        head = runner.run(
-            [
-                "git",
-                "ls-tree",
-                "-r",
-                "--name-only",
-                "-z",
-                "HEAD",
-                "--",
-                artifact_pathspec,
-            ],
-            cwd=repo_root,
-            env=runner.base_env(),
-            max_output=MAX_REMOTE_OUTPUT,
-        )
-    except CommandError as exc:
-        raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-    if index.stdout or head.stdout:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "artifacts",
-            "artifact directory must not contain tracked content",
-        )
 
 
 def _constrain_push(argv: tuple[str, ...]) -> tuple[str, ...]:

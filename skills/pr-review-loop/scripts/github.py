@@ -384,40 +384,6 @@ class _ImmutableGitMixin:
         except CommandError as exc:
             raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
 
-    def path_is_ignored(self, relative: str) -> bool:
-        """Report whether Git would exclude relative from `git add -A`.
-
-        Deliberately runs under the host's own environment (`base_env()`),
-        not the hardened, config-suppressing `_git_env()` used for immutable
-        object reads: this must predict what the host's own later `git add
-        -A` will do in its own environment, for example when it honors a
-        global `core.excludesFile`, not answer the question for a different,
-        sandboxed environment the host never actually runs in.
-
-        Returns:
-            True if `git check-ignore` reports relative as ignored.
-
-        Raises:
-            LooprError: `git check-ignore` could not determine the answer.
-        """
-        try:
-            result = self.runner.run(
-                ["git", "check-ignore", "-q", "--", relative],
-                cwd=self.repo_dir,
-                env=self.runner.base_env(),
-                max_output=1024,
-                check=False,
-            )
-        except CommandError as exc:
-            raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-        if result.returncode not in {0, 1}:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                f"git check-ignore could not determine whether {relative} is ignored",
-            )
-        return result.returncode == 0
-
     def ensure_commit_object(self, sha: str) -> None:
         """Require sha to name a local commit object.
 

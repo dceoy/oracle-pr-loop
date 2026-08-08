@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,6 +21,7 @@ from scripts.submit import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
 
 def _git_executable() -> str:
@@ -174,7 +174,7 @@ def _fixture_repo(
     return repo, remote, state, base, head
 
 
-def test_success_commits_pushes_and_records_artifacts(tmp_path: Path) -> None:
+def test_success_commits_and_pushes_without_runtime_files(tmp_path: Path) -> None:
     """A valid patch becomes one commit and the exact remote PR head."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
@@ -184,7 +184,6 @@ def test_success_commits_pushes_and_records_artifacts(tmp_path: Path) -> None:
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -199,10 +198,7 @@ def test_success_commits_pushes_and_records_artifacts(tmp_path: Path) -> None:
         "refs/heads/feature",
     ).split()[0]
     assert remote_head == result.commit_sha
-    artifact_root = Path(result.artifacts_dir)
-    assert (artifact_root / "staged.patch").is_file()
-    recorded = json.loads((artifact_root / "result.json").read_text())
-    assert recorded["commit_sha"] == result.commit_sha
+    assert not (repo / "artifacts").exists()
 
 
 def test_empty_workspace_fails_without_commit(tmp_path: Path) -> None:
@@ -215,7 +211,6 @@ def test_empty_workspace_fails_without_commit(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -236,7 +231,6 @@ def test_stale_remote_head_fails_before_staging(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -270,7 +264,6 @@ def test_lease_loss_does_not_overwrite_remote(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -305,7 +298,6 @@ def test_unresolved_conflict_fails_before_staging(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -324,7 +316,6 @@ def test_local_origin_mismatch_fails_before_staging(tmp_path: Path) -> None:
             pr_value="https://github.com/other/demo/pull/1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -343,7 +334,6 @@ def test_untracked_whitespace_error_fails_before_commit(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -364,7 +354,6 @@ def test_known_credential_in_staged_blob_fails_before_commit(tmp_path: Path) -> 
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -389,7 +378,6 @@ def test_known_credential_in_binary_blob_fails_before_commit(
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -413,7 +401,6 @@ def test_base_advance_after_push_keeps_success(tmp_path: Path) -> None:
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -434,7 +421,6 @@ def test_malformed_head_ref_fails_before_staging(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -455,7 +441,6 @@ def test_submit_cli_emits_the_stable_success_schema(
         resulting_head_sha="c" * 40,
         commit_sha="c" * 40,
         pushed_branch="feature",
-        artifacts_dir="/private/run",
     )
 
     def fake_submit(**_kwargs: object) -> SubmitResult:

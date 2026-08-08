@@ -43,14 +43,13 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
 
 ## Recovery
 
-Artifacts are private diagnostic evidence under `.pr-review-loop/runs/`; GitHub remains the source of truth.
+Oracle inputs and outputs are private command-scoped temporary files; GitHub and Git remain the source of truth.
 
 - `stale_head`, other stale-state failures, or lease loss: refresh the checkout and PR state, run a new review, and use the newly reviewed head.
 - `empty_patch`: return to the review result; do not create an empty commit.
 - authentication failure: verify that the ordinary `gh` session is logged in and can publish pull-request reviews.
 - Oracle/schema failure: restore the browser/session or reviewer output; do not weaken schema validation.
 - repository/origin mismatch: stop rather than redirect the patch.
-- `bootstrap`'s `workspace` precondition (local `HEAD` is not the returned `base_sha`, or the checkout has uncommitted tracked or untracked changes outside its own `.pr-review-loop/` artifacts directory): the current checkout already holds implementation work from a prior `bootstrap`/implement cycle, or has unrelated local changes or stray untracked files. Set those aside (commit, stash, discard, or switch away), return to a clean checkout at the repository's current default-branch tip, and rerun `bootstrap`; do not point it at an in-progress implementation branch.
-- `bootstrap`'s `artifacts` precondition (Git would not exclude the claimed run directory from an ordinary `git add -A`): add `.pr-review-loop/` (or the configured `--artifacts-dir`) to the untracked, local-only `.git/info/exclude`, not a tracked `.gitignore`, and rerun `bootstrap`.
+- `bootstrap`'s `workspace` precondition (local `HEAD` is not the returned `base_sha`, or the checkout has uncommitted tracked or untracked changes): the current checkout already holds implementation work from a prior `bootstrap`/implement cycle, or has unrelated local changes or stray untracked files. Set those aside (commit, stash, discard, or switch away), return to a clean checkout at the repository's current default-branch tip, and rerun `bootstrap`; do not point it at an in-progress implementation branch.
 
 GitHub.com same-repository PRs only. Forks and GitHub Enterprise are unsupported; CI status is not an approval gate.

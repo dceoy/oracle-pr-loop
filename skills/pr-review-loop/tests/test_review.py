@@ -3,24 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 from scripts import review as review_module
-from scripts.artifacts import ArtifactWriter
 from scripts.models import (
     EXIT_ORACLE,
-    EXIT_PRECONDITION,
     EXIT_RACE,
     JsonObject,
-    JsonValue,
     LooprError,
     OracleReview,
     PullRequest,
 )
 from scripts.process import CommandRunner
 from scripts.review import execute_review
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -161,27 +160,6 @@ def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(review_module, "OracleClient", FakeOracleClient)
 
 
-def test_execute_review_claims_run_directory_named_for_pr(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The claimed run directory is prefixed with the PR number and head SHA."""
-    initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
-    install_orchestration_fakes(monkeypatch)
-
-    result = execute_review(
-        pr_value="21",
-        repo_dir=tmp_path,
-        artifacts_dir=Path("artifacts"),
-        thinking_time="heavy",
-        runner=CommandRunner(),
-    )
-
-    prefix = f"review-pr-{initial.number}-{initial.head_sha[:12]}-"
-    assert Path(result.artifacts_dir).name.startswith(prefix)
-
-
 @pytest.mark.parametrize(
     ("oracle_verdict", "expected_findings"),
     [("APPROVE", ()), ("REQUEST_CHANGES", ({"id": "F1"},))],
@@ -218,7 +196,6 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     result = execute_review(
         pr_value="21",
         repo_dir=tmp_path,
-        artifacts_dir=Path("artifacts"),
         thinking_time="heavy",
         runner=CommandRunner(),
     )
@@ -263,7 +240,6 @@ def test_formal_review_rejects_mismatched_persisted_state(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )
@@ -323,7 +299,6 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )
@@ -347,7 +322,6 @@ def test_self_authored_post_write_race_skips_dismissal(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )
@@ -371,7 +345,6 @@ def test_pre_post_snapshot_race_fails_before_review_write(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )
@@ -395,7 +368,6 @@ def test_post_write_race_dismisses_stale_review(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )
@@ -428,43 +400,12 @@ def test_execute_review_rejects_oversized_posted_body(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )
 
     assert captured.value.code == EXIT_ORACLE
     assert captured.value.category == "oracle_schema"
-
-
-def test_execute_review_survives_post_write_artifact_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An artifact write failure after a verified post does not fail the command."""
-    initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
-    install_orchestration_fakes(monkeypatch)
-    original_json = ArtifactWriter.json
-
-    def failing_json(self: ArtifactWriter, relative: str, value: JsonObject) -> Path:
-        if relative in {"github-review.json", "result.json"}:
-            raise LooprError(EXIT_PRECONDITION, "artifacts", "disk full")
-        return original_json(self, relative, value)
-
-    monkeypatch.setattr(ArtifactWriter, "json", failing_json)
-
-    result = execute_review(
-        pr_value="21",
-        repo_dir=tmp_path,
-        artifacts_dir=Path("artifacts"),
-        thinking_time="heavy",
-        runner=CommandRunner(),
-    )
-
-    assert result.github_review_id == 123
-    assert FakeGitHubClient.instance is not None
-    assert FakeGitHubClient.instance.dismissed == []
 
 
 class _StableGitHubClient:
@@ -518,71 +459,6 @@ class _StableGitHubClient:
         self.dismissed.append(review_id)
 
 
-class _InterruptingArtifactWriter:
-    """Raise an interrupt for one configured artifact write."""
-
-    fail_relative: ClassVar[str] = ""
-
-    def __init__(self, root: Path, _runner: CommandRunner) -> None:
-        self.root = root
-
-    def json(self, relative: str, _value: JsonValue) -> Path:
-        if relative == self.fail_relative:
-            raise KeyboardInterrupt
-        return self.root / relative
-
-
-def _install_interrupt_fakes(
-    monkeypatch: pytest.MonkeyPatch,
-    fail_relative: str,
-) -> None:
-    _InterruptingArtifactWriter.fail_relative = fail_relative
-    _StableGitHubClient.instance = None
-    monkeypatch.setattr(review_module, "GitHubClient", _StableGitHubClient)
-    monkeypatch.setattr(review_module, "OracleClient", FakeOracleClient)
-    monkeypatch.setattr(review_module, "ArtifactWriter", _InterruptingArtifactWriter)
-
-
-def test_interrupt_before_verification_dismisses_review(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An interrupt before verification cannot leave an unreported review."""
-    _install_interrupt_fakes(monkeypatch, "github-review.json")
-
-    with pytest.raises(KeyboardInterrupt):
-        execute_review(
-            pr_value="21",
-            repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
-            thinking_time="heavy",
-            runner=CommandRunner(),
-        )
-
-    assert _StableGitHubClient.instance is not None
-    assert _StableGitHubClient.instance.dismissed == [123]
-
-
-def test_interrupt_after_verification_returns_review_id(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Verified review success survives interruption during final persistence."""
-    _install_interrupt_fakes(monkeypatch, "result.json")
-
-    result = execute_review(
-        pr_value="21",
-        repo_dir=tmp_path,
-        artifacts_dir=Path("artifacts"),
-        thinking_time="heavy",
-        runner=CommandRunner(),
-    )
-
-    assert result.github_review_id == 123
-    assert _StableGitHubClient.instance is not None
-    assert _StableGitHubClient.instance.dismissed == []
-
-
 class _InterruptingGitHubClient(_StableGitHubClient):
     """Interrupt during the post-write snapshot verification."""
 
@@ -614,7 +490,6 @@ def test_post_write_snapshot_interrupt_dismisses_review(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )

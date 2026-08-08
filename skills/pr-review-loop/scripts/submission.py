@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import re
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from .artifacts import ArtifactWriter
 from .github import normalize_repo, resolve_target, validate_ref
 from .models import (
     EXIT_GITHUB,
@@ -234,7 +231,6 @@ def execute_submit(
     pr_value: str,
     expected_head: str,
     repo_dir: Path,
-    artifacts_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
     """Validate, commit, and lease-protect the complete workspace patch.
@@ -275,7 +271,7 @@ def execute_submit(
         github.repo_dir,
         ["diff", "--cached", "--check", "--"],
     )
-    patch = _git(
+    staged_patch = _git(
         command_runner,
         github.repo_dir,
         [
@@ -288,7 +284,7 @@ def execute_submit(
         ],
         max_output=MAX_PATCH_BYTES,
     )
-    if not patch:
+    if not staged_patch:
         raise LooprError(
             EXIT_PRECONDITION,
             "empty_patch",
@@ -300,12 +296,6 @@ def execute_submit(
     )
     _require_same_snapshot(initial, github.snapshot(), phase="before commit")
 
-    writer = ArtifactWriter(
-        _run_directory(github.repo_dir, artifacts_dir, initial),
-        command_runner,
-    )
-    writer.json("initial-snapshot.json", initial.raw)
-    writer.text("staged.patch", patch.decode("utf-8", "replace"))
     _git(
         command_runner,
         github.repo_dir,
@@ -337,15 +327,6 @@ def execute_submit(
             "commit",
             "created commit is not a single child of the expected head",
         )
-    writer.json(
-        "commit.json",
-        {
-            "commit_sha": commit_sha,
-            "parent_sha": parent_sha,
-            "message": COMMIT_MESSAGE,
-        },
-    )
-
     _require_same_snapshot(initial, github.snapshot(), phase="before push")
     remote_head = _remote_head(
         command_runner,
@@ -389,14 +370,6 @@ def execute_submit(
             ) from exc
 
     resulting = github.poll_result(initial, commit_sha)
-    writer.json(
-        "push.json",
-        {
-            "branch": initial.head_ref,
-            "expected_head_sha": expected_head,
-            "resulting_head_sha": resulting.head_sha,
-        },
-    )
     result = SubmitResult(
         repository=initial.repository,
         pr_number=initial.number,
@@ -405,9 +378,7 @@ def execute_submit(
         resulting_head_sha=resulting.head_sha,
         commit_sha=commit_sha,
         pushed_branch=initial.head_ref,
-        artifacts_dir=str(writer.root),
     )
-    writer.json("result.json", result.as_json())
     return result
 
 
@@ -733,27 +704,3 @@ def _integer(value: JsonValue | None, *, field: str) -> int:
 
 def _is_sha(value: str) -> bool:
     return SHA_RE.fullmatch(value) is not None
-
-
-def _run_directory(
-    repo_dir: Path,
-    artifacts_dir: Path,
-    snapshot: SubmissionSnapshot,
-) -> Path:
-    root = (
-        artifacts_dir if artifacts_dir.is_absolute() else repo_dir / artifacts_dir
-    ) / "runs"
-    prefix = f"submit-pr-{snapshot.number}-{snapshot.head_sha[:12]}"
-    for _ in range(8):
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        candidate = root / f"{prefix}-{stamp}-{uuid.uuid4().hex}"
-        try:
-            candidate.mkdir(mode=0o700, parents=True, exist_ok=False)
-        except FileExistsError:
-            continue
-        return candidate
-    raise LooprError(
-        EXIT_RACE,
-        "artifacts",
-        "could not allocate a unique submit run directory",
-    )
