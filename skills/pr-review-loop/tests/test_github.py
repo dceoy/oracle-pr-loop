@@ -496,7 +496,7 @@ def test_issue_client_omits_oversized_comment_body(tmp_path: Path) -> None:
 def test_issue_client_omits_comments_past_aggregate_byte_bound(
     tmp_path: Path,
 ) -> None:
-    """Comments within the per-comment bound are still capped in aggregate."""
+    """The aggregate byte bound is spent newest-first, keeping the newest."""
     per_comment_bytes = 15_000
     comments: list[JsonObject] = [
         {
@@ -514,9 +514,18 @@ def test_issue_client_omits_comments_past_aggregate_byte_bound(
     snapshot = client.snapshot()
 
     included = MAX_ISSUE_COMMENTS_TOTAL_BYTES // per_comment_bytes
-    assert snapshot.comments[included - 1]["omitted"] is False
-    assert snapshot.comments[included]["omitted"] is True
-    assert snapshot.comments[included]["body"] == ""
+    excluded = MAX_ISSUE_COMMENTS - included
+    assert [comment["omitted"] for comment in snapshot.comments[:excluded]] == (
+        [True] * excluded
+    )
+    assert [comment["omitted"] for comment in snapshot.comments[excluded:]] == (
+        [False] * included
+    )
+    assert snapshot.comments[0]["body"] == ""
+    assert snapshot.comments[-1]["body"] == "x" * per_comment_bytes
+    assert [comment["author"] for comment in snapshot.comments] == [
+        f"user{index}" for index in range(MAX_ISSUE_COMMENTS)
+    ]
 
 
 def test_issue_client_default_branch_rejects_unsafe_ref(tmp_path: Path) -> None:
@@ -543,6 +552,21 @@ def test_issue_client_branch_sha_rejects_invalid_sha(tmp_path: Path) -> None:
         client.branch_sha("main")
 
     assert captured.value.category == "sha"
+
+
+def test_issue_client_branch_sha_encodes_slash_containing_branch(
+    tmp_path: Path,
+) -> None:
+    """A branch name containing a slash is sent as one encoded path segment."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload())
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    client.branch_sha("release/1.0")
+
+    api_calls = [call for call in runner.gh_calls if call[1] == "api"]
+    assert api_calls[-1][-1] == "repos/acme/demo/branches/release%2F1.0"
 
 
 def test_issue_client_reads_tracked_paths_and_blobs_at_base_sha(

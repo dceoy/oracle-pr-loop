@@ -881,9 +881,13 @@ def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
 
     Comments are sorted by `createdAt` (GitHub does not contractually
     guarantee response order), then only the most recent
-    `MAX_ISSUE_COMMENTS` are kept. Each kept comment's body is replaced with
-    an omission marker if it, or the running total, exceeds its byte bound,
-    so oversized text is dropped outright rather than silently truncated.
+    `MAX_ISSUE_COMMENTS` are kept. The aggregate byte budget is then
+    allocated newest-first, so when it is exceeded the oldest retained
+    comments are the ones replaced with an omission marker; the emitted
+    collection is restored to chronological order afterward. Each kept
+    comment's body is replaced with an omission marker if it, or the
+    running total, exceeds its byte bound, so oversized text is dropped
+    outright rather than silently truncated.
 
     Returns:
         The validated, ordered, bounded comment collection.
@@ -907,22 +911,25 @@ def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
         ))
     parsed.sort(key=operator.itemgetter(2))
     kept = parsed[-MAX_ISSUE_COMMENTS:] if len(parsed) > MAX_ISSUE_COMMENTS else parsed
-    comments: list[JsonObject] = []
+    omitted_flags = [False] * len(kept)
     total = 0
-    for author, body, created_at in kept:
-        body_bytes = len(body.encode("utf-8"))
+    for index in range(len(kept) - 1, -1, -1):
+        body_bytes = len(kept[index][1].encode("utf-8"))
         omitted = (
             body_bytes > MAX_ISSUE_COMMENT_BYTES
             or total + body_bytes > MAX_ISSUE_COMMENTS_TOTAL_BYTES
         )
+        omitted_flags[index] = omitted
+        if not omitted:
+            total += body_bytes
+    comments: list[JsonObject] = []
+    for (author, body, created_at), omitted in zip(kept, omitted_flags, strict=True):
         comments.append({
             "author": author,
             "body": "" if omitted else body,
             "created_at": created_at,
             "omitted": omitted,
         })
-        if not omitted:
-            total += body_bytes
     return tuple(comments)
 
 
@@ -1108,12 +1115,13 @@ class IssueClient(_ImmutableGitMixin):
         Raises:
             LooprError: GitHub's response was malformed or the SHA is invalid.
         """
+        encoded_branch = urllib.parse.quote(branch, safe="")
         data = _json_object(
             self._text([
                 "api",
                 "--hostname",
                 "github.com",
-                f"repos/{self.repository}/branches/{branch}",
+                f"repos/{self.repository}/branches/{encoded_branch}",
             ]),
             category="github_schema",
         )
