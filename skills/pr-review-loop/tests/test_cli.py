@@ -15,6 +15,7 @@ from scripts.models import (
     EXIT_ORACLE,
     EXIT_PRECONDITION,
     EXIT_RACE,
+    BootstrapResult,
     JsonObject,
     JsonValue,
     LooprError,
@@ -61,6 +62,18 @@ SUBMIT_SUCCESS_KEYS = {
     "resulting_head_sha",
     "commit_sha",
     "pushed_branch",
+    "artifacts_dir",
+}
+BOOTSTRAP_SUCCESS_KEYS = {
+    "schema_version",
+    "command",
+    "repository",
+    "issue_number",
+    "issue_url",
+    "issue_updated_at",
+    "base_ref",
+    "base_sha",
+    "implementation_prompt",
     "artifacts_dir",
 }
 
@@ -467,6 +480,67 @@ def test_argument_failure_uses_structured_error_schema(
     error = cast("dict[str, object]", payload["error"])
 
     assert status == EXIT_PRECONDITION
+    assert error["category"] == "input"
+
+
+def test_bootstrap_cli_emits_the_stable_success_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The public bootstrap command emits exactly one bootstrap JSON object."""
+    expected = BootstrapResult(
+        repository="acme/demo",
+        issue_number=7,
+        issue_url="https://github.com/acme/demo/issues/7",
+        issue_updated_at="2026-01-01T00:00:00Z",
+        base_ref="main",
+        base_sha="a" * 40,
+        implementation_prompt="Implement the requested change.",
+        artifacts_dir="/private/bootstrap",
+    )
+
+    def fake_bootstrap(**_kwargs: object) -> BootstrapResult:
+        return expected
+
+    monkeypatch.setattr(cli, "execute_bootstrap", fake_bootstrap)
+    status = cli.main(["bootstrap", "--issue", "7"])
+    payload = _stdout_json(capsys)
+
+    assert status == 0
+    assert set(payload) == BOOTSTRAP_SUCCESS_KEYS
+    assert payload == expected.as_json()
+
+
+def test_bootstrap_operational_failure_uses_stable_nonzero_error_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bootstrap operational failure uses the shared structured error schema."""
+
+    def fail_bootstrap(**_kwargs: object) -> BootstrapResult:
+        raise LooprError(EXIT_RACE, "stale_state", "issue changed during generation")
+
+    monkeypatch.setattr(cli, "execute_bootstrap", fail_bootstrap)
+    status = cli.main(["bootstrap", "--issue", "7"])
+    payload = _stdout_json(capsys)
+    error = cast("dict[str, object]", payload["error"])
+
+    assert status == EXIT_RACE
+    assert payload["command"] == "bootstrap"
+    assert set(payload) == {"schema_version", "command", "error"}
+    assert error["category"] == "stale_state"
+
+
+def test_bootstrap_argument_failure_uses_structured_error_schema(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing --issue argument uses the shared structured error schema."""
+    status = cli.main(["bootstrap"])
+    payload = _stdout_json(capsys)
+    error = cast("dict[str, object]", payload["error"])
+
+    assert status == EXIT_PRECONDITION
+    assert payload["command"] == "bootstrap"
     assert error["category"] == "input"
 
 

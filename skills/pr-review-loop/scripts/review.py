@@ -2,20 +2,18 @@
 
 from __future__ import annotations
 
-import datetime as dt
-import stat
 import sys
-import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .artifacts import ArtifactWriter
+from .artifacts import ArtifactWriter, claim_run_directory
 from .github import GitHubClient
 from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
 from .oracle import OracleClient
 from .process import CommandRunner
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .models import PullRequest
 
 
@@ -46,7 +44,11 @@ def execute_review(
     initial = github.snapshot()
     github.ensure_objects(initial)
     writer = ArtifactWriter(
-        _run_directory(repo_dir, artifacts_dir, initial),
+        claim_run_directory(
+            repo_dir,
+            artifacts_dir,
+            f"review-pr-{initial.number}-{initial.head_sha[:12]}",
+        ),
         command_runner,
     )
     writer.json("initial-snapshot.json", initial.raw)
@@ -159,87 +161,6 @@ def _require_fresh_state(
 
 
 MAX_POSTED_BODY_BYTES = 65_000
-_RUN_DIRECTORY_ATTEMPTS = 8
-
-
-def _trusted_runs_root(repo_dir: Path, artifacts_dir: Path) -> Path:
-    """Descend to the run root from a trusted anchor without following symlinks.
-
-    `artifacts_dir` is typically a repository-relative path (for example,
-    `.pr-review-loop`), and the checked-out pull request controls its own repository
-    contents, so a malicious head could plant a symlink there to redirect artifact
-    writes outside the intended root. Each path component is created fresh or
-    verified to already be a real directory before descending into it, and this
-    applies to every component of `artifacts_dir` itself (not just a `runs` child)
-    so an absolute path, or a symlink anywhere in its ancestry, cannot redirect the
-    run root either. `..` components are rejected outright because they could
-    otherwise walk the trusted anchor back out of it.
-
-    Returns:
-        The trusted `runs` directory under `artifacts_dir`.
-
-    Raises:
-        LooprError: `artifacts_dir` contains a `..` component, or a path
-            component exists but is not a real directory.
-    """
-    if ".." in artifacts_dir.parts:
-        raise LooprError(
-            EXIT_RACE,
-            "artifacts",
-            "artifact directory path may not contain '..'",
-        )
-    if artifacts_dir.is_absolute():
-        anchor = Path(artifacts_dir.parts[0])
-        parts = (*artifacts_dir.parts[1:], "runs")
-    else:
-        anchor = repo_dir.resolve()
-        parts = (*artifacts_dir.parts, "runs")
-    current = anchor
-    for part in parts:
-        current /= part
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            current.mkdir(mode=0o700)
-            continue
-        if not stat.S_ISDIR(info.st_mode):
-            raise LooprError(
-                EXIT_RACE,
-                "artifacts",
-                "artifact directory path contains a non-directory or symlink",
-            )
-    return current
-
-
-def _run_directory(
-    repo_dir: Path,
-    artifacts_dir: Path,
-    pull_request: PullRequest,
-) -> Path:
-    """Atomically claim a collision-resistant, unique run directory.
-
-    Returns:
-        The newly created, exclusively claimed run directory.
-
-    Raises:
-        LooprError: `artifacts_dir` is untrusted, or no unique directory
-            name could be claimed within the retry budget.
-    """
-    root = _trusted_runs_root(repo_dir, artifacts_dir)
-    prefix = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}"
-    for _ in range(_RUN_DIRECTORY_ATTEMPTS):
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        candidate = root / f"{prefix}-{stamp}-{uuid.uuid4().hex}"
-        try:
-            candidate.mkdir(mode=0o700)
-        except FileExistsError:
-            continue
-        return candidate
-    raise LooprError(
-        EXIT_RACE,
-        "artifacts",
-        "could not allocate a unique review run directory",
-    )
 
 
 def _dismiss_stale(

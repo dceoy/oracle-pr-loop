@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -64,58 +62,6 @@ def approve_review(pull_request: PullRequest) -> OracleReview:
         non_blocking_notes=(),
         raw={},
     )
-
-
-def test_run_directory_retries_on_collision(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A colliding candidate run directory is retried with a fresh suffix."""
-    pull_request = sample_pr()
-
-    class _FixedDateTime(dt.datetime):
-        @classmethod
-        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
-            return cls(2026, 1, 1, tzinfo=tz)
-
-    monkeypatch.setattr(review_module.dt, "datetime", _FixedDateTime)
-    tokens = iter(["aaaaaaaa", "bbbbbbbb"])
-    monkeypatch.setattr(
-        review_module.uuid,
-        "uuid4",
-        lambda: SimpleNamespace(hex=next(tokens)),
-    )
-    stamp = "20260101T000000Z"
-    prefix = f"review-pr-{pull_request.number}-{pull_request.head_sha[:12]}"
-    colliding = tmp_path / "artifacts" / "runs" / f"{prefix}-{stamp}-aaaaaaaa"
-    colliding.mkdir(parents=True)
-
-    result = review_module._run_directory(tmp_path, Path("artifacts"), pull_request)
-
-    assert result.name == f"{prefix}-{stamp}-bbbbbbbb"
-    assert result.is_dir()
-
-
-def test_run_directory_rejects_symlinked_artifacts_component(tmp_path: Path) -> None:
-    """A repository-controlled symlink cannot redirect audit artifacts."""
-    pull_request = sample_pr()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (tmp_path / "artifacts").symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(LooprError) as captured:
-        review_module._run_directory(tmp_path, Path("artifacts"), pull_request)
-
-    assert captured.value.category == "artifacts"
-    assert not list(outside.iterdir())
-
-
-def test_run_directory_rejects_relative_traversal(tmp_path: Path) -> None:
-    """A relative artifact root cannot escape the checkout."""
-    with pytest.raises(LooprError) as captured:
-        review_module._run_directory(tmp_path, Path("../escape"), sample_pr())
-
-    assert captured.value.category == "artifacts"
 
 
 class FakeGitHubClient:
@@ -198,6 +144,27 @@ def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace external review transports with deterministic fakes."""
     monkeypatch.setattr(review_module, "GitHubClient", FakeGitHubClient)
     monkeypatch.setattr(review_module, "OracleClient", FakeOracleClient)
+
+
+def test_execute_review_claims_run_directory_named_for_pr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The claimed run directory is prefixed with the PR number and head SHA."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    install_orchestration_fakes(monkeypatch)
+
+    result = execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        artifacts_dir=Path("artifacts"),
+        thinking_time="heavy",
+        runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+    )
+
+    prefix = f"review-pr-{initial.number}-{initial.head_sha[:12]}-"
+    assert Path(result.artifacts_dir).name.startswith(prefix)
 
 
 def test_pre_post_snapshot_race_fails_before_review_write(

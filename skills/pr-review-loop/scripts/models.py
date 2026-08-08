@@ -47,6 +47,22 @@ class PullRequest:
 
 
 @dataclass(frozen=True)
+class IssueSnapshot:
+    """An immutable GitHub Issue snapshot used to bootstrap implementation work."""
+
+    repository: str
+    number: int
+    url: str
+    title: str
+    body: str
+    author: str
+    state: str
+    updated_at: str
+    comments: tuple[JsonObject, ...]
+    raw: JsonObject
+
+
+@dataclass(frozen=True)
 class OracleReview:
     """A strictly validated Oracle review verdict."""
 
@@ -59,6 +75,17 @@ class OracleReview:
     blocking_findings: tuple[dict[str, str], ...]
     implementation_prompt: str | None
     non_blocking_notes: tuple[str, ...]
+    raw: JsonObject
+
+
+@dataclass(frozen=True)
+class OracleBootstrap:
+    """A strictly validated Oracle implementation-bootstrap result."""
+
+    repository: str
+    issue_number: int
+    base_sha: str
+    implementation_prompt: str
     raw: JsonObject
 
 
@@ -123,6 +150,38 @@ class SubmitResult:
                 "resulting_head_sha": self.resulting_head_sha,
                 "commit_sha": self.commit_sha,
                 "pushed_branch": self.pushed_branch,
+                "artifacts_dir": self.artifacts_dir,
+            },
+        )
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    """The machine-readable result returned by the bootstrap command."""
+
+    repository: str
+    issue_number: int
+    issue_url: str
+    issue_updated_at: str
+    base_ref: str
+    base_sha: str
+    implementation_prompt: str
+    artifacts_dir: str
+
+    def as_json(self) -> JsonObject:
+        """Return the stable command result schema."""
+        return cast(
+            "JsonObject",
+            {
+                "schema_version": 1,
+                "command": "bootstrap",
+                "repository": self.repository,
+                "issue_number": self.issue_number,
+                "issue_url": self.issue_url,
+                "issue_updated_at": self.issue_updated_at,
+                "base_ref": self.base_ref,
+                "base_sha": self.base_sha,
+                "implementation_prompt": self.implementation_prompt,
                 "artifacts_dir": self.artifacts_dir,
             },
         )

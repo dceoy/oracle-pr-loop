@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.models import LooprError, ReviewResult, SubmitResult
+from scripts.models import BootstrapResult, LooprError, ReviewResult, SubmitResult
 
 
 def test_loop_error_keeps_machine_fields() -> None:
@@ -54,3 +54,32 @@ def test_submit_result_serializes_stable_schema() -> None:
     assert payload["schema_version"] == 1
     assert payload["command"] == "submit"
     assert payload["resulting_head_sha"] == payload["commit_sha"]
+
+
+def test_bootstrap_result_serializes_stable_schema() -> None:
+    """Bootstrap results expose the version-1 machine contract."""
+    result = BootstrapResult(
+        repository="acme/demo",
+        issue_number=7,
+        issue_url="https://github.com/acme/demo/issues/7",
+        issue_updated_at="2026-01-01T00:00:00Z",
+        base_ref="main",
+        base_sha="a" * 40,
+        implementation_prompt="Implement the requested change.",
+        artifacts_dir="/private/bootstrap",
+    )
+
+    payload = result.as_json()
+
+    assert payload == {
+        "schema_version": 1,
+        "command": "bootstrap",
+        "repository": "acme/demo",
+        "issue_number": 7,
+        "issue_url": "https://github.com/acme/demo/issues/7",
+        "issue_updated_at": "2026-01-01T00:00:00Z",
+        "base_ref": "main",
+        "base_sha": "a" * 40,
+        "implementation_prompt": "Implement the requested change.",
+        "artifacts_dir": "/private/bootstrap",
+    }
