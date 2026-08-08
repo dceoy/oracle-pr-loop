@@ -16,6 +16,10 @@ Choose an iteration limit before starting.
 
 Operational errors are stop conditions. Do not reinterpret them as review verdicts.
 
+## Issue bootstrap
+
+`bootstrap --issue <NUMBER_OR_URL>` is an optional entry point for work that has no pull request yet; see `SKILL.md` for the full bootstrap-to-review handoff diagram. It uses ordinary GitHub authentication (no `GH_REVIEW_TOKEN`) and the same Oracle browser profile as `review`. Once the host has implemented the change and opened a pull request, proceed with the common flow above unchanged.
+
 ## Codex CLI smoke test
 
 Confirm `.agents/skills/pr-review-loop` resolves to the canonical skill and execute the common flow without adding Codex-specific runtime code.

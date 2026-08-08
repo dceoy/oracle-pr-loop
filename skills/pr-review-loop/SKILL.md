@@ -1,11 +1,29 @@
 ---
 name: pr-review-loop
-description: Review and improve a pull request through independent Oracle/ChatGPT review while the invoking host agent owns implementation work.
+description: Review and improve a pull request through independent Oracle/ChatGPT review while the invoking host agent owns implementation work; optionally bootstrap that work from an open GitHub Issue.
 ---
 
 # pr-review-loop
 
 Use this skill to improve one GitHub pull request without embedding or launching a specific implementation agent. Codex CLI, Claude Code, Cursor CLI, and compatible hosts all use the same canonical implementation.
+
+## Starting from a GitHub Issue
+
+`bootstrap` is a thin entry point for work that has no pull request yet. It reads one open Issue, asks Oracle/ChatGPT to turn that Issue and bounded repository evidence into an implementation-ready prompt, and returns the prompt to the host. It never implements the change, and it never creates a pull request.
+
+```text
+bootstrap --issue
+        ↓
+implementation_prompt
+        ↓
+host agent implements + runs repository QA + commits/pushes + opens a PR (e.g. "Fixes #123")
+        ↓
+review --pr
+        ↓
+existing pr-review-loop workflow below, unchanged
+```
+
+Once the host has opened the pull request, hand off completely to the workflow below; `review` and `submit` have no Issue-specific behavior and no persistent state connects them to `bootstrap`. `bootstrap` writes artifacts under `.pr-review-loop/runs/` before that first commit exists, so ensure `.pr-review-loop/` is excluded from the host's implementation commit (add it to `.gitignore` first if the repository does not already exclude it); `submit` later refuses to run if the artifact directory is tracked.
 
 ## Workflow
 
@@ -41,6 +59,12 @@ For every finding:
 ## Commands
 
 ```console
+python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
+```
+
+`bootstrap` requires an open, same-repository GitHub Issue and Oracle with an authenticated browser profile; it does not require `GH_REVIEW_TOKEN`. It emits one JSON object bound to the Issue's `updatedAt` and the base branch's exact commit SHA, and never edits, commits, pushes, or creates a pull request.
+
+```console
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
@@ -56,7 +80,7 @@ python3 skills/pr-review-loop/scripts/cli.py submit \
 
 ## Contract
 
-Both commands require Python 3, Git, GitHub CLI, a matching `origin`, and ordinary GitHub authentication. Operational failures return non-zero status with a structured error object; diagnostics go only to stderr. Artifacts default to `.pr-review-loop/runs/`.
+All three commands require Python 3, Git, GitHub CLI, a matching `origin`, and ordinary GitHub authentication. Operational failures return non-zero status with a structured error object; diagnostics go only to stderr. Artifacts default to `.pr-review-loop/runs/`.
 
 GitHub Enterprise and fork PRs are unsupported. CI status is not an approval gate. Production code must not launch, select, or detect Codex CLI, Claude Code, Cursor CLI, or another implementation agent.
 

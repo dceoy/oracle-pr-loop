@@ -13,8 +13,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "scripts"
 
+from .bootstrap import execute_bootstrap
 from .models import (
     EXIT_PRECONDITION,
+    BootstrapResult,
     JsonObject,
     LooprError,
     ReviewResult,
@@ -45,12 +47,17 @@ def parser() -> argparse.ArgumentParser:
     """Build the stable skill command parser.
 
     Returns:
-        The configured argument parser for the `review` and `submit` commands.
+        The configured argument parser for the `bootstrap`, `review`, and
+        `submit` commands.
     """
     root = StructuredArgumentParser(
-        description="Review or submit one exact GitHub pull-request head."
+        description="Bootstrap, review, or submit one exact GitHub pull request."
     )
     subcommands = root.add_subparsers(dest="command", required=True)
+    bootstrap = subcommands.add_parser(
+        "bootstrap",
+        help="turn one open GitHub Issue into a bounded implementation prompt",
+    )
     review = subcommands.add_parser(
         "review",
         help="review and post one exact pull-request snapshot",
@@ -77,6 +84,26 @@ def parser() -> argparse.ArgumentParser:
             help="private artifact directory",
         )
 
+    bootstrap.add_argument(
+        "--issue",
+        required=True,
+        help="positive Issue number or canonical GitHub issue URL",
+    )
+    bootstrap.add_argument(
+        "--repo-dir",
+        default=".",
+        help="local checkout containing the target repository",
+    )
+    bootstrap.add_argument(
+        "--artifacts-dir",
+        default=".pr-review-loop",
+        help="private artifact directory",
+    )
+    bootstrap.add_argument(
+        "--oracle-thinking-time",
+        choices=("light", "standard", "extended", "heavy"),
+        default="heavy",
+    )
     review.add_argument(
         "--oracle-thinking-time",
         choices=("light", "standard", "extended", "heavy"),
@@ -124,12 +151,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _dispatch(
     command: str, args: argparse.Namespace, runner: CommandRunner
-) -> ReviewResult | SubmitResult:
+) -> BootstrapResult | ReviewResult | SubmitResult:
     """Run the requested command against its parsed arguments.
 
     Returns:
         The completed command's result.
     """
+    if command == "bootstrap":
+        return execute_bootstrap(
+            issue_value=args.issue,
+            repo_dir=Path(args.repo_dir),
+            artifacts_dir=Path(args.artifacts_dir),
+            thinking_time=args.oracle_thinking_time,
+            runner=runner,
+        )
     if command == "review":
         return execute_review(
             pr_value=args.pr,
@@ -150,7 +185,7 @@ def _dispatch(
 def _requested_command(argv: Sequence[str] | None) -> str:
     """Return a bounded command label before argparse validation runs."""
     values = list(sys.argv[1:] if argv is None else argv)
-    if values and values[0] in {"review", "submit"}:
+    if values and values[0] in {"bootstrap", "review", "submit"}:
         return values[0]
     return "unknown"
 

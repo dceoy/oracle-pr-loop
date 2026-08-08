@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import operator
 import os
 import re
 import urllib.parse
@@ -13,6 +14,7 @@ from .models import (
     EXIT_GITHUB,
     EXIT_PRECONDITION,
     EXIT_RACE,
+    IssueSnapshot,
     JsonObject,
     JsonValue,
     LooprError,
@@ -30,10 +32,15 @@ PR_URL_PART_COUNT = 4
 LS_TREE_FIELD_COUNT = 4
 MIN_PRINTABLE_CODEPOINT = 32
 DEL_CODEPOINT = 127
+MAX_ISSUE_COMMENTS = 30
+MAX_ISSUE_COMMENT_BYTES = 20_000
+MAX_ISSUE_COMMENTS_TOTAL_BYTES = 300_000
+MAX_ISSUE_BODY_BYTES = 200_000
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
     "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
 )
+ISSUE_FIELDS = "number,title,body,author,state,url,updatedAt,comments"
 
 
 def normalize_repo(remote: str) -> str:
@@ -125,6 +132,54 @@ def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
             "pull request number must be positive",
         )
     url = f"https://github.com/{repository}/pull/{number}"
+    return repository, number, url
+
+
+def resolve_issue_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
+    """Resolve a positive Issue number or canonical GitHub issue URL.
+
+    Returns:
+        The repository, Issue number, and canonical issue URL.
+
+    Raises:
+        LooprError: value is not a positive number or canonical GitHub issue
+            URL, a numeric value is given without origin_repo, or the
+            resolved issue number is not positive.
+    """
+    if value.isdecimal():
+        if origin_repo is None:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "input",
+                "numeric --issue requires an unambiguous local origin",
+            )
+        repository, number = origin_repo, int(value)
+    else:
+        parsed = urllib.parse.urlparse(value)
+        parts = [part for part in parsed.path.split("/") if part]
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc.lower() != "github.com"
+            or parsed.query
+            or parsed.fragment
+            or len(parts) != PR_URL_PART_COUNT
+            or parts[2] != "issues"
+            or not parts[3].isdecimal()
+        ):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "input",
+                "--issue must be a positive number or canonical GitHub issue URL",
+            )
+        repository = f"{parts[0]}/{parts[1]}"
+        number = int(parts[3])
+    if number <= 0:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "input",
+            "issue number must be positive",
+        )
+    url = f"https://github.com/{repository}/issues/{number}"
     return repository, number, url
 
 
@@ -252,7 +307,173 @@ def _integer(value: JsonValue | None, *, field: str) -> int:
     return value
 
 
-class GitHubClient:
+class _ImmutableGitMixin:
+    """Shared immutable Git object reads for identity-bound GitHub clients."""
+
+    def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
+        """Initialize the shared immutable Git reader state."""
+        self.runner = runner
+        self.repo_dir = repo_dir
+
+    def _git_env(self) -> dict[str, str]:
+        """Return a Git environment that cannot redirect immutable object reads."""
+        env = self.runner.allowlisted_env()
+        env.update({
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+        })
+        return env
+
+    def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
+        """Read immutable Git data with a strict output bound.
+
+        Returns:
+            The command's raw stdout bytes.
+
+        Raises:
+            LooprError: The command failed.
+        """
+        try:
+            return self.runner.run(
+                ["git", *args],
+                cwd=self.repo_dir,
+                env=self._git_env(),
+                max_output=max_output,
+            ).stdout
+        except CommandError as exc:
+            raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+
+    def ensure_commit_object(self, sha: str) -> None:
+        """Require sha to name a local commit object.
+
+        Raises:
+            LooprError: sha does not name a local commit object.
+        """
+        object_type = self.git_bytes(
+            ["cat-file", "-t", sha],
+            max_output=1024,
+        ).decode("utf-8", "strict")
+        if object_type.strip() != "commit":
+            message = f"{sha} is not a commit object"
+            raise LooprError(EXIT_PRECONDITION, "git", message)
+
+    def tracked_paths_at(self, sha: str) -> tuple[str, ...]:
+        """List every tracked UTF-8 path in the frozen tree at sha.
+
+        Returns:
+            The sorted, distinct tracked paths.
+
+        Raises:
+            LooprError: A tracked path is non-UTF-8, unsafe, or duplicated.
+        """
+        output = self.git_bytes(
+            ["ls-tree", "-r", "-z", "--name-only", sha],
+            max_output=4 * 1024 * 1024,
+        )
+        paths: list[str] = []
+        for raw_path in output.split(b"\0"):
+            if not raw_path:
+                continue
+            try:
+                path = raw_path.decode("utf-8", "strict")
+            except UnicodeDecodeError as exc:
+                raise LooprError(
+                    EXIT_PRECONDITION,
+                    "path",
+                    "Git tree returned a non-UTF-8 tracked path",
+                ) from exc
+            paths.append(validate_path(path))
+        if len(paths) != len(set(paths)):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "path",
+                "Git tree returned duplicate tracked paths",
+            )
+        return tuple(sorted(paths))
+
+    def blob_bytes_at(
+        self,
+        sha: str,
+        path: str,
+        *,
+        max_output: int,
+    ) -> bytes | None:
+        """Read one blob at sha, or return None for an explicit omission.
+
+        Returns:
+            The blob's exact bytes, or None if it is absent, not a blob, or
+            exceeds max_output.
+
+        Raises:
+            LooprError: Git returned ambiguous, malformed, or mismatched
+                tree metadata.
+        """
+        listing = self.git_bytes(
+            [
+                "ls-tree",
+                "-r",
+                "-l",
+                "-z",
+                "--full-tree",
+                sha,
+                "--",
+                f":(literal){path}",
+            ],
+            max_output=4096,
+        )
+        records = [record for record in listing.split(b"\0") if record]
+        if not records:
+            return None
+        if len(records) != 1 or b"\t" not in records[0]:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree returned an ambiguous changed-file entry",
+            )
+        metadata, raw_path = records[0].split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) != LS_TREE_FIELD_COUNT:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree returned malformed changed-file metadata",
+            )
+        _mode, object_type, raw_object_sha, raw_size = fields
+        try:
+            listed_path = raw_path.decode("utf-8", "strict")
+            object_sha = raw_object_sha.decode("ascii", "strict")
+        except UnicodeError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree returned non-UTF-8 changed-file metadata",
+            ) from exc
+        if listed_path != path or not SHA_RE.fullmatch(object_sha):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git tree changed-file identity mismatched",
+            )
+        if object_type != b"blob" or not raw_size.isdigit():
+            return None
+        size = int(raw_size)
+        if size > max_output:
+            return None
+        data = self.git_bytes(
+            ["cat-file", "blob", object_sha],
+            max_output=max_output,
+        )
+        if len(data) != size:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git blob size changed during immutable evidence read",
+            )
+        return data
+
+
+class GitHubClient(_ImmutableGitMixin):
     """Read PR snapshots and post reviews through trusted CLI commands."""
 
     def __init__(
@@ -262,8 +483,7 @@ class GitHubClient:
         reviewer_token: str,
     ) -> None:
         """Initialize an unresolved GitHub client."""
-        self.runner = runner
-        self.repo_dir = repo_dir.resolve()
+        super().__init__(runner, repo_dir.resolve())
         self.reviewer_token = reviewer_token
         self.repository = ""
         self.number = 0
@@ -297,16 +517,6 @@ class GitHubClient:
             return result.stdout.decode("utf-8", "strict")
         except (CommandError, UnicodeError) as exc:
             raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
-
-    def _git_env(self) -> dict[str, str]:
-        """Return a Git environment that cannot redirect immutable object reads."""
-        env = self.runner.allowlisted_env()
-        env.update({
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_NO_REPLACE_OBJECTS": "1",
-        })
-        return env
 
     def initialize(self, pr_value: str) -> None:
         """Resolve the local repository, target PR, and reviewer identity.
@@ -493,39 +703,10 @@ class GitHubClient:
         validate_ref(pull_request.base_ref)
         validate_ref(pull_request.head_ref)
 
-    def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
-        """Read immutable Git data with a strict output bound.
-
-        Returns:
-            The command's raw stdout bytes.
-
-        Raises:
-            LooprError: The command failed.
-        """
-        try:
-            return self.runner.run(
-                ["git", *args],
-                cwd=self.repo_dir,
-                env=self._git_env(),
-                max_output=max_output,
-            ).stdout
-        except CommandError as exc:
-            raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-
     def ensure_objects(self, pull_request: PullRequest) -> None:
-        """Require both frozen SHAs to name local commit objects.
-
-        Raises:
-            LooprError: Either SHA does not name a local commit object.
-        """
+        """Require both frozen SHAs to name local commit objects."""
         for sha in (pull_request.base_sha, pull_request.head_sha):
-            object_type = self.git_bytes(
-                ["cat-file", "-t", sha],
-                max_output=1024,
-            ).decode("utf-8", "strict")
-            if object_type.strip() != "commit":
-                message = f"{sha} is not a commit object"
-                raise LooprError(EXIT_PRECONDITION, "git", message)
+            self.ensure_commit_object(sha)
 
     def changed_file_bytes(
         self,
@@ -539,73 +720,12 @@ class GitHubClient:
         Returns:
             The blob's exact bytes, or None if it is absent, not a blob, or
             exceeds max_output.
-
-        Raises:
-            LooprError: Git returned ambiguous, malformed, or mismatched
-                changed-file metadata.
         """
-        listing = self.git_bytes(
-            [
-                "ls-tree",
-                "-r",
-                "-l",
-                "-z",
-                "--full-tree",
-                pull_request.head_sha,
-                "--",
-                f":(literal){path}",
-            ],
-            max_output=4096,
-        )
-        records = [record for record in listing.split(b"\0") if record]
-        if not records:
-            return None
-        if len(records) != 1 or b"\t" not in records[0]:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git tree returned an ambiguous changed-file entry",
-            )
-        metadata, raw_path = records[0].split(b"\t", 1)
-        fields = metadata.split()
-        if len(fields) != LS_TREE_FIELD_COUNT:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git tree returned malformed changed-file metadata",
-            )
-        _mode, object_type, raw_object_sha, raw_size = fields
-        try:
-            listed_path = raw_path.decode("utf-8", "strict")
-            object_sha = raw_object_sha.decode("ascii", "strict")
-        except UnicodeError as exc:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git tree returned non-UTF-8 changed-file metadata",
-            ) from exc
-        if listed_path != path or not SHA_RE.fullmatch(object_sha):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git tree changed-file identity mismatched",
-            )
-        if object_type != b"blob" or not raw_size.isdigit():
-            return None
-        size = int(raw_size)
-        if size > max_output:
-            return None
-        data = self.git_bytes(
-            ["cat-file", "blob", object_sha],
+        return self.blob_bytes_at(
+            pull_request.head_sha,
+            path,
             max_output=max_output,
         )
-        if len(data) != size:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git blob size changed during immutable evidence read",
-            )
-        return data
 
     def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:
         """Read the exact base-to-head merge-base patch.
@@ -630,34 +750,8 @@ class GitHubClient:
 
         Returns:
             The sorted, distinct tracked paths.
-
-        Raises:
-            LooprError: A tracked path is non-UTF-8, unsafe, or duplicated.
         """
-        output = self.git_bytes(
-            ["ls-tree", "-r", "-z", "--name-only", pull_request.head_sha],
-            max_output=4 * 1024 * 1024,
-        )
-        paths: list[str] = []
-        for raw_path in output.split(b"\0"):
-            if not raw_path:
-                continue
-            try:
-                path = raw_path.decode("utf-8", "strict")
-            except UnicodeDecodeError as exc:
-                raise LooprError(
-                    EXIT_PRECONDITION,
-                    "path",
-                    "Git tree returned a non-UTF-8 tracked path",
-                ) from exc
-            paths.append(validate_path(path))
-        if len(paths) != len(set(paths)):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "path",
-                "Git tree returned duplicate tracked paths",
-            )
-        return tuple(sorted(paths))
+        return self.tracked_paths_at(pull_request.head_sha)
 
     def post_review(
         self,
@@ -780,3 +874,255 @@ class GitHubClient:
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
         """Return whether two snapshots have identical base and head SHAs."""
         return first.base_sha == second.base_sha and first.head_sha == second.head_sha
+
+
+def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
+    """Validate, order, and bound one Issue's comment collection.
+
+    Comments are sorted by `createdAt` (GitHub does not contractually
+    guarantee response order), then only the most recent
+    `MAX_ISSUE_COMMENTS` are kept. Each kept comment's body is replaced with
+    an omission marker if it, or the running total, exceeds its byte bound,
+    so oversized text is dropped outright rather than silently truncated.
+
+    Returns:
+        The validated, ordered, bounded comment collection.
+
+    Raises:
+        LooprError: value is not a well-formed comment array.
+    """
+    parsed: list[tuple[str, str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise LooprError(
+                EXIT_GITHUB,
+                "github_schema",
+                "GitHub comment entry must be an object",
+            )
+        author = _object(item.get("author"), field="comments.author")
+        parsed.append((
+            _string(author.get("login"), field="comments.author.login"),
+            _string(item.get("body") or "", field="comments.body", allow_empty=True),
+            _string(item.get("createdAt"), field="comments.createdAt"),
+        ))
+    parsed.sort(key=operator.itemgetter(2))
+    kept = parsed[-MAX_ISSUE_COMMENTS:] if len(parsed) > MAX_ISSUE_COMMENTS else parsed
+    comments: list[JsonObject] = []
+    total = 0
+    for author, body, created_at in kept:
+        body_bytes = len(body.encode("utf-8"))
+        omitted = (
+            body_bytes > MAX_ISSUE_COMMENT_BYTES
+            or total + body_bytes > MAX_ISSUE_COMMENTS_TOTAL_BYTES
+        )
+        comments.append({
+            "author": author,
+            "body": "" if omitted else body,
+            "created_at": created_at,
+            "omitted": omitted,
+        })
+        if not omitted:
+            total += body_bytes
+    return tuple(comments)
+
+
+class IssueClient(_ImmutableGitMixin):
+    """Read Issue snapshots and repository base-branch identity for bootstrap."""
+
+    def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
+        """Initialize an unresolved Issue client."""
+        super().__init__(runner, repo_dir.resolve())
+        self.repository = ""
+        self.number = 0
+        self.url = ""
+
+    def _text(self, args: list[str], *, max_output: int = 24 * 1024 * 1024) -> str:
+        """Run a GitHub CLI command with ordinary credentials.
+
+        Returns:
+            The command's decoded stdout.
+
+        Raises:
+            LooprError: The command failed or its output was not UTF-8.
+        """
+        try:
+            result = self.runner.run(
+                ["gh", *args],
+                cwd=self.repo_dir,
+                env=self.runner.gh_env(),
+                max_output=max_output,
+            )
+            return result.stdout.decode("utf-8", "strict")
+        except (CommandError, UnicodeError) as exc:
+            raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
+
+    def initialize(self, issue_value: str) -> None:
+        """Resolve the local repository and target Issue.
+
+        Raises:
+            LooprError: The repository or Issue could not be resolved or is
+                inconsistent with the local checkout.
+        """
+        origin_repo: str | None = None
+        try:
+            root = self.runner.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=self.repo_dir,
+                env=self._git_env(),
+            ).stdout.decode("utf-8", "strict")
+            self.repo_dir = Path(root.strip()).resolve()
+            origin = self.runner.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=self.repo_dir,
+                env=self._git_env(),
+            ).stdout.decode("utf-8", "strict")
+            origin_repo = normalize_repo(origin)
+        except (CommandError, UnicodeError):
+            if issue_value.isdecimal():
+                raise LooprError(
+                    EXIT_PRECONDITION,
+                    "repository",
+                    "cannot infer repository from local checkout",
+                ) from None
+        self.repository, self.number, self.url = resolve_issue_target(
+            issue_value,
+            origin_repo,
+        )
+        if origin_repo is not None and origin_repo.lower() != self.repository.lower():
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                "local origin does not match issue repository",
+            )
+
+    def snapshot(self) -> IssueSnapshot:
+        """Collect and validate one complete Issue snapshot.
+
+        Returns:
+            The validated Issue snapshot.
+
+        Raises:
+            LooprError: GitHub's response was malformed, inconsistent, failed
+                identity validation, or contained a known credential.
+        """
+        data = _json_object(
+            self._text(
+                ["issue", "view", self.url, "--json", ISSUE_FIELDS],
+                max_output=8 * 1024 * 1024,
+            ),
+            category="github_schema",
+        )
+        author = _object(data.get("author"), field="author")
+        comments_value = data.get("comments")
+        if not isinstance(comments_value, list):
+            raise LooprError(
+                EXIT_GITHUB,
+                "github_schema",
+                "GitHub field comments must be an array",
+            )
+        body = _string(data.get("body") or "", field="body", allow_empty=True)
+        if len(body.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "issue body exceeds bound",
+            )
+        issue = IssueSnapshot(
+            repository=self.repository,
+            number=_integer(data.get("number"), field="number"),
+            url=_string(data.get("url"), field="url"),
+            title=_string(data.get("title"), field="title", allow_empty=True),
+            body=body,
+            author=_string(author.get("login"), field="author.login"),
+            state=_string(data.get("state"), field="state"),
+            updated_at=_string(data.get("updatedAt"), field="updatedAt"),
+            comments=_bounded_comments(comments_value),
+            raw=data,
+        )
+        self._validate_snapshot_identity(issue)
+        self._validate_content_safety(issue)
+        return issue
+
+    def _validate_snapshot_identity(self, issue: IssueSnapshot) -> None:
+        """Validate identity and state.
+
+        Raises:
+            LooprError: issue fails any identity or state check.
+        """
+        if (
+            issue.number != self.number
+            or issue.url.rstrip("/").lower() != self.url.lower()
+        ):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "identity",
+                "ambiguous issue identity",
+            )
+        if issue.state != "OPEN":
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "state",
+                "issue must be open",
+            )
+
+    def _validate_content_safety(self, issue: IssueSnapshot) -> None:
+        """Reject Issue content that carries a known credential value.
+
+        Raises:
+            LooprError: issue title, body, or a comment body contains a
+                known credential value.
+        """
+        texts = [issue.title, issue.body]
+        for comment in issue.comments:
+            body = comment.get("body")
+            if isinstance(body, str):
+                texts.append(body)
+        if any(self.runner.contains_secret(text) for text in texts):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "credentials",
+                "issue content contains a known credential",
+            )
+
+    def default_branch(self) -> str:
+        """Return the repository's current default branch name.
+
+        Returns:
+            The validated default branch name.
+        """
+        data = _json_object(
+            self._text(["repo", "view", self.repository, "--json", "defaultBranchRef"]),
+            category="github_schema",
+        )
+        ref = _object(data.get("defaultBranchRef"), field="defaultBranchRef")
+        branch = _string(ref.get("name"), field="defaultBranchRef.name")
+        validate_ref(branch)
+        return branch
+
+    def branch_sha(self, branch: str) -> str:
+        """Return one branch's exact current commit SHA.
+
+        Returns:
+            The validated 40-character commit SHA.
+
+        Raises:
+            LooprError: GitHub's response was malformed or the SHA is invalid.
+        """
+        data = _json_object(
+            self._text([
+                "api",
+                "--hostname",
+                "github.com",
+                f"repos/{self.repository}/branches/{branch}",
+            ]),
+            category="github_schema",
+        )
+        commit = _object(data.get("commit"), field="commit")
+        sha = _string(commit.get("sha"), field="commit.sha")
+        if not SHA_RE.fullmatch(sha):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "sha",
+                "invalid base SHA",
+            )
+        return sha

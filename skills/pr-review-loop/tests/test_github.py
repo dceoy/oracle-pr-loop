@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise Git directly
@@ -9,12 +10,21 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from scripts.artifacts import ArtifactWriter
-from scripts.github import GitHubClient
-from scripts.models import EXIT_PRECONDITION, LooprError, PullRequest
+from scripts.github import (
+    MAX_ISSUE_BODY_BYTES,
+    MAX_ISSUE_COMMENT_BYTES,
+    MAX_ISSUE_COMMENTS,
+    MAX_ISSUE_COMMENTS_TOTAL_BYTES,
+    GitHubClient,
+    IssueClient,
+    resolve_issue_target,
+)
+from scripts.models import EXIT_PRECONDITION, JsonObject, LooprError, PullRequest
 from scripts.oracle import OracleClient
-from scripts.process import CommandRunner
+from scripts.process import CommandResult, CommandRunner
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 
@@ -184,3 +194,378 @@ def test_generic_git_failure_aborts_bundle_construction(tmp_path: Path) -> None:
 
     with pytest.raises(LooprError, match="injected git failure"):
         oracle.build_bundle(pull_request)
+
+
+def _repo_with_origin(tmp_path: Path, origin_url: str) -> Path:
+    """Create an empty Git repository with a configured origin remote."""
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "issue-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["remote", "add", "origin", origin_url], cwd=repo)
+    return repo
+
+
+def _issue_payload(
+    *,
+    number: int = 42,
+    url: str = "https://github.com/acme/demo/issues/42",
+    state: str = "OPEN",
+    title: str = "Title",
+    body: str = "Body",
+    author: str = "author",
+    updated_at: str = "2026-01-01T00:00:00Z",
+    comments: list[JsonObject] | None = None,
+) -> JsonObject:
+    """Return one valid `gh issue view --json` response payload."""
+    return {
+        "number": number,
+        "url": url,
+        "state": state,
+        "title": title,
+        "body": body,
+        "author": {"login": author},
+        "updatedAt": updated_at,
+        "comments": [] if comments is None else list(comments),
+    }
+
+
+class FakeIssueGh(CommandRunner):
+    """Fake `gh` Issue/repo/branch responses while running real local Git."""
+
+    def __init__(
+        self,
+        *,
+        issue: JsonObject,
+        default_branch: str = "main",
+        branch_sha: str = "a" * 40,
+    ) -> None:
+        """Initialize one fake Issue-bootstrap GitHub CLI transport."""
+        super().__init__()
+        self.issue = issue
+        self.default_branch_name = default_branch
+        self.branch_sha_value = branch_sha
+        self.gh_calls: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Fake `gh` reads and delegate every other command to real Git."""
+        argv = tuple(str(value) for value in args)
+        if argv and argv[0] == "gh":
+            self.gh_calls.append(argv)
+            if argv[1] == "issue":
+                return CommandResult(argv, 0, json.dumps(self.issue).encode(), "")
+            if argv[1] == "repo":
+                payload = {"defaultBranchRef": {"name": self.default_branch_name}}
+                return CommandResult(argv, 0, json.dumps(payload).encode(), "")
+            if argv[1] == "api":
+                payload = {"commit": {"sha": self.branch_sha_value}}
+                return CommandResult(argv, 0, json.dumps(payload).encode(), "")
+        return super().run(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            input_text=input_text,
+            check=check,
+            max_output=max_output,
+            watch_path=watch_path,
+        )
+
+
+def test_resolve_issue_target_accepts_numeric_with_origin() -> None:
+    """A numeric target resolves against the unambiguous local origin."""
+    repository, number, url = resolve_issue_target("42", "acme/demo")
+
+    assert (repository, number, url) == (
+        "acme/demo",
+        42,
+        "https://github.com/acme/demo/issues/42",
+    )
+
+
+def test_resolve_issue_target_rejects_numeric_without_origin() -> None:
+    """A numeric target requires an unambiguous local origin."""
+    with pytest.raises(LooprError) as captured:
+        resolve_issue_target("42", None)
+
+    assert captured.value.category == "input"
+
+
+def test_resolve_issue_target_parses_canonical_url() -> None:
+    """A canonical Issue URL resolves without needing a local origin."""
+    repository, number, url = resolve_issue_target(
+        "https://github.com/acme/demo/issues/42",
+        None,
+    )
+
+    assert (repository, number, url) == (
+        "acme/demo",
+        42,
+        "https://github.com/acme/demo/issues/42",
+    )
+
+
+def test_resolve_issue_target_rejects_pull_url() -> None:
+    """A pull-request URL is not an Issue target."""
+    with pytest.raises(LooprError) as captured:
+        resolve_issue_target("https://github.com/acme/demo/pull/42", None)
+
+    assert captured.value.category == "input"
+
+
+def test_resolve_issue_target_rejects_zero() -> None:
+    """A zero Issue number is not positive."""
+    with pytest.raises(LooprError) as captured:
+        resolve_issue_target("0", "acme/demo")
+
+    assert captured.value.category == "input"
+
+
+def test_issue_client_snapshot_maps_fields(tmp_path: Path) -> None:
+    """A valid open Issue snapshot maps every field from the GitHub response."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload())
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    snapshot = client.snapshot()
+
+    assert snapshot.repository == "acme/demo"
+    assert snapshot.number == 42
+    assert snapshot.state == "OPEN"
+    assert snapshot.title == "Title"
+    assert snapshot.body == "Body"
+    assert snapshot.author == "author"
+    assert snapshot.updated_at == "2026-01-01T00:00:00Z"
+    assert snapshot.comments == ()
+
+
+def test_issue_client_rejects_closed_issue(tmp_path: Path) -> None:
+    """A closed Issue is rejected before it reaches the bootstrap bundle."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(state="CLOSED"))
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+
+    assert captured.value.category == "state"
+
+
+def test_issue_client_rejects_pull_request_identity(tmp_path: Path) -> None:
+    """A number that names a pull request, not an Issue, fails identity."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    payload = _issue_payload(url="https://github.com/acme/demo/pull/42")
+    runner = FakeIssueGh(issue=payload)
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+
+    assert captured.value.category == "identity"
+
+
+def test_issue_client_rejects_repository_mismatch(tmp_path: Path) -> None:
+    """A canonical Issue URL cannot redirect bootstrap to another repository."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload())
+    client = IssueClient(runner, repo)
+
+    with pytest.raises(LooprError) as captured:
+        client.initialize("https://github.com/other/repo/issues/42")
+
+    assert captured.value.category == "repository"
+
+
+def test_issue_client_numeric_requires_local_origin(tmp_path: Path) -> None:
+    """A numeric Issue target cannot be resolved outside a Git checkout."""
+    runner = FakeIssueGh(issue=_issue_payload())
+    client = IssueClient(runner, tmp_path)
+
+    with pytest.raises(LooprError) as captured:
+        client.initialize("42")
+
+    assert captured.value.category == "repository"
+
+
+def test_issue_client_rejects_known_credential_in_body(tmp_path: Path) -> None:
+    """Issue body content cannot carry a known credential value forward."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(body="token=known-secret-value"))
+    runner.secrets.add("known-secret-value")
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+
+    assert captured.value.category == "credentials"
+
+
+def test_issue_client_rejects_known_credential_in_comment(tmp_path: Path) -> None:
+    """Issue comment content cannot carry a known credential value forward."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    comment: JsonObject = {
+        "author": {"login": "commenter"},
+        "body": "known-secret-value",
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    runner = FakeIssueGh(issue=_issue_payload(comments=[comment]))
+    runner.secrets.add("known-secret-value")
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+
+    assert captured.value.category == "credentials"
+
+
+def test_issue_client_rejects_oversized_body(tmp_path: Path) -> None:
+    """An Issue body beyond the bound fails closed rather than truncating."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    oversized = "x" * (MAX_ISSUE_BODY_BYTES + 1)
+    runner = FakeIssueGh(issue=_issue_payload(body=oversized))
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+
+    assert captured.value.category == "bundle"
+
+
+def test_issue_client_bounds_and_orders_comments(tmp_path: Path) -> None:
+    """Comments are ordered by `createdAt` and bounded to the most recent N."""
+    total = MAX_ISSUE_COMMENTS + 5
+    comments: list[JsonObject] = [
+        {
+            "author": {"login": f"user{index}"},
+            "body": f"comment {index}",
+            "createdAt": f"2026-01-01T00:00:{index:02d}Z",
+        }
+        for index in range(total)
+    ]
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(comments=list(reversed(comments))))
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    snapshot = client.snapshot()
+
+    assert len(snapshot.comments) == MAX_ISSUE_COMMENTS
+    kept_bodies = [comment["body"] for comment in snapshot.comments]
+    expected_bodies = [
+        f"comment {index}" for index in range(total - MAX_ISSUE_COMMENTS, total)
+    ]
+    assert kept_bodies == expected_bodies
+
+
+def test_issue_client_omits_oversized_comment_body(tmp_path: Path) -> None:
+    """An individual oversized comment is omitted, not truncated."""
+    comment: JsonObject = {
+        "author": {"login": "author"},
+        "body": "x" * (MAX_ISSUE_COMMENT_BYTES + 1),
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(comments=[comment]))
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    snapshot = client.snapshot()
+
+    assert snapshot.comments[0]["omitted"] is True
+    assert snapshot.comments[0]["body"] == ""
+
+
+def test_issue_client_omits_comments_past_aggregate_byte_bound(
+    tmp_path: Path,
+) -> None:
+    """Comments within the per-comment bound are still capped in aggregate."""
+    per_comment_bytes = 15_000
+    comments: list[JsonObject] = [
+        {
+            "author": {"login": f"user{index}"},
+            "body": "x" * per_comment_bytes,
+            "createdAt": f"2026-01-01T00:{index:02d}:00Z",
+        }
+        for index in range(MAX_ISSUE_COMMENTS)
+    ]
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(comments=comments))
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    snapshot = client.snapshot()
+
+    included = MAX_ISSUE_COMMENTS_TOTAL_BYTES // per_comment_bytes
+    assert snapshot.comments[included - 1]["omitted"] is False
+    assert snapshot.comments[included]["omitted"] is True
+    assert snapshot.comments[included]["body"] == ""
+
+
+def test_issue_client_default_branch_rejects_unsafe_ref(tmp_path: Path) -> None:
+    """An unsafe default branch name fails closed."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(), default_branch="unsafe branch")
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    with pytest.raises(LooprError) as captured:
+        client.default_branch()
+
+    assert captured.value.category == "ref"
+
+
+def test_issue_client_branch_sha_rejects_invalid_sha(tmp_path: Path) -> None:
+    """A malformed branch SHA from GitHub fails closed."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(), branch_sha="not-a-sha")
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    with pytest.raises(LooprError) as captured:
+        client.branch_sha("main")
+
+    assert captured.value.category == "sha"
+
+
+def test_issue_client_reads_tracked_paths_and_blobs_at_base_sha(
+    tmp_path: Path,
+) -> None:
+    """IssueClient reads repository evidence at an arbitrary base commit."""
+    _git_exe, repo, base, _head = _repo_with_two_commits(tmp_path)
+    client = IssueClient(CommandRunner(), repo)
+
+    client.ensure_commit_object(base)
+
+    assert client.tracked_paths_at(base) == ("file.py",)
+    assert client.blob_bytes_at(base, "file.py", max_output=1024) == b"base\n"
+
+
+def test_issue_client_ensure_commit_object_rejects_missing_sha(
+    tmp_path: Path,
+) -> None:
+    """A base SHA absent from the local checkout fails closed."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    client = IssueClient(CommandRunner(), repo)
+
+    with pytest.raises(LooprError) as captured:
+        client.ensure_commit_object("a" * 40)
+
+    assert captured.value.category == "git"
