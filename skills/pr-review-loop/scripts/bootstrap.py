@@ -38,7 +38,7 @@ def execute_bootstrap(
     initial = issue_client.snapshot()
     base_ref, base_sha = _base_snapshot(issue_client)
     _ensure_base_available(issue_client, base_ref, base_sha)
-    _ensure_workspace_bound_to_base(issue_client, base_ref, base_sha)
+    _ensure_workspace_bound_to_base(issue_client, base_ref, base_sha, artifacts_dir)
 
     writer = ArtifactWriter(
         claim_run_directory(
@@ -64,6 +64,7 @@ def execute_bootstrap(
         or after_ref != base_ref
         or after_sha != base_sha
         or after_head != base_sha
+        or _worktree_is_dirty(issue_client, artifacts_dir)
     ):
         raise LooprError(
             EXIT_RACE,
@@ -134,17 +135,18 @@ def _ensure_workspace_bound_to_base(
     issue_client: IssueClient,
     base_ref: str,
     base_sha: str,
+    artifacts_dir: Path,
 ) -> None:
     """Require the local checkout to already be clean and at base_sha.
 
     The returned `base_sha` is meant to be the actual implementation base,
-    not advisory metadata; a checkout left on an unrelated or stale commit
-    would let the host build the first commit and pull request on the wrong
-    history.
+    not advisory metadata; a checkout left on an unrelated or stale commit,
+    or one carrying pre-existing untracked files, would let the host build
+    the first commit and pull request on the wrong or contaminated history.
 
     Raises:
-        LooprError: local `HEAD` is not base_sha, or tracked changes are
-            pending.
+        LooprError: local `HEAD` is not base_sha, or tracked or untracked
+            changes are pending.
     """
     head_sha = _local_head(issue_client)
     if head_sha != base_sha:
@@ -154,14 +156,55 @@ def _ensure_workspace_bound_to_base(
             f"`git switch -c <branch> {base_sha}` before running bootstrap"
         )
         raise LooprError(EXIT_PRECONDITION, "workspace", message)
-    status = issue_client.git_bytes(
-        ["status", "--porcelain", "--untracked-files=no"],
-        max_output=64 * 1024,
-    )
-    if status.strip():
+    if _worktree_is_dirty(issue_client, artifacts_dir):
         raise LooprError(
             EXIT_PRECONDITION,
             "workspace",
-            "local checkout has uncommitted tracked changes; commit, stash, "
-            "or discard them before running bootstrap",
+            "local checkout has uncommitted tracked changes or untracked "
+            "files; commit, stash, or discard them before running bootstrap",
         )
+
+
+def _artifacts_exclude_pathspec(repo_dir: Path, artifacts_dir: Path) -> str | None:
+    """Return a `git status` pathspec excluding this command's own artifacts.
+
+    `execute_bootstrap` claims a run directory under `artifacts_dir` and
+    writes its own bounded prompt-generation artifacts there before the
+    post-Oracle workspace recheck runs; that self-created, tool-owned
+    output must not itself be flagged as workspace contamination, and this
+    must hold regardless of whether a given host repository also lists
+    `artifacts_dir` in `.gitignore`.
+
+    Returns:
+        A `:(exclude)<path>` pathspec for `artifacts_dir`, or None when it
+        does not resolve inside repo_dir and so cannot appear in `git
+        status` output at all.
+    """
+    root = repo_dir.resolve()
+    target = artifacts_dir if artifacts_dir.is_absolute() else root / artifacts_dir
+    try:
+        relative = target.resolve().relative_to(root)
+    except ValueError:
+        return None
+    if str(relative) == ".":
+        return None
+    return f":(exclude){relative.as_posix()}"
+
+
+def _worktree_is_dirty(issue_client: IssueClient, artifacts_dir: Path) -> bool:
+    """Report whether the local checkout has any tracked or untracked changes.
+
+    Any change outside `artifacts_dir` counts, whether or not the host
+    repository's `.gitignore`/`.git/info/exclude` also covers that
+    directory.
+
+    Returns:
+        True if the checkout has any pending tracked or untracked change
+        outside artifacts_dir.
+    """
+    args = ["status", "--porcelain"]
+    pathspec = _artifacts_exclude_pathspec(issue_client.repo_dir, artifacts_dir)
+    if pathspec is not None:
+        args = [*args, "--", ".", pathspec]
+    status = issue_client.git_bytes(args, max_output=64 * 1024)
+    return bool(status.strip())

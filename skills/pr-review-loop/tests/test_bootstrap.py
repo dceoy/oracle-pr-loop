@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise Git directly
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 from scripts import bootstrap as bootstrap_module
 from scripts.bootstrap import execute_bootstrap
+from scripts.github import IssueClient
 from scripts.models import (
     EXIT_PRECONDITION,
     EXIT_RACE,
@@ -20,6 +23,18 @@ from scripts.process import CommandRunner
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+
+
+def _git(git: str, args: list[str], *, cwd: Path) -> str:
+    """Run one test-controlled Git command and return stripped stdout."""
+    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed test argv
+        [git, *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def sample_issue(
@@ -62,6 +77,7 @@ class FakeIssueClient:
         self._heads = list(type(self).heads)
         self._statuses = list(type(self).statuses)
         self.ensure_calls: list[str] = []
+        self.status_args: list[list[str]] = []
 
     def initialize(self, _issue_value: str) -> None:
         """Accept the configured fake target."""
@@ -88,6 +104,7 @@ class FakeIssueClient:
         if args[:2] == ["rev-parse", "HEAD"]:
             return self._heads.pop(0)
         if args[:1] == ["status"]:
+            self.status_args.append(args)
             return self._statuses.pop(0)
         message = f"unexpected git_bytes call: {args}"
         raise AssertionError(message)
@@ -152,7 +169,7 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
-    FakeIssueClient.statuses = [b""]
+    FakeIssueClient.statuses = [b"", b""]
     install_orchestration_fakes(monkeypatch)
 
     result = execute_bootstrap(
@@ -172,6 +189,10 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     assert result.implementation_prompt == "Implement the requested change."
     assert FakeIssueClient.instance is not None
     assert FakeIssueClient.instance.ensure_calls == [SHA_A]
+    assert FakeIssueClient.instance.status_args == [
+        ["status", "--porcelain", "--", ".", ":(exclude)artifacts"],
+        ["status", "--porcelain", "--", ".", ":(exclude)artifacts"],
+    ]
     artifacts = Path(result.artifacts_dir)
     assert artifacts.name.startswith("bootstrap-issue-7-")
     assert (artifacts / "initial-issue.json").is_file()
@@ -373,6 +394,131 @@ def test_execute_bootstrap_rejects_dirty_workspace(
 
     assert captured.value.code == EXIT_PRECONDITION
     assert captured.value.category == "workspace"
+
+
+def test_execute_bootstrap_rejects_untracked_files_on_base_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-existing untracked files on the base commit fail closed too.
+
+    A prior implementation checked cleanliness with
+    `git status --porcelain --untracked-files=no`, which silently accepted
+    arbitrary pre-existing untracked files that could later contaminate the
+    first PR the host builds from this checkout.
+    """
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue]
+    FakeIssueClient.branches = ["main"]
+    FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.statuses = [b"?? untracked-file.py\n"]
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "workspace"
+    assert FakeIssueClient.instance is not None
+    assert FakeIssueClient.instance.status_args == [
+        ["status", "--porcelain", "--", ".", ":(exclude)artifacts"],
+    ]
+
+
+def test_worktree_is_dirty_excludes_own_artifacts_directory(tmp_path: Path) -> None:
+    """Creating this command's own artifacts directory must not read as dirty.
+
+    A prior implementation relied on the host repository's `.gitignore` to
+    keep `artifacts_dir` invisible to `git status`; that is not guaranteed
+    for every host repository, so the check must exclude it directly rather
+    than assume it is already ignored.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("base\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    client = IssueClient(CommandRunner(), repo)
+    artifacts_dir = Path("artifacts")
+
+    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is False
+
+    run_dir = repo / artifacts_dir / "bootstrap-issue-7-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text("{}\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is False
+
+    (repo / "other-untracked.txt").write_text("x\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is True
+
+
+def test_artifacts_exclude_pathspec_is_none_outside_repo(tmp_path: Path) -> None:
+    """An artifacts directory outside repo_dir needs no exclusion pathspec.
+
+    A path `git status` cannot report on cannot contaminate its output, so
+    there is nothing to exclude.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "elsewhere"
+
+    assert bootstrap_module._artifacts_exclude_pathspec(repo, outside) is None
+
+
+def test_artifacts_exclude_pathspec_is_none_for_repo_root(tmp_path: Path) -> None:
+    """An artifacts directory equal to repo_dir itself needs no pathspec.
+
+    Excluding the whole repository would defeat the cleanliness check
+    entirely, so this degenerate case is treated as nothing-to-exclude.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert bootstrap_module._artifacts_exclude_pathspec(repo, Path()) is None
+
+
+def test_execute_bootstrap_rejects_workspace_dirtied_during_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workspace dirtied while Oracle was working fails closed as stale.
+
+    The post-Oracle recheck must apply the same tracked-and-untracked
+    cleanliness invariant as the pre-check, not only compare `HEAD`.
+    """
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue, issue]
+    FakeIssueClient.branches = ["main", "main"]
+    FakeIssueClient.shas = [SHA_A, SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.statuses = [b"", b"?? new-file.py\n"]
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
 
 
 class ClosingIssueClient(FakeIssueClient):

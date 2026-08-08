@@ -428,6 +428,40 @@ def test_issue_client_numeric_requires_local_origin(tmp_path: Path) -> None:
     assert captured.value.category == "repository"
 
 
+def test_issue_client_url_requires_local_origin_outside_git_checkout(
+    tmp_path: Path,
+) -> None:
+    """A canonical Issue URL cannot bypass the matching-origin check either.
+
+    Bootstrap hands the returned base commit to the host for implementation
+    in this checkout, so an Issue URL must not be able to skip the
+    unambiguous-local-origin requirement that numeric input already enforces.
+    """
+    runner = FakeIssueGh(issue=_issue_payload())
+    client = IssueClient(runner, tmp_path)
+
+    with pytest.raises(LooprError) as captured:
+        client.initialize("https://github.com/acme/demo/issues/42")
+
+    assert captured.value.category == "repository"
+
+
+def test_issue_client_url_requires_origin_remote(tmp_path: Path) -> None:
+    """A canonical Issue URL still requires a configured origin remote."""
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "issue-repo-no-origin"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    runner = FakeIssueGh(issue=_issue_payload())
+    client = IssueClient(runner, repo)
+
+    with pytest.raises(LooprError) as captured:
+        client.initialize("https://github.com/acme/demo/issues/42")
+
+    assert captured.value.category == "repository"
+
+
 def test_issue_client_rejects_known_credential_in_body(tmp_path: Path) -> None:
     """Issue body content cannot carry a known credential value forward."""
     repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")

@@ -984,11 +984,16 @@ class IssueClient(_ImmutableGitMixin):
     def initialize(self, issue_value: str) -> None:
         """Resolve the local repository and target Issue.
 
+        Bootstrap always hands the returned base commit to the host for
+        implementation in this checkout, so, unlike PR review, an
+        unambiguous local `origin` is required for both numeric and URL
+        input; a canonical Issue URL never bypasses the matching-origin
+        check.
+
         Raises:
             LooprError: The repository or Issue could not be resolved or is
                 inconsistent with the local checkout.
         """
-        origin_repo: str | None = None
         try:
             root = self.runner.run(
                 ["git", "rev-parse", "--show-toplevel"],
@@ -1002,18 +1007,17 @@ class IssueClient(_ImmutableGitMixin):
                 env=self._git_env(),
             ).stdout.decode("utf-8", "strict")
             origin_repo = normalize_repo(origin)
-        except (CommandError, UnicodeError):
-            if issue_value.isdecimal():
-                raise LooprError(
-                    EXIT_PRECONDITION,
-                    "repository",
-                    "cannot infer repository from local checkout",
-                ) from None
+        except (CommandError, UnicodeError) as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                "cannot infer repository from local checkout",
+            ) from exc
         self.repository, self.number, self.url = resolve_issue_target(
             issue_value,
             origin_repo,
         )
-        if origin_repo is not None and origin_repo.lower() != self.repository.lower():
+        if origin_repo.lower() != self.repository.lower():
             raise LooprError(
                 EXIT_PRECONDITION,
                 "repository",
