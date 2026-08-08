@@ -11,11 +11,32 @@ Use this skill to improve one GitHub pull request without embedding or launching
 
 1. Run `review` against the exact current PR head.
 2. Finish on `APPROVE`.
-3. On `REQUEST_CHANGES`, let the host agent implement only the blocking findings and run repository QA.
-4. Run `submit` against the reviewed head.
+3. On `REQUEST_CHANGES`, triage the blocking findings (below), implement only what triage marks `fix`, and run repository QA.
+4. Run `submit` against the reviewed head, but only when triage produced a real patch.
 5. Run a fresh `review` on the resulting head and repeat until approval or the chosen iteration limit.
 
-The host agent owns planning, editing, QA, and iteration. Oracle/ChatGPT owns independent review. Skill scripts own deterministic Git/GitHub inspection, review publication, patch validation, one commit, and the lease-protected push.
+The host agent owns planning, triage, editing, QA, and iteration. Oracle/ChatGPT owns independent review. Skill scripts own deterministic Git/GitHub inspection, review publication, patch validation, one commit, and the lease-protected push.
+
+## Triaging blocking findings
+
+`review` returns `blocking_findings` as an array of `{id, title, description, required_change}` plus one `implementation_prompt`. Do not implement every finding verbatim; triage first.
+
+For every finding:
+
+1. Compare it against the exact reviewed `head_sha` and the current code, not a stale mental model of the diff.
+2. Deduplicate findings that describe the same underlying defect (merge by matching `id` first, then by matching file/behavior); track one disposition per distinct defect even if several findings named it.
+3. Classify the distinct finding as exactly one of:
+   - `fix` — valid and applicable; implement the smallest sufficient change.
+   - `already_addressed` — current code already satisfies the requested behavior; note the evidence (file/line or behavior) rather than editing.
+   - `outdated` — the referenced problem no longer exists at the reviewed head; note why.
+   - `clarify` — the requested change is ambiguous, contradictory, or needs information the host does not have.
+   - `defer` — the concern is valid but out of scope for this PR, or cannot be safely addressed now.
+4. Edit code only for `fix` findings, and keep every edit scoped to blocking findings — no incidental cleanup.
+5. Run normal repository QA after edits.
+6. Never fabricate a fix or manufacture an approval for `clarify` or `defer` findings; leave them for the user or a follow-up.
+7. Call `submit` only when triage produced at least one real workspace patch to submit.
+8. After a successful `submit`, run a fresh `review` before deciding the PR is done.
+9. If triage produced no `fix` disposition — every blocking finding resolved to `already_addressed`, `outdated`, `clarify`, or `defer` — stop the loop instead of calling `submit` or re-running `review` on the unchanged head. Report each disposition with its evidence and hand the still-open `REQUEST_CHANGES` review to the user or a maintainer to dismiss or override; this skill never dismisses or overrides a review on the host's behalf.
 
 ## Commands
 

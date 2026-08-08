@@ -326,6 +326,17 @@ def _assert_skill_discovery(client: str, discovery_path: Path) -> None:
     )
 
 
+def test_skill_discovery_directories_contain_only_known_skills() -> None:
+    """No standalone skill, such as the removed pr-feedback-triage, can return."""
+    known_skills = {"pr-review-loop", "local-qa"}
+    for discovery_dir in (
+        REPOSITORY_ROOT / ".agents" / "skills",
+        REPOSITORY_ROOT / ".claude" / "skills",
+    ):
+        entries = {entry.name for entry in discovery_dir.iterdir()}
+        assert entries == known_skills, discovery_dir
+
+
 def _assert_review_result(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
