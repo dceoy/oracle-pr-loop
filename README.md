@@ -28,9 +28,9 @@ export GH_REVIEW_TOKEN='...'
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
-`APPROVE` and `REQUEST_CHANGES` are both successful domain results. On `REQUEST_CHANGES`, the host agent triages the returned blocking findings (deduplicate, check current applicability, classify, fix only what is valid and applicable), implements only the applicable fixes, and runs normal repository QA.
+`APPROVE` and `REQUEST_CHANGES` are both successful domain results. On `REQUEST_CHANGES`, the host agent triages the returned blocking findings (deduplicate, check current applicability, classify, fix only what is valid and applicable), implements only the applicable fixes, and runs normal repository QA. If triage produced no applicable fix, stop here and hand the still-open `REQUEST_CHANGES` review to the user or a maintainer instead of calling `submit` or re-running `review` on the unchanged head.
 
-Submit the complete workspace patch against the reviewed head:
+Otherwise, submit the complete workspace patch against the reviewed head:
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py submit \

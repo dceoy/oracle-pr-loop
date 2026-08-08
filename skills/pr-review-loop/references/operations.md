@@ -9,9 +9,10 @@ Choose an iteration limit before starting.
 1. Run `review` on the exact current PR head.
 2. Finish on `APPROVE`.
 3. On `REQUEST_CHANGES`, triage `blocking_findings` (dedupe, check current applicability, classify as fix/already_addressed/outdated/clarify/defer), implement only the `fix` dispositions, and run repository QA.
-4. Submit the complete patch with `submit --pr <NUMBER_OR_URL> --expected-head <REVIEWED_HEAD_SHA>`.
-5. Confirm `resulting_head_sha == commit_sha`.
-6. Run a fresh `review` on that head and repeat only when another `REQUEST_CHANGES` is returned.
+4. If triage produced no `fix` disposition, stop here and hand the still-open `REQUEST_CHANGES` review to the user or a maintainer instead of calling `submit` or re-running `review` on the unchanged head.
+5. Otherwise, submit the complete patch with `submit --pr <NUMBER_OR_URL> --expected-head <REVIEWED_HEAD_SHA>`.
+6. Confirm `resulting_head_sha == commit_sha`.
+7. Run a fresh `review` on that head and repeat only when another `REQUEST_CHANGES` is returned.
 
 Operational errors are stop conditions. Do not reinterpret them as review verdicts.
 
