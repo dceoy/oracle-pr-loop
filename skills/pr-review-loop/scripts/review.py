@@ -76,7 +76,7 @@ def execute_review(
         _persist_best_effort(writer, "github-review.json", posted)
         after_post = github.snapshot()
         verified = github.verify_posted(initial, review_id, body)
-        _require_fresh_state(github, initial, after_post, verified)
+        _require_fresh_state(github, initial, after_post, verified, event)
     except BaseException as exc:
         _dismiss_stale(github, initial, review_id, event, exc)
         raise
@@ -134,22 +134,33 @@ def _persist_best_effort(
         sys.stderr.write(f"{message}\n")
 
 
+_EXPECTED_REVIEW_STATE = {
+    "APPROVE": "APPROVED",
+    "REQUEST_CHANGES": "CHANGES_REQUESTED",
+    "COMMENT": "COMMENTED",
+}
+
+
 def _require_fresh_state(
     github: GitHubClient,
     initial: PullRequest,
     after_post: PullRequest,
     verified: JsonValue,
+    event: str,
 ) -> None:
-    """Confirm the posted review and snapshot are still fresh.
+    """Confirm the posted review's state and snapshot are still fresh.
 
     Raises:
-        LooprError: The verified review or repository snapshot went stale.
+        LooprError: The verified state or repository snapshot went stale.
 
-    The Oracle verdict is authoritative; GitHub's formal review state is not
-    inspected here. A formal stale review is dismissed by the caller where
-    possible, while a stale comment is retained as its commit-anchored audit.
+    The Oracle verdict stays canonical in the command result, but GitHub's
+    persisted review state must still correspond to the selected transport
+    event so a formal or commit-anchored publication cannot silently record
+    a state other than the one actually written.
     """
-    if not isinstance(verified, dict) or not github.same_snapshot(initial, after_post):
+    expected_state = _EXPECTED_REVIEW_STATE[event]
+    state = verified.get("state") if isinstance(verified, dict) else None
+    if state != expected_state or not github.same_snapshot(initial, after_post):
         raise LooprError(
             EXIT_RACE,
             "stale_state",

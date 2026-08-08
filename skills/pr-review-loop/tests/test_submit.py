@@ -607,6 +607,42 @@ def test_previous_artifacts_are_excluded_from_submit(tmp_path: Path) -> None:
     assert not any(path.startswith(".pr-review-loop/") for path in committed_paths)
 
 
+def test_gitignored_artifact_directory_does_not_block_staging(tmp_path: Path) -> None:
+    """Staging succeeds when Git already ignores the artifact directory.
+
+    Newer Git refuses `git add` when a pathspec argument names an already
+    ignored path, even with exclude magic. Once `.pr-review-loop/` is
+    covered by `.gitignore`, the exclude pathspec must not be passed to the
+    staging command at all -- Git already skips ignored paths under `.`
+    without it.
+    """
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    (repo / ".gitignore").write_text(".pr-review-loop/\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-m", "ignore artifacts")
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "origin", "feature")
+    state["headRefOid"] = head
+    previous = repo / ".pr-review-loop" / "runs" / "previous"
+    previous.mkdir(parents=True)
+    (previous / "result.json").write_text("{}\n", encoding="utf-8")
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        artifacts_dir=Path(".pr-review-loop"),
+        runner=ScenarioRunner(repo, remote, state),
+    )
+
+    committed_paths = _git(
+        repo, "ls-tree", "-r", "--name-only", result.commit_sha
+    ).splitlines()
+    assert "file.txt" in committed_paths
+    assert not any(path.startswith(".pr-review-loop/") for path in committed_paths)
+
+
 def test_tracked_artifact_directory_is_rejected(tmp_path: Path) -> None:
     repo, remote, state, _base, _head = _fixture_repo(tmp_path)
     tracked = repo / ".pr-review-loop" / "tracked.txt"

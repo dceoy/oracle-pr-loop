@@ -116,14 +116,19 @@ class FakeGitHubClient:
         self.posted_bodies.append(body)
         return 123, {"id": 123, "commit_id": pull_request.head_sha}
 
-    @staticmethod
     def verify_posted(
+        self,
         _pull_request: PullRequest,
         _review_id: int,
         _body: str,
     ) -> JsonObject:
-        """Return a valid approved review state."""
-        return {"state": "APPROVED"}
+        """Return the review state matching the most recently posted event."""
+        expected_state = {
+            "APPROVE": "APPROVED",
+            "REQUEST_CHANGES": "CHANGES_REQUESTED",
+            "COMMENT": "COMMENTED",
+        }
+        return {"state": expected_state[self.posted_events[-1]]}
 
     def dismiss(self, _pull_request: PullRequest, review_id: int) -> None:
         """Record stale-review neutralization."""
@@ -230,6 +235,101 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
         f"Reviewed head: `{initial.head_sha}`"
         in FakeGitHubClient.instance.posted_bodies[0]
     )
+
+
+def test_formal_review_rejects_mismatched_persisted_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A formal review whose re-read state does not match the event is rejected."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
+    install_orchestration_fakes(monkeypatch)
+
+    class MismatchedStateGitHubClient(FakeGitHubClient):
+        def verify_posted(
+            self,
+            _pull_request: PullRequest,
+            _review_id: int,
+            _body: str,
+        ) -> JsonObject:
+            del self
+            return {"state": "COMMENTED"}
+
+    monkeypatch.setattr(review_module, "GitHubClient", MismatchedStateGitHubClient)
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
+    assert MismatchedStateGitHubClient.instance is not None
+    assert MismatchedStateGitHubClient.instance.dismissed == [123]
+
+
+def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A self-authored comment whose persisted state is not COMMENTED is rejected.
+
+    This guards the audit-integrity regression Oracle flagged: a REQUEST_CHANGES
+    verdict must not be publishable while GitHub's re-read state disagrees with
+    the selected COMMENT transport event, regardless of what free-form
+    ``review_body`` text Oracle supplied (for example a contradictory
+    "Approved." body attached to a REQUEST_CHANGES verdict).
+    """
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
+    install_orchestration_fakes(monkeypatch)
+
+    class ContradictoryBodyOracleClient(FakeOracleClient):
+        @staticmethod
+        def review(
+            pull_request: PullRequest,
+            _attachments: tuple[Path, ...],
+        ) -> OracleReview:
+            return replace(
+                approve_review(pull_request),
+                verdict="REQUEST_CHANGES",
+                review_body="Approved.",
+                blocking_findings=({"id": "F1"},),
+                implementation_prompt="Fix F1.",
+            )
+
+    monkeypatch.setattr(review_module, "OracleClient", ContradictoryBodyOracleClient)
+
+    class WrongStateGitHubClient(FakeGitHubClient):
+        def verify_posted(
+            self,
+            _pull_request: PullRequest,
+            _review_id: int,
+            _body: str,
+        ) -> JsonObject:
+            del self
+            return {"state": "APPROVED"}
+
+    monkeypatch.setattr(review_module, "GitHubClient", WrongStateGitHubClient)
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
 
 
 def test_self_authored_post_write_race_skips_dismissal(
