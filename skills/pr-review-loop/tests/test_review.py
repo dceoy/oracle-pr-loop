@@ -161,8 +161,8 @@ class FakeGitHubClient:
         self.post_count += 1
         return 123, {"id": 123, "commit_id": pull_request.head_sha}
 
+    @staticmethod
     def verify_posted(
-        self,
         _pull_request: PullRequest,
         _review_id: int,
     ) -> JsonObject:
@@ -180,12 +180,13 @@ class FakeOracleClient:
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         pass
 
-    def build_bundle(self, _pull_request: PullRequest) -> tuple[Path, ...]:
+    @staticmethod
+    def build_bundle(_pull_request: PullRequest) -> tuple[Path, ...]:
         """Return an empty deterministic fake bundle."""
         return ()
 
+    @staticmethod
     def review(
-        self,
         pull_request: PullRequest,
         _attachments: tuple[Path, ...],
     ) -> OracleReview:
@@ -257,8 +258,8 @@ def test_execute_review_rejects_oversized_posted_body(
     install_orchestration_fakes(monkeypatch)
 
     class OversizedOracleClient(FakeOracleClient):
+        @staticmethod
         def review(
-            self,
             pull_request: PullRequest,
             _attachments: tuple[Path, ...],
         ) -> OracleReview:
@@ -327,7 +328,7 @@ class _StableGitHubClient:
     def initialize(self, _pr_value: str) -> None:
         pass
 
-    def snapshot(self) -> PullRequest:
+    def snapshot(self) -> PullRequest:  # ruff: ignore[no-self-use] -- overridden with instance state below
         return sample_pr()
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
@@ -337,16 +338,16 @@ class _StableGitHubClient:
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
         return first.base_sha == second.base_sha and first.head_sha == second.head_sha
 
+    @staticmethod
     def post_review(
-        self,
         pull_request: PullRequest,
         _event: str,
         _body: str,
     ) -> tuple[int, JsonObject]:
         return 123, {"id": 123, "commit_id": pull_request.head_sha}
 
+    @staticmethod
     def verify_posted(
-        self,
         _pull_request: PullRequest,
         _review_id: int,
     ) -> JsonObject:

@@ -48,13 +48,15 @@ class _TooManyInstructionsGitHub:
     def __init__(self, repo_dir: Path) -> None:
         self.repo_dir = repo_dir
 
-    def tracked_paths(self, _pull_request: PullRequest) -> tuple[str, ...]:
+    @staticmethod
+    def tracked_paths(_pull_request: PullRequest) -> tuple[str, ...]:
         """Return more instruction files than the bundle contract allows."""
         return tuple(
             f"docs/{index}/AGENTS.md" for index in range(MAX_INSTRUCTION_FILES + 1)
         )
 
-    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
+    @staticmethod
+    def patch(_pull_request: PullRequest, *, max_output: int) -> bytes:
         """Return a minimal valid patch before instruction discovery is bounded."""
         del max_output
         return b"diff --git a/file.py b/file.py\n"
