@@ -36,6 +36,7 @@ For every finding:
 6. Never fabricate a fix or manufacture an approval for `clarify` or `defer` findings; leave them for the user or a follow-up.
 7. Call `submit` only when triage produced at least one real workspace patch to submit.
 8. After a successful `submit`, run a fresh `review` before deciding the PR is done.
+9. If triage produced no `fix` disposition — every blocking finding resolved to `already_addressed`, `outdated`, `clarify`, or `defer` — stop the loop instead of calling `submit` or re-running `review` on the unchanged head. Report each disposition with its evidence and hand the still-open `REQUEST_CHANGES` review to the user or a maintainer to dismiss or override; this skill never dismisses or overrides a review on the host's behalf.
 
 ## Commands
 
