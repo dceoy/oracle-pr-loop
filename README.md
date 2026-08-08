@@ -59,7 +59,6 @@ All discovery paths point to the same implementation. See `skills/pr-review-loop
 - Python 3.12+;
 - Git and authenticated GitHub CLI;
 - Oracle with Chrome/Chromium and an authenticated browser profile for `bootstrap` and `review`;
-- `GH_REVIEW_TOKEN` for a dedicated reviewer account distinct from the PR author when running `review`;
 - push access and Git commit identity when running `submit`.
 
 Additional repository constraints:
@@ -83,16 +82,15 @@ Start from an Issue:
 python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
 ```
 
-`bootstrap` requires an open, same-repository GitHub Issue and Oracle with an authenticated browser profile. It does not require `GH_REVIEW_TOKEN`.
+`bootstrap` requires an open, same-repository GitHub Issue and Oracle with an authenticated browser profile.
 
-Review the exact PR head:
+Review the exact PR head with the ordinary authenticated `gh` session:
 
 ```console
-export GH_REVIEW_TOKEN='...'
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
-`review` requires an open, non-draft, same-repository GitHub.com PR, exact base/head binding, Oracle with an authenticated browser profile, and a dedicated reviewer account different from the PR author.
+`review` requires an open, non-draft, same-repository GitHub.com PR, exact base/head binding, Oracle with an authenticated browser profile, and the repository permissions needed to publish a pull-request review. Oracle/ChatGPT supplies the independent `APPROVE` or `REQUEST_CHANGES` verdict; the authenticated GitHub user publishes a commit-anchored comment for self-authored PRs and the corresponding formal event otherwise, so self-authored PRs work without a second account. The command's structured `verdict` field is authoritative and does not depend on GitHub's formal review state.
 
 Submit the host's complete patch against the reviewed head:
 

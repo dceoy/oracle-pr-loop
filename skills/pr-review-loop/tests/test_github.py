@@ -72,6 +72,113 @@ def _sample_pr(
     )
 
 
+def test_review_event_uses_comment_only_for_self_authored_prs(tmp_path: Path) -> None:
+    """Self-authored PRs use comments while other authors retain formal events."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+
+    client.authenticated_login = pull_request.author
+    assert client.review_event(pull_request, "APPROVE") == "COMMENT"
+    assert client.review_event(pull_request, "REQUEST_CHANGES") == "COMMENT"
+
+    client.authenticated_login = "another-user"
+    assert client.review_event(pull_request, "APPROVE") == "APPROVE"
+    assert client.review_event(pull_request, "REQUEST_CHANGES") == "REQUEST_CHANGES"
+
+
+def test_verify_posted_checks_actor_commit_and_body_without_formal_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Publication verification ignores formal state but binds all other data."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+    body = "review body\n\nReviewed head: `" + pull_request.head_sha + "`"
+    client.authenticated_login = "author"
+    response = {
+        "id": 123,
+        "user": {"login": "author"},
+        "commit_id": pull_request.head_sha,
+        "body": body,
+        "state": "CHANGES_REQUESTED",
+    }
+
+    def fake_text(_args: list[str], **_kwargs: object) -> str:
+        return json.dumps(response)
+
+    monkeypatch.setattr(client, "_text", fake_text)
+
+    assert client.verify_posted(pull_request, 123, body) == response
+
+
+@pytest.mark.parametrize("mismatch", ["id", "actor", "commit_id", "body"])
+def test_verify_posted_rejects_each_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    """Every post-write identity field is independently fail-closed."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+    body = "review body"
+    client.authenticated_login = "author"
+    response: JsonObject = {
+        "id": 123,
+        "user": {"login": "author"},
+        "commit_id": pull_request.head_sha,
+        "body": body,
+        "state": "COMMENTED",
+    }
+    if mismatch == "id":
+        response["id"] = 456
+    elif mismatch == "actor":
+        response["user"] = {"login": "other-user"}
+    elif mismatch == "commit_id":
+        response["commit_id"] = "c" * 40
+    else:
+        response["body"] = "different body"
+
+    def fake_text(_args: list[str], **_kwargs: object) -> str:
+        return json.dumps(response)
+
+    monkeypatch.setattr(client, "_text", fake_text)
+
+    with pytest.raises(LooprError, match="posted review revalidation failed"):
+        client.verify_posted(pull_request, 123, body)
+
+
+def test_post_review_publishes_selected_event_and_exact_head(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The GitHub payload carries the selected event and frozen review body."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+    body = "review body"
+    captured: dict[str, JsonObject] = {}
+
+    def fake_text(
+        _args: list[str],
+        *,
+        input_text: str | None = None,
+        **_kwargs: object,
+    ) -> str:
+        assert input_text is not None
+        captured["payload"] = json.loads(input_text)
+        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
+
+    monkeypatch.setattr(client, "_text", fake_text)
+
+    review_id, _posted = client.post_review(pull_request, "COMMENT", body)
+
+    assert review_id == 123
+    assert captured["payload"] == {
+        "commit_id": pull_request.head_sha,
+        "body": body,
+        "event": "COMMENT",
+    }
+
+
 def _repo_with_two_commits(tmp_path: Path) -> tuple[str, Path, str, str]:
     """Create a repository with distinct base and head blob contents."""
     git = shutil.which("git")
@@ -121,7 +228,7 @@ def test_git_reads_ignore_replace_refs_and_injected_controls(tmp_path: Path) -> 
         "GIT_CONFIG_VALUE_0": str(tmp_path / "redirected-worktree"),
         "GIT_NO_REPLACE_OBJECTS": "0",
     })
-    client = GitHubClient(runner, repo, "token")
+    client = GitHubClient(runner, repo)
 
     data = client.changed_file_bytes(
         _sample_pr(base, head),
@@ -138,7 +245,7 @@ def test_changed_file_bytes_returns_none_for_deleted_path(tmp_path: Path) -> Non
     (repo / "file.py").unlink()
     _git(git, ["commit", "-q", "-am", "delete"], cwd=repo)
     deleted_head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo, "token")
+    client = GitHubClient(CommandRunner(), repo)
 
     assert (
         client.changed_file_bytes(

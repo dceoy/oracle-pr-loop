@@ -116,8 +116,6 @@ class AcceptanceReviewRunner(CommandRunner):
 
     def __init__(self, oracle_payload: JsonObject) -> None:
         super().__init__()
-        self.source_env["GH_REVIEW_TOKEN"] = "token"
-        self.secrets.add("token")
         self.oracle_payload = oracle_payload
         self.commands: list[tuple[str, ...]] = []
 
@@ -163,9 +161,8 @@ class AcceptanceGitHubClient(GitHubClient):
         self,
         runner: CommandRunner,
         repo_dir: Path,
-        token: str,
     ) -> None:
-        super().__init__(runner, repo_dir, token)
+        super().__init__(runner, repo_dir)
         type(self).instance = self
         self._snapshots = list(type(self).snapshots)
         self.post_count = 0
@@ -180,7 +177,10 @@ class AcceptanceGitHubClient(GitHubClient):
         self.repository = initial.repository
         self.number = initial.number
         self.url = initial.url
-        self.reviewer_login = "reviewer"
+        self.authenticated_login = "reviewer"
+
+    def review_event(self, pull_request: PullRequest, verdict: str) -> str:
+        return "COMMENT" if pull_request.author == self.authenticated_login else verdict
 
     def snapshot(self) -> PullRequest:
         if not self._snapshots:
@@ -191,21 +191,22 @@ class AcceptanceGitHubClient(GitHubClient):
     def post_review(
         self,
         pull_request: PullRequest,
-        verdict: str,
+        event: str,
         body: str,
     ) -> tuple[int, JsonObject]:
         del body
         self.post_count += 1
-        self.posted_events.append(verdict)
-        review_id = 101 if verdict == "REQUEST_CHANGES" else 102
+        self.posted_events.append(event)
+        review_id = 101 if event == "REQUEST_CHANGES" else 102
         return review_id, {"id": review_id, "commit_id": pull_request.head_sha}
 
     def verify_posted(
         self,
         pull_request: PullRequest,
         review_id: int,
+        body: str,
     ) -> JsonObject:
-        del pull_request, review_id
+        del pull_request, review_id, body
         if not self.posted_events:
             msg = "review verification occurred before posting"
             raise AssertionError(msg)
@@ -573,7 +574,7 @@ def test_stale_review_head_fails_before_post(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+            runner=CommandRunner(),
         )
 
     assert captured.value.code == EXIT_RACE

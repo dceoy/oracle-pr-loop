@@ -35,11 +35,7 @@ def execute_review(
             precondition, or the posted review could not be verified fresh.
     """
     command_runner = runner or CommandRunner()
-    github = GitHubClient(
-        command_runner,
-        repo_dir,
-        command_runner.source_env.get("GH_REVIEW_TOKEN", ""),
-    )
+    github = GitHubClient(command_runner, repo_dir)
     github.initialize(pr_value)
     initial = github.snapshot()
     github.ensure_objects(initial)
@@ -73,16 +69,16 @@ def execute_review(
             "oracle_schema",
             "review body with audit footer exceeds GitHub's body limit",
         )
-    event = "APPROVE" if verdict.verdict == "APPROVE" else "REQUEST_CHANGES"
+    event = github.review_event(initial, verdict.verdict)
     review_id, posted = github.post_review(initial, event, body)
 
     try:
         _persist_best_effort(writer, "github-review.json", posted)
         after_post = github.snapshot()
-        verified = github.verify_posted(initial, review_id)
-        _require_fresh_state(github, initial, after_post, verified, event)
+        verified = github.verify_posted(initial, review_id, body)
+        _require_fresh_state(github, initial, after_post, verified)
     except BaseException as exc:
-        _dismiss_stale(github, initial, review_id, exc)
+        _dismiss_stale(github, initial, review_id, event, exc)
         raise
 
     result = ReviewResult(
@@ -143,20 +139,21 @@ def _require_fresh_state(
     initial: PullRequest,
     after_post: PullRequest,
     verified: JsonValue,
-    event: str,
 ) -> None:
-    """Confirm the posted review's state and snapshot are still fresh.
+    """Confirm the posted review and snapshot are still fresh.
 
     Raises:
-        LooprError: The verified state or repository snapshot went stale.
+        LooprError: The verified review or repository snapshot went stale.
+
+    The Oracle verdict is authoritative; GitHub's formal review state is not
+    inspected here. A formal stale review is dismissed by the caller where
+    possible, while a stale comment is retained as its commit-anchored audit.
     """
-    expected_state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
-    state = verified.get("state") if isinstance(verified, dict) else None
-    if state != expected_state or not github.same_snapshot(initial, after_post):
+    if not isinstance(verified, dict) or not github.same_snapshot(initial, after_post):
         raise LooprError(
             EXIT_RACE,
             "stale_state",
-            "posted review became stale or had an unexpected state",
+            "posted review verification or PR snapshot became stale",
         )
 
 
@@ -167,6 +164,7 @@ def _dismiss_stale(
     github: GitHubClient,
     pull_request: PullRequest,
     review_id: int,
+    event: str,
     original: BaseException,
 ) -> None:
     """Neutralize a stale review and preserve failure context if dismissal fails.
@@ -174,6 +172,8 @@ def _dismiss_stale(
     Raises:
         LooprError: Dismissal itself failed; raised from the original error.
     """
+    if event == "COMMENT":
+        return
     try:
         github.dismiss(pull_request, review_id)
     except LooprError as dismiss_error:

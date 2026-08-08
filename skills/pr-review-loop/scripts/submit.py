@@ -110,13 +110,13 @@ class _PushAwareRunner(CommandRunner):
         """
         return self._delegate.base_env()
 
-    def gh_env(self, reviewer_token: str | None = None) -> dict[str, str]:
+    def gh_env(self) -> dict[str, str]:
         """Delegate the GitHub environment.
 
         Returns:
             The caller-supplied runner's GitHub environment.
         """
-        return self._delegate.gh_env(reviewer_token)
+        return self._delegate.gh_env()
 
     def run(
         self,
@@ -446,13 +446,13 @@ class _SubmitBoundaryRunner(CommandRunner):
         """
         return self._delegate.base_env()
 
-    def gh_env(self, reviewer_token: str | None = None) -> dict[str, str]:
+    def gh_env(self) -> dict[str, str]:
         """Delegate the GitHub environment.
 
         Returns:
             The caller-supplied runner's GitHub environment.
         """
-        return self._delegate.gh_env(reviewer_token)
+        return self._delegate.gh_env()
 
     def run(
         self,

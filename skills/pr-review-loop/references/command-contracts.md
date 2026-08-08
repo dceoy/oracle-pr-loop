@@ -28,7 +28,7 @@ Optional flags are `--repo-dir`, `--artifacts-dir`, and `--oracle-thinking-time`
 
 Success fields are `schema_version`, `command`, `repository`, `pr_number`, `base_sha`, `head_sha`, `verdict`, `github_review_id`, `blocking_findings`, `implementation_prompt`, and `artifacts_dir`. `APPROVE` and `REQUEST_CHANGES` are both exit-0 results. A changes-request result has non-empty blocking findings and an implementation prompt for the host agent.
 
-The command freezes repository/PR/base/head identity, builds evidence from immutable Git objects, validates Oracle output strictly, posts one aggregate review anchored with the reviewed `commit_id`, then revalidates the PR and posted review. A detected post-write race is dismissed where GitHub permits and returns stale-state failure.
+The command freezes repository/PR/base/head identity, builds evidence from immutable Git objects, validates Oracle output strictly, and posts one aggregate review anchored with the reviewed `commit_id`. Self-authored PRs use a `COMMENT` event; other PRs use the corresponding formal event. The returned `verdict` is Oracle's canonical `APPROVE` or `REQUEST_CHANGES` result and is not inferred from GitHub's formal review state. A detected post-write race returns stale-state failure; formal stale reviews are dismissed where GitHub permits, while stale `COMMENT` reviews remain as commit-anchored audit comments.
 
 Review artifacts include the frozen snapshot, changed paths, patch, evidence manifest/content, Oracle input/output, validated review, GitHub review metadata, and final result.
 
