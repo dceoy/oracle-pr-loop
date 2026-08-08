@@ -206,7 +206,7 @@ def _worktree_is_dirty(issue_client: IssueClient, exclude_dir: Path | None) -> b
         True if the checkout has any pending tracked or untracked change
         outside exclude_dir.
     """
-    args = ["status", "--porcelain"]
+    args = ["status", "--porcelain", "--untracked-files=all"]
     if exclude_dir is not None:
         pathspec = _exclude_pathspec_for(issue_client.repo_dir, exclude_dir)
         if pathspec is not None:

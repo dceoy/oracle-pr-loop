@@ -40,7 +40,28 @@ PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
     "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
 )
-ISSUE_FIELDS = "number,title,body,author,state,url,updatedAt,comments"
+ISSUE_GRAPHQL_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $lastComments: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      number
+      url
+      state
+      title
+      body
+      author { login }
+      updatedAt
+      comments(last: $lastComments) {
+        nodes {
+          author { login }
+          body
+          createdAt
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def normalize_repo(remote: str) -> str:
@@ -1025,7 +1046,7 @@ class IssueClient(_ImmutableGitMixin):
             )
 
     def snapshot(self) -> IssueSnapshot:
-        """Collect and validate one complete Issue snapshot.
+        """Collect and validate one bounded Issue snapshot.
 
         Returns:
             The validated Issue snapshot.
@@ -1034,19 +1055,42 @@ class IssueClient(_ImmutableGitMixin):
             LooprError: GitHub's response was malformed, inconsistent, failed
                 identity validation, or contained a known credential.
         """
-        data = _json_object(
+        owner, _, name = self.repository.partition("/")
+        envelope = _json_object(
             self._text(
-                ["issue", "view", self.url, "--json", ISSUE_FIELDS],
+                [
+                    "api",
+                    "--hostname",
+                    "github.com",
+                    "graphql",
+                    "-f",
+                    f"query={ISSUE_GRAPHQL_QUERY}",
+                    "-f",
+                    f"owner={owner}",
+                    "-f",
+                    f"name={name}",
+                    "-F",
+                    f"number={self.number}",
+                    "-F",
+                    f"lastComments={MAX_ISSUE_COMMENTS}",
+                ],
                 max_output=8 * 1024 * 1024,
             ),
             category="github_schema",
         )
-        comments_value = data.get("comments")
+        response_data = _object(envelope.get("data"), field="data")
+        repository_data = _object(
+            response_data.get("repository"),
+            field="data.repository",
+        )
+        data = _object(repository_data.get("issue"), field="data.repository.issue")
+        comments_field = _object(data.get("comments"), field="comments")
+        comments_value = comments_field.get("nodes")
         if not isinstance(comments_value, list):
             raise LooprError(
                 EXIT_GITHUB,
                 "github_schema",
-                "GitHub field comments must be an array",
+                "GitHub field comments.nodes must be an array",
             )
         body = _string(data.get("body") or "", field="body", allow_empty=True)
         if len(body.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:

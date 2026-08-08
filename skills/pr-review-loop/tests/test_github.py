@@ -218,7 +218,7 @@ def _issue_payload(
     updated_at: str = "2026-01-01T00:00:00Z",
     comments: list[JsonObject] | None = None,
 ) -> JsonObject:
-    """Return one valid `gh issue view --json` response payload."""
+    """Return one valid GraphQL Issue response payload."""
     return {
         "number": number,
         "url": url,
@@ -232,7 +232,12 @@ def _issue_payload(
 
 
 class FakeIssueGh(CommandRunner):
-    """Fake `gh` Issue/repo/branch responses while running real local Git."""
+    """Fake GitHub responses while running real local Git.
+
+    The fake returns its configured comments regardless of the requested
+    GraphQL window. Tests for the outbound bound inspect `gh_calls` directly;
+    the oversized response tests intentionally exercise local defenses too.
+    """
 
     def __init__(
         self,
@@ -264,11 +269,16 @@ class FakeIssueGh(CommandRunner):
         argv = tuple(str(value) for value in args)
         if argv and argv[0] == "gh":
             self.gh_calls.append(argv)
-            if argv[1] == "issue":
-                return CommandResult(argv, 0, json.dumps(self.issue).encode(), "")
             if argv[1] == "repo":
                 payload = {"defaultBranchRef": {"name": self.default_branch_name}}
                 return CommandResult(argv, 0, json.dumps(payload).encode(), "")
+            if argv[1] == "api" and "graphql" in argv:
+                issue_payload = dict(self.issue)
+                issue_payload["comments"] = {
+                    "nodes": issue_payload.get("comments", []),
+                }
+                envelope = {"data": {"repository": {"issue": issue_payload}}}
+                return CommandResult(argv, 0, json.dumps(envelope).encode(), "")
             if argv[1] == "api":
                 payload = {"commit": {"sha": self.branch_sha_value}}
                 return CommandResult(argv, 0, json.dumps(payload).encode(), "")
@@ -350,6 +360,36 @@ def test_issue_client_snapshot_maps_fields(tmp_path: Path) -> None:
     assert snapshot.author == "author"
     assert snapshot.updated_at == "2026-01-01T00:00:00Z"
     assert snapshot.comments == ()
+
+
+def test_issue_client_snapshot_requests_bounded_comment_window(
+    tmp_path: Path,
+) -> None:
+    """The GitHub transport requests only the newest bounded comment window."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload())
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    client.snapshot()
+
+    graphql_calls = [
+        call
+        for call in runner.gh_calls
+        if call[1:5] == ("api", "--hostname", "github.com", "graphql")
+    ]
+    assert len(graphql_calls) == 1
+    call = graphql_calls[0]
+    assert "--paginate" not in call
+    assert "view" not in call
+    query = next(argument for argument in call if argument.startswith("query="))
+    assert "$lastComments: Int!" in query
+    assert "comments(last: $lastComments)" in query
+    assert "comments(first:" not in query
+    typed_values = [
+        call[index + 1] for index, argument in enumerate(call[:-1]) if argument == "-F"
+    ]
+    assert f"lastComments={MAX_ISSUE_COMMENTS}" in typed_values
 
 
 def test_issue_client_snapshot_accepts_null_author(tmp_path: Path) -> None:
@@ -510,7 +550,7 @@ def test_issue_client_rejects_oversized_body(tmp_path: Path) -> None:
 
 
 def test_issue_client_bounds_and_orders_comments(tmp_path: Path) -> None:
-    """Comments are ordered by `createdAt` and bounded to the most recent N."""
+    """Local defenses bound and order an oversized fake response."""
     total = MAX_ISSUE_COMMENTS + 5
     comments: list[JsonObject] = [
         {

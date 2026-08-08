@@ -191,10 +191,11 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     assert FakeIssueClient.instance.ensure_calls == [SHA_A]
     run_relative = Path(result.artifacts_dir).relative_to(tmp_path.resolve())
     assert FakeIssueClient.instance.status_args == [
-        ["status", "--porcelain"],
+        ["status", "--porcelain", "--untracked-files=all"],
         [
             "status",
             "--porcelain",
+            "--untracked-files=all",
             "--",
             ".",
             f":(exclude,top,literal){run_relative.as_posix()}",
@@ -435,7 +436,7 @@ def test_execute_bootstrap_rejects_untracked_files_on_base_commit(
     assert captured.value.category == "workspace"
     assert FakeIssueClient.instance is not None
     assert FakeIssueClient.instance.status_args == [
-        ["status", "--porcelain"],
+        ["status", "--porcelain", "--untracked-files=all"],
     ]
 
 
@@ -468,6 +469,31 @@ def test_worktree_is_dirty_with_no_exclude_checks_whole_tree(tmp_path: Path) -> 
     assert bootstrap_module._worktree_is_dirty(client, None) is False
 
     (repo / "artifacts" / "tracked.py").write_text("changed\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, None) is True
+
+
+def test_worktree_is_dirty_ignores_repo_local_show_untracked_files_config(
+    tmp_path: Path,
+) -> None:
+    """A repo-local `status.showUntrackedFiles=no` must not hide untracked files.
+
+    A prior implementation ran `git status --porcelain` with no explicit
+    `--untracked-files` option, so Git honored this repository-local
+    setting: an otherwise clean checkout with arbitrary untracked files
+    would report empty porcelain output, and bootstrap would accept a
+    contaminated workspace as clean.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    _init_repo(git, repo)
+    _git(git, ["config", "status.showUntrackedFiles", "no"], cwd=repo)
+    client = IssueClient(CommandRunner(), repo)
+
+    assert bootstrap_module._worktree_is_dirty(client, None) is False
+
+    (repo / "untracked-file.py").write_text("x\n")
 
     assert bootstrap_module._worktree_is_dirty(client, None) is True
 
