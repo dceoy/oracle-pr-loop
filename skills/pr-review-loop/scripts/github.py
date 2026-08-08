@@ -307,6 +307,25 @@ def _integer(value: JsonValue | None, *, field: str) -> int:
     return value
 
 
+def _optional_author_login(value: JsonValue | None, *, field: str) -> str:
+    """Return one Issue/comment author's login, or "" for a deleted account.
+
+    GitHub's schema defines `Issue.author`/`IssueComment.author` as a
+    nullable `Actor`, and `gh` may surface a deleted account as either a
+    null author or an author object with a null/empty login.
+
+    Returns:
+        The author's login, or "" when GitHub reports no author.
+    """
+    if value is None:
+        return ""
+    author = _object(value, field=field)
+    login = author.get("login")
+    if login is None:
+        login = ""
+    return _string(login, field=f"{field}.login", allow_empty=True)
+
+
 class _ImmutableGitMixin:
     """Shared immutable Git object reads for identity-bound GitHub clients."""
 
@@ -903,9 +922,8 @@ def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
                 "github_schema",
                 "GitHub comment entry must be an object",
             )
-        author = _object(item.get("author"), field="comments.author")
         parsed.append((
-            _string(author.get("login"), field="comments.author.login"),
+            _optional_author_login(item.get("author"), field="comments.author"),
             _string(item.get("body") or "", field="comments.body", allow_empty=True),
             _string(item.get("createdAt"), field="comments.createdAt"),
         ))
@@ -1019,7 +1037,6 @@ class IssueClient(_ImmutableGitMixin):
             ),
             category="github_schema",
         )
-        author = _object(data.get("author"), field="author")
         comments_value = data.get("comments")
         if not isinstance(comments_value, list):
             raise LooprError(
@@ -1040,7 +1057,7 @@ class IssueClient(_ImmutableGitMixin):
             url=_string(data.get("url"), field="url"),
             title=_string(data.get("title"), field="title", allow_empty=True),
             body=body,
-            author=_string(author.get("login"), field="author.login"),
+            author=_optional_author_login(data.get("author"), field="author"),
             state=_string(data.get("state"), field="state"),
             updated_at=_string(data.get("updatedAt"), field="updatedAt"),
             comments=_bounded_comments(comments_value),

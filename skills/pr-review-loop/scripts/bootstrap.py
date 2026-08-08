@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactWriter, claim_run_directory
 from .github import IssueClient
-from .models import EXIT_RACE, BootstrapResult, LooprError
+from .models import EXIT_PRECONDITION, EXIT_RACE, BootstrapResult, LooprError
 from .oracle import BootstrapOracleClient
 from .process import CommandRunner
 
@@ -28,9 +28,9 @@ def execute_bootstrap(
         The stable bootstrap command result.
 
     Raises:
-        LooprError: The Issue, base branch, or Oracle output violated a
-            precondition, or the Issue or base branch changed during prompt
-            generation.
+        LooprError: The Issue, base branch, local workspace, or Oracle output
+            violated a precondition, or the issue, base branch, or local
+            workspace changed during prompt generation.
     """
     command_runner = runner or CommandRunner()
     issue_client = IssueClient(command_runner, repo_dir)
@@ -38,6 +38,7 @@ def execute_bootstrap(
     initial = issue_client.snapshot()
     base_ref, base_sha = _base_snapshot(issue_client)
     _ensure_base_available(issue_client, base_ref, base_sha)
+    _ensure_workspace_bound_to_base(issue_client, base_ref, base_sha)
 
     writer = ArtifactWriter(
         claim_run_directory(
@@ -54,15 +55,20 @@ def execute_bootstrap(
 
     after = issue_client.snapshot()
     after_ref, after_sha = _base_snapshot(issue_client)
+    after_head = _local_head(issue_client)
     if (
         after.updated_at != initial.updated_at
+        or after.title != initial.title
+        or after.body != initial.body
+        or after.comments != initial.comments
         or after_ref != base_ref
         or after_sha != base_sha
+        or after_head != base_sha
     ):
         raise LooprError(
             EXIT_RACE,
             "stale_state",
-            "issue or base branch changed during prompt generation",
+            "issue, base branch, or local workspace changed during prompt generation",
         )
 
     result = BootstrapResult(
@@ -108,3 +114,54 @@ def _ensure_base_available(
             f"locally; run `git fetch origin {base_ref}` and retry"
         )
         raise LooprError(exc.code, exc.category, message) from exc
+
+
+def _local_head(issue_client: IssueClient) -> str:
+    """Return the local checkout's exact current commit SHA.
+
+    Returns:
+        The 40-character commit SHA that local `HEAD` currently names.
+    """
+    return (
+        issue_client
+        .git_bytes(["rev-parse", "HEAD"], max_output=1024)
+        .decode("utf-8", "strict")
+        .strip()
+    )
+
+
+def _ensure_workspace_bound_to_base(
+    issue_client: IssueClient,
+    base_ref: str,
+    base_sha: str,
+) -> None:
+    """Require the local checkout to already be clean and at base_sha.
+
+    The returned `base_sha` is meant to be the actual implementation base,
+    not advisory metadata; a checkout left on an unrelated or stale commit
+    would let the host build the first commit and pull request on the wrong
+    history.
+
+    Raises:
+        LooprError: local `HEAD` is not base_sha, or tracked changes are
+            pending.
+    """
+    head_sha = _local_head(issue_client)
+    if head_sha != base_sha:
+        message = (
+            f"local HEAD ({head_sha}) is not base commit {base_sha} for "
+            f"branch {base_ref}; run `git fetch origin {base_ref}` then "
+            f"`git switch -c <branch> {base_sha}` before running bootstrap"
+        )
+        raise LooprError(EXIT_PRECONDITION, "workspace", message)
+    status = issue_client.git_bytes(
+        ["status", "--porcelain", "--untracked-files=no"],
+        max_output=64 * 1024,
+    )
+    if status.strip():
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "workspace",
+            "local checkout has uncommitted tracked changes; commit, stash, "
+            "or discard them before running bootstrap",
+        )

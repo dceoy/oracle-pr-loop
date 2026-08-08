@@ -12,6 +12,7 @@ from scripts.models import (
     EXIT_PRECONDITION,
     EXIT_RACE,
     IssueSnapshot,
+    JsonObject,
     LooprError,
     OracleBootstrap,
 )
@@ -25,6 +26,7 @@ def sample_issue(
     *,
     number: int = 7,
     updated_at: str = "2026-01-01T00:00:00Z",
+    comments: tuple[JsonObject, ...] = (),
 ) -> IssueSnapshot:
     """Return one valid open Issue snapshot."""
     return IssueSnapshot(
@@ -36,18 +38,20 @@ def sample_issue(
         author="author",
         state="OPEN",
         updated_at=updated_at,
-        comments=(),
+        comments=comments,
         raw={},
     )
 
 
 class FakeIssueClient:
-    """A deterministic Issue/branch transport for orchestration tests."""
+    """A deterministic Issue/branch/Git transport for orchestration tests."""
 
     instance: ClassVar[FakeIssueClient | None] = None
     snapshots: ClassVar[list[IssueSnapshot]] = []
     branches: ClassVar[list[str]] = []
     shas: ClassVar[list[str]] = []
+    heads: ClassVar[list[bytes]] = []
+    statuses: ClassVar[list[bytes]] = []
 
     def __init__(self, _runner: CommandRunner, repo_dir: Path) -> None:
         self.repo_dir = repo_dir
@@ -55,6 +59,8 @@ class FakeIssueClient:
         self._snapshots = list(type(self).snapshots)
         self._branches = list(type(self).branches)
         self._shas = list(type(self).shas)
+        self._heads = list(type(self).heads)
+        self._statuses = list(type(self).statuses)
         self.ensure_calls: list[str] = []
 
     def initialize(self, _issue_value: str) -> None:
@@ -75,6 +81,16 @@ class FakeIssueClient:
     def ensure_commit_object(self, sha: str) -> None:
         """Record the base commit availability check."""
         self.ensure_calls.append(sha)
+
+    def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
+        """Return the next deterministic local `HEAD`/status probe result."""
+        del max_output
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return self._heads.pop(0)
+        if args[:1] == ["status"]:
+            return self._statuses.pop(0)
+        message = f"unexpected git_bytes call: {args}"
+        raise AssertionError(message)
 
     @staticmethod
     def tracked_paths_at(_sha: str) -> tuple[str, ...]:
@@ -135,6 +151,8 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     FakeIssueClient.snapshots = [issue, issue]
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
     result = execute_bootstrap(
@@ -170,6 +188,47 @@ def test_execute_bootstrap_rejects_stale_issue_update(
     FakeIssueClient.snapshots = [initial, changed]
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.statuses = [b""]
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
+
+
+def test_execute_bootstrap_rejects_comment_edited_during_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edited comment fails closed even when `updatedAt` does not change.
+
+    GitHub does not bump the parent Issue's `updatedAt` when an existing
+    comment's body is edited, so the recheck must compare the bounded
+    comment snapshot itself, not just `updatedAt`.
+    """
+    original_comment: JsonObject = {
+        "author": "commenter",
+        "body": "original",
+        "created_at": "2026-01-01T00:00:00Z",
+        "omitted": False,
+    }
+    edited_comment: JsonObject = {**original_comment, "body": "edited"}
+    initial = sample_issue(comments=(original_comment,))
+    changed = sample_issue(comments=(edited_comment,))
+    FakeIssueClient.snapshots = [initial, changed]
+    FakeIssueClient.branches = ["main", "main"]
+    FakeIssueClient.shas = [SHA_A, SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
     with pytest.raises(LooprError) as captured:
@@ -194,6 +253,8 @@ def test_execute_bootstrap_rejects_stale_base_branch(
     FakeIssueClient.snapshots = [issue, issue]
     FakeIssueClient.branches = ["main", "main"]
     FakeIssueClient.shas = [SHA_A, SHA_B]
+    FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
     with pytest.raises(LooprError) as captured:
@@ -218,6 +279,8 @@ def test_execute_bootstrap_rejects_renamed_default_branch(
     FakeIssueClient.snapshots = [issue, issue]
     FakeIssueClient.branches = ["main", "trunk"]
     FakeIssueClient.shas = [SHA_A, SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
+    FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(monkeypatch)
 
     with pytest.raises(LooprError) as captured:
@@ -231,6 +294,85 @@ def test_execute_bootstrap_rejects_renamed_default_branch(
 
     assert captured.value.code == EXIT_RACE
     assert captured.value.category == "stale_state"
+
+
+def test_execute_bootstrap_rejects_head_drift_during_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A local checkout moved off base_sha during generation fails as stale."""
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue, issue]
+    FakeIssueClient.branches = ["main", "main"]
+    FakeIssueClient.shas = [SHA_A, SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode(), SHA_B.encode()]
+    FakeIssueClient.statuses = [b""]
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
+
+
+def test_execute_bootstrap_rejects_head_mismatched_with_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkout not already at base_sha fails closed before Oracle runs."""
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue]
+    FakeIssueClient.branches = ["main"]
+    FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = [SHA_B.encode()]
+    FakeIssueClient.statuses = []
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "workspace"
+    assert "git switch" in str(captured.value)
+
+
+def test_execute_bootstrap_rejects_dirty_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uncommitted tracked changes on the base commit fail closed."""
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue]
+    FakeIssueClient.branches = ["main"]
+    FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.statuses = [b" M some-tracked-file.py\n"]
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "workspace"
 
 
 class ClosingIssueClient(FakeIssueClient):
@@ -257,6 +399,8 @@ def test_execute_bootstrap_propagates_issue_closed_during_generation(
     FakeIssueClient.snapshots = [issue]
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.statuses = [b""]
     monkeypatch.setattr(bootstrap_module, "IssueClient", ClosingIssueClient)
     monkeypatch.setattr(
         bootstrap_module,
@@ -295,6 +439,8 @@ def test_execute_bootstrap_names_fetch_remedy_when_base_missing(
     FakeIssueClient.snapshots = [issue]
     FakeIssueClient.branches = ["main"]
     FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = []
+    FakeIssueClient.statuses = []
     monkeypatch.setattr(bootstrap_module, "IssueClient", MissingBaseIssueClient)
     monkeypatch.setattr(
         bootstrap_module,

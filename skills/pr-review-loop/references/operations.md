@@ -50,5 +50,6 @@ Artifacts are private diagnostic evidence under `.pr-review-loop/runs/`; GitHub 
 - reviewer identity failure: verify `GH_REVIEW_TOKEN` belongs to the dedicated reviewer.
 - Oracle/schema failure: restore the browser/session or reviewer output; do not weaken schema validation.
 - repository/origin mismatch: stop rather than redirect the patch.
+- `bootstrap`'s `workspace` precondition (local `HEAD` is not the returned `base_sha`, or the checkout has uncommitted tracked changes): the current checkout already holds implementation work from a prior `bootstrap`/implement cycle, or has unrelated local changes. Set those aside (commit, stash, or switch away), return to a clean checkout at the repository's current default-branch tip, and rerun `bootstrap`; do not point it at an in-progress implementation branch.
 
 GitHub.com same-repository PRs only. Forks and GitHub Enterprise are unsupported; CI status is not an approval gate.

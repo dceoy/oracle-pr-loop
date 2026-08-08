@@ -214,7 +214,7 @@ def _issue_payload(
     state: str = "OPEN",
     title: str = "Title",
     body: str = "Body",
-    author: str = "author",
+    author: str | None = "author",
     updated_at: str = "2026-01-01T00:00:00Z",
     comments: list[JsonObject] | None = None,
 ) -> JsonObject:
@@ -225,7 +225,7 @@ def _issue_payload(
         "state": state,
         "title": title,
         "body": body,
-        "author": {"login": author},
+        "author": None if author is None else {"login": author},
         "updatedAt": updated_at,
         "comments": [] if comments is None else list(comments),
     }
@@ -350,6 +350,32 @@ def test_issue_client_snapshot_maps_fields(tmp_path: Path) -> None:
     assert snapshot.author == "author"
     assert snapshot.updated_at == "2026-01-01T00:00:00Z"
     assert snapshot.comments == ()
+
+
+def test_issue_client_snapshot_accepts_null_author(tmp_path: Path) -> None:
+    """A deleted Issue author (`"author": null`) maps to an empty login."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(author=None))
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    snapshot = client.snapshot()
+
+    assert snapshot.author == ""
+
+
+def test_issue_client_snapshot_accepts_null_author_login(tmp_path: Path) -> None:
+    """An author object with a null login also maps to an empty login."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    payload = _issue_payload()
+    payload["author"] = {"login": None}
+    runner = FakeIssueGh(issue=payload)
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    snapshot = client.snapshot()
+
+    assert snapshot.author == ""
 
 
 def test_issue_client_rejects_closed_issue(tmp_path: Path) -> None:
@@ -491,6 +517,24 @@ def test_issue_client_omits_oversized_comment_body(tmp_path: Path) -> None:
 
     assert snapshot.comments[0]["omitted"] is True
     assert snapshot.comments[0]["body"] == ""
+
+
+def test_issue_client_snapshot_accepts_null_comment_author(tmp_path: Path) -> None:
+    """A comment from a deleted account (`"author": null`) is not rejected."""
+    comment: JsonObject = {
+        "author": None,
+        "body": "still relevant",
+        "createdAt": "2026-01-01T00:00:00Z",
+    }
+    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
+    runner = FakeIssueGh(issue=_issue_payload(comments=[comment]))
+    client = IssueClient(runner, repo)
+    client.initialize("42")
+
+    snapshot = client.snapshot()
+
+    assert snapshot.comments[0]["author"] == ""
+    assert snapshot.comments[0]["body"] == "still relevant"
 
 
 def test_issue_client_omits_comments_past_aggregate_byte_bound(

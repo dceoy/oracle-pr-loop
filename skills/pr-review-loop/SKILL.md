@@ -26,6 +26,8 @@ Treat `scripts/cli.py` as the skill's machine interface, not as the primary user
 
 `bootstrap` is a thin internal entry point for work that has no pull request yet. It reads one open Issue, asks Oracle/ChatGPT to turn that Issue and bounded repository evidence into an implementation-ready prompt, and returns the prompt to the host. It never implements the change, and it never creates a pull request.
 
+Before running `bootstrap`, check out a clean local branch at the repository's current default-branch tip. `bootstrap` fails closed with a `workspace` precondition error if local `HEAD` is not exactly the returned `base_sha` or the checkout has uncommitted tracked changes, because `base_sha` is the actual implementation base the host must build on, not advisory metadata.
+
 ```text
 open Issue
     ↓
@@ -42,7 +44,7 @@ existing PR review loop below
 
 Once the host has opened the pull request, hand off completely to the PR workflow below; `review` and `submit` have no Issue-specific behavior and no persistent state connects them to `bootstrap`.
 
-`bootstrap` writes artifacts under `.pr-review-loop/runs/` before that first commit exists. Ensure `.pr-review-loop/` is excluded from the host's implementation commit; add it to `.gitignore` first if the repository does not already exclude it. `submit` later refuses to run if the artifact directory is tracked.
+`bootstrap` writes artifacts under `.pr-review-loop/runs/` before that first commit exists. Ensure `.pr-review-loop/` is excluded from the host's implementation commit: if the repository does not already ignore it on the default branch, add the entry to the untracked, local-only `.git/info/exclude` rather than a tracked `.gitignore`, since editing a tracked file would itself trip bootstrap's clean-workspace precondition. `submit` later refuses to run if the artifact directory is tracked.
 
 ## Pull request workflow
 
