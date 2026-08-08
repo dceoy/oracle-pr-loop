@@ -104,10 +104,8 @@ class CommandRunner:
         return str(Path(found).resolve())
 
     def base_env(self) -> dict[str, str]:
-        """Return the source environment without the reviewer credential."""
-        env = dict(self.source_env)
-        env.pop("GH_REVIEW_TOKEN", None)
-        return env
+        """Return the captured environment for local Git operations."""
+        return dict(self.source_env)
 
     def allowlisted_env(self, extra: set[str] | None = None) -> dict[str, str]:
         """Return a small environment allowlist for an external tool."""
@@ -134,8 +132,8 @@ class CommandRunner:
             if key.upper() in allowed or key.upper().startswith("LC_")
         }
 
-    def gh_env(self, reviewer_token: str | None = None) -> dict[str, str]:
-        """Return the GitHub CLI environment for read or review operations."""
+    def gh_env(self) -> dict[str, str]:
+        """Return the GitHub CLI environment for ordinary authenticated use."""
         env = self.allowlisted_env({
             "GH_TOKEN",
             "GITHUB_TOKEN",
@@ -145,10 +143,6 @@ class CommandRunner:
             "ALL_PROXY",
             "NO_PROXY",
         })
-        if reviewer_token is not None:
-            env.pop("GITHUB_TOKEN", None)
-            env["GH_TOKEN"] = reviewer_token
-            self.secrets.add(reviewer_token)
         return env
 
     def oracle_env(self) -> dict[str, str]:

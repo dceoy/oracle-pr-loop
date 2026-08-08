@@ -69,16 +69,19 @@ class FakeGitHubClient:
 
     instance: ClassVar[FakeGitHubClient | None] = None
     snapshots: ClassVar[list[PullRequest]] = []
+    authenticated_login_value: ClassVar[str] = "reviewer"
 
     def __init__(
         self,
         _runner: CommandRunner,
         repo_dir: Path,
-        _token: str,
     ) -> None:
         self.repo_dir = repo_dir
+        self.authenticated_login = type(self).authenticated_login_value
         self.dismissed: list[int] = []
         self.post_count = 0
+        self.posted_events: list[str] = []
+        self.posted_bodies: list[str] = []
         type(self).instance = self
         self._snapshots = list(type(self).snapshots)
 
@@ -92,6 +95,10 @@ class FakeGitHubClient:
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         """Treat fake SHAs as available commit objects."""
 
+    def review_event(self, pull_request: PullRequest, verdict: str) -> str:
+        """Use formal events unless the fake authenticated user authored it."""
+        return "COMMENT" if pull_request.author == self.authenticated_login else verdict
+
     @staticmethod
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
         """Compare base and head SHAs."""
@@ -100,20 +107,28 @@ class FakeGitHubClient:
     def post_review(
         self,
         pull_request: PullRequest,
-        _event: str,
-        _body: str,
+        event: str,
+        body: str,
     ) -> tuple[int, JsonObject]:
         """Record a posted review anchored to the supplied head."""
         self.post_count += 1
+        self.posted_events.append(event)
+        self.posted_bodies.append(body)
         return 123, {"id": 123, "commit_id": pull_request.head_sha}
 
-    @staticmethod
     def verify_posted(
+        self,
         _pull_request: PullRequest,
         _review_id: int,
+        _body: str,
     ) -> JsonObject:
-        """Return a valid approved review state."""
-        return {"state": "APPROVED"}
+        """Return the review state matching the most recently posted event."""
+        expected_state = {
+            "APPROVE": "APPROVED",
+            "REQUEST_CHANGES": "CHANGES_REQUESTED",
+            "COMMENT": "COMMENTED",
+        }
+        return {"state": expected_state[self.posted_events[-1]]}
 
     def dismiss(self, _pull_request: PullRequest, review_id: int) -> None:
         """Record stale-review neutralization."""
@@ -160,11 +175,186 @@ def test_execute_review_claims_run_directory_named_for_pr(
         repo_dir=tmp_path,
         artifacts_dir=Path("artifacts"),
         thinking_time="heavy",
-        runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+        runner=CommandRunner(),
     )
 
     prefix = f"review-pr-{initial.number}-{initial.head_sha[:12]}-"
     assert Path(result.artifacts_dir).name.startswith(prefix)
+
+
+@pytest.mark.parametrize(
+    ("oracle_verdict", "expected_findings"),
+    [("APPROVE", ()), ("REQUEST_CHANGES", ({"id": "F1"},))],
+)
+def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    oracle_verdict: str,
+    expected_findings: tuple[dict[str, str], ...],
+) -> None:
+    """A PR author can publish either canonical Oracle verdict as a comment."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
+    install_orchestration_fakes(monkeypatch)
+
+    class OracleVerdict(FakeOracleClient):
+        @staticmethod
+        def review(
+            pull_request: PullRequest,
+            _attachments: tuple[Path, ...],
+        ) -> OracleReview:
+            return replace(
+                approve_review(pull_request),
+                verdict=oracle_verdict,
+                blocking_findings=expected_findings,
+                implementation_prompt=(
+                    "Fix F1." if oracle_verdict == "REQUEST_CHANGES" else None
+                ),
+            )
+
+    monkeypatch.setattr(review_module, "OracleClient", OracleVerdict)
+
+    result = execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        artifacts_dir=Path("artifacts"),
+        thinking_time="heavy",
+        runner=CommandRunner(),
+    )
+
+    assert result.verdict == oracle_verdict
+    assert result.blocking_findings == expected_findings
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.posted_events == ["COMMENT"]
+    assert (
+        f"Reviewed base: `{initial.base_sha}`"
+        in FakeGitHubClient.instance.posted_bodies[0]
+    )
+    assert (
+        f"Reviewed head: `{initial.head_sha}`"
+        in FakeGitHubClient.instance.posted_bodies[0]
+    )
+
+
+def test_formal_review_rejects_mismatched_persisted_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A formal review whose re-read state does not match the event is rejected."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
+    install_orchestration_fakes(monkeypatch)
+
+    class MismatchedStateGitHubClient(FakeGitHubClient):
+        def verify_posted(
+            self,
+            _pull_request: PullRequest,
+            _review_id: int,
+            _body: str,
+        ) -> JsonObject:
+            del self
+            return {"state": "COMMENTED"}
+
+    monkeypatch.setattr(review_module, "GitHubClient", MismatchedStateGitHubClient)
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
+    assert MismatchedStateGitHubClient.instance is not None
+    assert MismatchedStateGitHubClient.instance.dismissed == [123]
+
+
+def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A self-authored comment whose persisted state is not COMMENTED is rejected.
+
+    This guards the audit-integrity regression Oracle flagged: a REQUEST_CHANGES
+    verdict must not be publishable while GitHub's re-read state disagrees with
+    the selected COMMENT transport event, regardless of what free-form
+    ``review_body`` text Oracle supplied (for example a contradictory
+    "Approved." body attached to a REQUEST_CHANGES verdict).
+    """
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
+    install_orchestration_fakes(monkeypatch)
+
+    class ContradictoryBodyOracleClient(FakeOracleClient):
+        @staticmethod
+        def review(
+            pull_request: PullRequest,
+            _attachments: tuple[Path, ...],
+        ) -> OracleReview:
+            return replace(
+                approve_review(pull_request),
+                verdict="REQUEST_CHANGES",
+                review_body="Approved.",
+                blocking_findings=({"id": "F1"},),
+                implementation_prompt="Fix F1.",
+            )
+
+    monkeypatch.setattr(review_module, "OracleClient", ContradictoryBodyOracleClient)
+
+    class WrongStateGitHubClient(FakeGitHubClient):
+        def verify_posted(
+            self,
+            _pull_request: PullRequest,
+            _review_id: int,
+            _body: str,
+        ) -> JsonObject:
+            del self
+            return {"state": "APPROVED"}
+
+    monkeypatch.setattr(review_module, "GitHubClient", WrongStateGitHubClient)
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
+
+
+def test_self_authored_post_write_race_skips_dismissal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stale comment is reported without an impossible formal dismissal."""
+    initial = sample_pr()
+    changed = sample_pr(head_sha=SHA_C)
+    FakeGitHubClient.snapshots = [initial, initial, changed]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
+    install_orchestration_fakes(monkeypatch)
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.dismissed == []
 
 
 def test_pre_post_snapshot_race_fails_before_review_write(
@@ -183,7 +373,7 @@ def test_pre_post_snapshot_race_fails_before_review_write(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+            runner=CommandRunner(),
         )
 
     assert captured.value.code == EXIT_RACE
@@ -207,7 +397,7 @@ def test_post_write_race_dismisses_stale_review(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+            runner=CommandRunner(),
         )
 
     assert captured.value.code == EXIT_RACE
@@ -240,7 +430,7 @@ def test_execute_review_rejects_oversized_posted_body(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+            runner=CommandRunner(),
         )
 
     assert captured.value.code == EXIT_ORACLE
@@ -269,7 +459,7 @@ def test_execute_review_survives_post_write_artifact_failure(
         repo_dir=tmp_path,
         artifacts_dir=Path("artifacts"),
         thinking_time="heavy",
-        runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+        runner=CommandRunner(),
     )
 
     assert result.github_review_id == 123
@@ -286,9 +476,9 @@ class _StableGitHubClient:
         self,
         _runner: CommandRunner,
         repo_dir: Path,
-        _token: str,
     ) -> None:
         self.repo_dir = repo_dir
+        self.authenticated_login = "reviewer"
         self.dismissed: list[int] = []
         type(self).instance = self
 
@@ -300,6 +490,9 @@ class _StableGitHubClient:
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         pass
+
+    def review_event(self, pull_request: PullRequest, verdict: str) -> str:
+        return "COMMENT" if pull_request.author == self.authenticated_login else verdict
 
     @staticmethod
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
@@ -317,6 +510,7 @@ class _StableGitHubClient:
     def verify_posted(
         _pull_request: PullRequest,
         _review_id: int,
+        _body: str,
     ) -> JsonObject:
         return {"state": "APPROVED"}
 
@@ -362,7 +556,7 @@ def test_interrupt_before_verification_dismisses_review(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+            runner=CommandRunner(),
         )
 
     assert _StableGitHubClient.instance is not None
@@ -381,7 +575,7 @@ def test_interrupt_after_verification_returns_review_id(
         repo_dir=tmp_path,
         artifacts_dir=Path("artifacts"),
         thinking_time="heavy",
-        runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+        runner=CommandRunner(),
     )
 
     assert result.github_review_id == 123
@@ -396,9 +590,8 @@ class _InterruptingGitHubClient(_StableGitHubClient):
         self,
         _runner: CommandRunner,
         repo_dir: Path,
-        _token: str,
     ) -> None:
-        super().__init__(_runner, repo_dir, _token)
+        super().__init__(_runner, repo_dir)
         self.snapshot_count = 0
         type(self).instance = self
 
@@ -423,7 +616,7 @@ def test_post_write_snapshot_interrupt_dismisses_review(
             repo_dir=tmp_path,
             artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
-            runner=CommandRunner({"GH_REVIEW_TOKEN": "token"}),
+            runner=CommandRunner(),
         )
 
     assert _InterruptingGitHubClient.instance is not None

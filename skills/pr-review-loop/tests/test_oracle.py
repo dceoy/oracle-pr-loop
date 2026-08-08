@@ -95,7 +95,7 @@ def test_oracle_review_rejects_excessive_attachment_count(tmp_path: Path) -> Non
     """The Oracle command cannot receive an unbounded number of --file arguments."""
     runner = CommandRunner()
     writer = ArtifactWriter(tmp_path / "artifacts", runner)
-    github = GitHubClient(runner, tmp_path, "token")
+    github = GitHubClient(runner, tmp_path)
     oracle = OracleClient(runner, github, writer, "heavy")
     attachments = tuple(
         Path(f"attachment-{index}.txt") for index in range(MAX_ORACLE_ATTACHMENTS + 1)
@@ -115,7 +115,7 @@ def test_oracle_review_rejects_excessive_argument_bytes(
     """The complete Oracle argv is byte-bounded before subprocess execution."""
     runner = CommandRunner()
     writer = ArtifactWriter(tmp_path / "artifacts", runner)
-    github = GitHubClient(runner, tmp_path, "token")
+    github = GitHubClient(runner, tmp_path)
     oracle = OracleClient(runner, github, writer, "heavy")
     oversized_path = Path("x" * MAX_ORACLE_ARG_BYTES)
 

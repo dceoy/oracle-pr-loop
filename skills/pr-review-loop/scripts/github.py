@@ -554,21 +554,18 @@ class GitHubClient(_ImmutableGitMixin):
         self,
         runner: CommandRunner,
         repo_dir: Path,
-        reviewer_token: str,
     ) -> None:
         """Initialize an unresolved GitHub client."""
         super().__init__(runner, repo_dir.resolve())
-        self.reviewer_token = reviewer_token
         self.repository = ""
         self.number = 0
         self.url = ""
-        self.reviewer_login = ""
+        self.authenticated_login = ""
 
     def _text(
         self,
         args: list[str],
         *,
-        reviewer: bool = False,
         input_text: str | None = None,
         max_output: int = 24 * 1024 * 1024,
     ) -> str:
@@ -584,7 +581,7 @@ class GitHubClient(_ImmutableGitMixin):
             result = self.runner.run(
                 ["gh", *args],
                 cwd=self.repo_dir,
-                env=self.runner.gh_env(self.reviewer_token if reviewer else None),
+                env=self.runner.gh_env(),
                 input_text=input_text,
                 max_output=max_output,
             )
@@ -593,11 +590,11 @@ class GitHubClient(_ImmutableGitMixin):
             raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
 
     def initialize(self, pr_value: str) -> None:
-        """Resolve the local repository, target PR, and reviewer identity.
+        """Resolve the local repository and target PR.
 
         Raises:
-            LooprError: The repository, PR, or reviewer identity could not
-                be resolved or is inconsistent.
+            LooprError: The repository or PR could not be resolved or is
+                inconsistent.
         """
         origin_repo: str | None = None
         try:
@@ -630,21 +627,14 @@ class GitHubClient(_ImmutableGitMixin):
                 "repository",
                 "local origin does not match pull request repository",
             )
-        if not self.reviewer_token:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "credentials",
-                "GH_REVIEW_TOKEN is required",
-            )
-        self.reviewer_login = self._text(
+        self.authenticated_login = self._text(
             ["api", "--hostname", "github.com", "user", "--jq", ".login"],
-            reviewer=True,
         ).strip()
-        if not self.reviewer_login:
+        if not self.authenticated_login:
             raise LooprError(
                 EXIT_GITHUB,
                 "identity",
-                "reviewer identity was empty",
+                "authenticated GitHub login was empty",
             )
 
     def snapshot(self) -> PullRequest:
@@ -757,14 +747,11 @@ class GitHubClient(_ImmutableGitMixin):
                 "repository",
                 "fork pull requests are not supported",
             )
-        if (
-            not pull_request.author
-            or pull_request.author.lower() == self.reviewer_login.lower()
-        ):
+        if not pull_request.author:
             raise LooprError(
                 EXIT_PRECONDITION,
                 "identity",
-                "self-review is forbidden",
+                "pull request author was empty",
             )
         if not SHA_RE.fullmatch(pull_request.base_sha) or not SHA_RE.fullmatch(
             pull_request.head_sha
@@ -776,6 +763,30 @@ class GitHubClient(_ImmutableGitMixin):
             )
         validate_ref(pull_request.base_ref)
         validate_ref(pull_request.head_ref)
+
+    def review_event(self, pull_request: PullRequest, verdict: str) -> str:
+        """Select the GitHub transport event for a validated Oracle verdict.
+
+        Formal review events remain available for PRs authored by someone
+        else. GitHub rejects formal self-reviews, so self-authored PRs use a
+        commit-anchored comment while the Oracle verdict stays canonical in
+        the command result.
+
+        Returns:
+            `COMMENT` for a self-authored PR, otherwise the Oracle verdict.
+
+        Raises:
+            LooprError: The verdict is not an accepted Oracle verdict.
+        """
+        if verdict not in {"APPROVE", "REQUEST_CHANGES"}:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "verdict",
+                "invalid review verdict",
+            )
+        if pull_request.author.casefold() == self.authenticated_login.casefold():
+            return "COMMENT"
+        return verdict
 
     def ensure_objects(self, pull_request: PullRequest) -> None:
         """Require both frozen SHAs to name local commit objects."""
@@ -830,7 +841,7 @@ class GitHubClient(_ImmutableGitMixin):
     def post_review(
         self,
         pull_request: PullRequest,
-        verdict: str,
+        event: str,
         body: str,
     ) -> tuple[int, JsonObject]:
         """Post one aggregate review anchored to the frozen head SHA.
@@ -844,7 +855,7 @@ class GitHubClient(_ImmutableGitMixin):
         payload: JsonObject = {
             "commit_id": pull_request.head_sha,
             "body": body,
-            "event": verdict,
+            "event": event,
         }
         data = _json_object(
             self._text(
@@ -861,7 +872,6 @@ class GitHubClient(_ImmutableGitMixin):
                     "--input",
                     "-",
                 ],
-                reviewer=True,
                 input_text=json.dumps(payload),
             ),
             category="github_schema",
@@ -869,7 +879,7 @@ class GitHubClient(_ImmutableGitMixin):
         review_id = _integer(data.get("id"), field="id")
         commit_id = _string(data.get("commit_id"), field="commit_id")
         if review_id <= 0 or commit_id != pull_request.head_sha:
-            if review_id > 0:
+            if review_id > 0 and event != "COMMENT":
                 self.dismiss(pull_request, review_id)
             raise LooprError(
                 EXIT_RACE,
@@ -897,7 +907,6 @@ class GitHubClient(_ImmutableGitMixin):
                 "--input",
                 "-",
             ],
-            reviewer=True,
             input_text=json.dumps(payload),
         )
 
@@ -905,8 +914,9 @@ class GitHubClient(_ImmutableGitMixin):
         self,
         pull_request: PullRequest,
         review_id: int,
+        body: str,
     ) -> JsonObject:
-        """Re-read and validate the posted review identity and commit.
+        """Re-read and validate the posted review identity, commit, and body.
 
         Returns:
             The re-read, validated review response.
@@ -925,17 +935,18 @@ class GitHubClient(_ImmutableGitMixin):
                         f"reviews/{review_id}"
                     ),
                 ],
-                reviewer=True,
             ),
             category="github_schema",
         )
-        user = _object(data.get("user"), field="user")
         if (
             _integer(data.get("id"), field="id") != review_id
-            or _string(user.get("login"), field="user.login").lower()
-            != self.reviewer_login.lower()
+            or _string(
+                _object(data.get("user"), field="user").get("login"), field="user.login"
+            ).casefold()
+            != self.authenticated_login.casefold()
             or _string(data.get("commit_id"), field="commit_id")
             != pull_request.head_sha
+            or _string(data.get("body"), field="body") != body
         ):
             raise LooprError(
                 EXIT_GITHUB,

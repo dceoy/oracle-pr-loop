@@ -33,6 +33,22 @@ def test_redactor_matches_credential_aliases() -> None:
         assert runner.redact(f"leaked: {secret}") == "leaked: [REDACTED]"
 
 
+def test_gh_env_preserves_ordinary_authentication_sources() -> None:
+    """GitHub commands use the ordinary GH token and stored-auth settings."""
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "GH_TOKEN": "gh-token",
+        "GITHUB_TOKEN": "github-token",
+        "GH_CONFIG_DIR": "gh-config-dir",
+    })
+
+    environment = runner.gh_env()
+
+    assert environment["GH_TOKEN"] == "gh-token"
+    assert environment["GITHUB_TOKEN"] == "github-token"
+    assert environment["GH_CONFIG_DIR"] == "gh-config-dir"
+
+
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:
     """Output growth past the configured bound terminates the command."""
     runner = CommandRunner({"PATH": os.environ["PATH"]})

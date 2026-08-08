@@ -77,7 +77,7 @@ For every finding:
 6. Never fabricate a fix or manufacture an approval for `clarify` or `defer` findings; leave them for the user or a follow-up.
 7. Call `submit` only when triage produced at least one real workspace patch to submit.
 8. After a successful `submit`, run a fresh `review` before deciding the PR is done.
-9. If triage produced no `fix` disposition — every blocking finding resolved to `already_addressed`, `outdated`, `clarify`, or `defer` — stop the loop instead of calling `submit` or re-running `review` on the unchanged head. Report each disposition with its evidence and hand the still-open `REQUEST_CHANGES` review to the user or a maintainer to dismiss or override; this skill never dismisses or overrides a review on the host's behalf.
+9. If triage produced no `fix` disposition — every blocking finding resolved to `already_addressed`, `outdated`, `clarify`, or `defer` — stop the loop instead of calling `submit` or re-running `review` on the unchanged head. Report each disposition with its evidence. A formal GitHub `REQUEST_CHANGES` review may then be handed to the user or a maintainer; a self-authored `COMMENT` publication remains the commit-anchored audit of Oracle's canonical result. This skill never dismisses or overrides either publication on the host's behalf.
 
 ## Internal commands
 
@@ -85,13 +85,13 @@ For every finding:
 python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
 ```
 
-`bootstrap` requires an open, same-repository GitHub Issue and Oracle with an authenticated browser profile; it does not require `GH_REVIEW_TOKEN`. It emits one JSON object bound to the Issue's `updatedAt` and the base branch's exact commit SHA, and never edits, commits, pushes, or creates a pull request.
+`bootstrap` requires an open, same-repository GitHub Issue and Oracle with an authenticated browser profile. It emits one JSON object bound to the Issue's `updatedAt` and the base branch's exact commit SHA, and never edits, commits, pushes, or creates a pull request.
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
-`review` requires an open, non-draft, same-repository GitHub.com PR; exact base/head binding; Oracle with an authenticated browser profile; and `GH_REVIEW_TOKEN` for a dedicated reviewer account different from the PR author. It emits one JSON object on stdout and never edits, commits, pushes, or launches an implementation agent.
+`review` requires an open, non-draft, same-repository GitHub.com PR; exact base/head binding; Oracle with an authenticated browser profile; and ordinary GitHub CLI authentication. It emits one JSON object on stdout and never edits, commits, pushes, or launches an implementation agent. Oracle/ChatGPT supplies the independent `APPROVE` or `REQUEST_CHANGES` verdict; the authenticated GitHub user publishes a commit-anchored comment for self-authored PRs and the corresponding formal event otherwise. The structured verdict does not depend on GitHub's formal review state.
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py submit \
