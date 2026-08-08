@@ -176,9 +176,9 @@ def _artifacts_exclude_pathspec(repo_dir: Path, artifacts_dir: Path) -> str | No
     `artifacts_dir` in `.gitignore`.
 
     Returns:
-        A `:(exclude)<path>` pathspec for `artifacts_dir`, or None when it
-        does not resolve inside repo_dir and so cannot appear in `git
-        status` output at all.
+        A `:(exclude,top,literal)<path>` pathspec for `artifacts_dir`, or
+        None when it does not resolve inside repo_dir and so cannot appear
+        in `git status` output at all.
     """
     root = repo_dir.resolve()
     target = artifacts_dir if artifacts_dir.is_absolute() else root / artifacts_dir
@@ -188,7 +188,7 @@ def _artifacts_exclude_pathspec(repo_dir: Path, artifacts_dir: Path) -> str | No
         return None
     if str(relative) == ".":
         return None
-    return f":(exclude){relative.as_posix()}"
+    return f":(exclude,top,literal){relative.as_posix()}"
 
 
 def _worktree_is_dirty(issue_client: IssueClient, artifacts_dir: Path) -> bool:

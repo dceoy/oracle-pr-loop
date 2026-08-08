@@ -190,8 +190,8 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     assert FakeIssueClient.instance is not None
     assert FakeIssueClient.instance.ensure_calls == [SHA_A]
     assert FakeIssueClient.instance.status_args == [
-        ["status", "--porcelain", "--", ".", ":(exclude)artifacts"],
-        ["status", "--porcelain", "--", ".", ":(exclude)artifacts"],
+        ["status", "--porcelain", "--", ".", ":(exclude,top,literal)artifacts"],
+        ["status", "--porcelain", "--", ".", ":(exclude,top,literal)artifacts"],
     ]
     artifacts = Path(result.artifacts_dir)
     assert artifacts.name.startswith("bootstrap-issue-7-")
@@ -428,7 +428,7 @@ def test_execute_bootstrap_rejects_untracked_files_on_base_commit(
     assert captured.value.category == "workspace"
     assert FakeIssueClient.instance is not None
     assert FakeIssueClient.instance.status_args == [
-        ["status", "--porcelain", "--", ".", ":(exclude)artifacts"],
+        ["status", "--porcelain", "--", ".", ":(exclude,top,literal)artifacts"],
     ]
 
 
@@ -458,6 +458,36 @@ def test_worktree_is_dirty_excludes_own_artifacts_directory(tmp_path: Path) -> N
     run_dir = repo / artifacts_dir / "bootstrap-issue-7-run"
     run_dir.mkdir(parents=True)
     (run_dir / "result.json").write_text("{}\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is False
+
+    (repo / "other-untracked.txt").write_text("x\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is True
+
+
+def test_worktree_is_dirty_treats_glob_artifacts_dir_name_as_literal(
+    tmp_path: Path,
+) -> None:
+    """An artifacts directory named with pathspec metacharacters stays literal.
+
+    A prior implementation built the exclusion pathspec without `literal`
+    magic, so an `--artifacts-dir` value such as `*` was interpreted as a
+    glob and excluded the entire worktree from `git status`, hiding
+    unrelated dirty files instead of only the tool's own run output.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("base\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    client = IssueClient(CommandRunner(), repo)
+    artifacts_dir = Path("*")
 
     assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is False
 
