@@ -28,9 +28,9 @@ def execute_bootstrap(
         The stable bootstrap command result.
 
     Raises:
-        LooprError: The Issue, base branch, local workspace, or Oracle output
-            violated a precondition, or the issue, base branch, or local
-            workspace changed during prompt generation.
+        LooprError: The Issue, base branch, local workspace, artifacts, or
+            Oracle output violated a precondition, or the issue, base
+            branch, or local workspace changed during prompt generation.
     """
     command_runner = runner or CommandRunner()
     issue_client = IssueClient(command_runner, repo_dir)
@@ -48,6 +48,7 @@ def execute_bootstrap(
         ),
         command_runner,
     )
+    _require_artifacts_git_ignored(issue_client, writer.root)
     writer.json("initial-issue.json", initial.raw)
     oracle = BootstrapOracleClient(command_runner, issue_client, writer, thinking_time)
     bundle = oracle.build_bundle(initial, base_sha)
@@ -165,6 +166,39 @@ def _ensure_workspace_bound_to_base(
             "local checkout has uncommitted tracked changes or untracked "
             "files; commit, stash, or discard them before running bootstrap",
         )
+
+
+def _require_artifacts_git_ignored(
+    issue_client: IssueClient,
+    run_dir: Path,
+) -> None:
+    """Require Git to exclude the claimed run directory from `git add -A`.
+
+    The host builds the very first implementation commit itself, outside
+    `submit`, so none of `submit`'s own artifact-staging protections cover
+    it; an unignored run directory would let an ordinary `git add -A`
+    sweep this command's private, Issue-derived artifacts (including raw
+    Oracle output) into that first public pull request. Nothing needs
+    checking when `run_dir` resolves outside `issue_client.repo_dir`, since
+    `git add -A` inside the worktree could never reach it there anyway.
+
+    Raises:
+        LooprError: `run_dir` is inside `issue_client.repo_dir` but Git
+            would not exclude it from `git add -A`.
+    """
+    try:
+        relative = run_dir.resolve().relative_to(issue_client.repo_dir.resolve())
+    except ValueError:
+        return
+    if issue_client.path_is_ignored(relative.as_posix()):
+        return
+    message = (
+        f"artifact directory {relative.as_posix()} is not excluded by Git; "
+        "add it to the untracked `.git/info/exclude` (not a tracked "
+        ".gitignore, which would itself dirty the workspace) before "
+        "running bootstrap"
+    )
+    raise LooprError(EXIT_PRECONDITION, "artifacts", message)
 
 
 def _exclude_pathspec_for(repo_dir: Path, path: Path) -> str | None:

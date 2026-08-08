@@ -711,3 +711,34 @@ def test_issue_client_ensure_commit_object_rejects_missing_sha(
         client.ensure_commit_object("a" * 40)
 
     assert captured.value.category == "git"
+
+
+def test_path_is_ignored_honors_the_host_s_own_global_excludes_file(
+    tmp_path: Path,
+) -> None:
+    """`path_is_ignored` must predict the host's real `git add -A`.
+
+    Immutable object reads deliberately run with `GIT_CONFIG_NOSYSTEM=1`
+    and `GIT_CONFIG_GLOBAL=/dev/null` so a checkout cannot redirect them via
+    inherited config; `path_is_ignored` answers a different question, what
+    the host's own subsequent `git add -A` will do in the host's own
+    environment, so it must not suppress a global `core.excludesFile` the
+    host's real `git add -A` would honor. `GIT_CONFIG_COUNT`/`_KEY_`/`_VALUE_`
+    inject that setting without touching the real global Git config.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    global_ignore = tmp_path / "global-gitignore"
+    global_ignore.write_text(".pr-review-loop/\n")
+    runner = CommandRunner({
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.excludesFile",
+        "GIT_CONFIG_VALUE_0": str(global_ignore),
+    })
+    client = IssueClient(runner, repo)
+
+    assert client.path_is_ignored(".pr-review-loop/runs/foo") is True

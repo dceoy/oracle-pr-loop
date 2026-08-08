@@ -67,6 +67,7 @@ class FakeIssueClient:
     shas: ClassVar[list[str]] = []
     heads: ClassVar[list[bytes]] = []
     statuses: ClassVar[list[bytes]] = []
+    ignored: ClassVar[bool] = True
 
     def __init__(self, _runner: CommandRunner, repo_dir: Path) -> None:
         self.repo_dir = repo_dir
@@ -78,6 +79,7 @@ class FakeIssueClient:
         self._statuses = list(type(self).statuses)
         self.ensure_calls: list[str] = []
         self.status_args: list[list[str]] = []
+        self.ignored_calls: list[str] = []
 
     def initialize(self, _issue_value: str) -> None:
         """Accept the configured fake target."""
@@ -97,6 +99,11 @@ class FakeIssueClient:
     def ensure_commit_object(self, sha: str) -> None:
         """Record the base commit availability check."""
         self.ensure_calls.append(sha)
+
+    def path_is_ignored(self, relative: str) -> bool:
+        """Record the ignore check and return the configured fake result."""
+        self.ignored_calls.append(relative)
+        return type(self).ignored
 
     def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
         """Return the next deterministic local `HEAD`/status probe result."""
@@ -603,6 +610,109 @@ def test_exclude_pathspec_for_is_none_for_repo_root(tmp_path: Path) -> None:
     repo.mkdir()
 
     assert bootstrap_module._exclude_pathspec_for(repo, Path()) is None
+
+
+def test_require_artifacts_git_ignored_accepts_ignored_run_directory(
+    tmp_path: Path,
+) -> None:
+    """A run directory covered by `.git/info/exclude` passes silently."""
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    _init_repo(git, repo)
+    info_dir = repo / ".git" / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    (info_dir / "exclude").write_text("/artifacts/\n")
+    client = IssueClient(CommandRunner(), repo)
+    run_dir = repo / "artifacts" / "runs" / "bootstrap-issue-7-run"
+    run_dir.mkdir(parents=True)
+
+    bootstrap_module._require_artifacts_git_ignored(client, run_dir)
+
+
+def test_require_artifacts_git_ignored_rejects_unignored_run_directory(
+    tmp_path: Path,
+) -> None:
+    """An unignored run directory fails closed with an actionable message.
+
+    Without an ignore rule, the host's own `git add -A` for the first
+    implementation commit could sweep this command's private, Issue-derived
+    run directory into the resulting pull request; `submit`'s own artifact
+    protections never apply to that first, skill-external commit.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    _init_repo(git, repo)
+    client = IssueClient(CommandRunner(), repo)
+    run_dir = repo / "artifacts" / "runs" / "bootstrap-issue-7-run"
+    run_dir.mkdir(parents=True)
+
+    with pytest.raises(LooprError) as captured:
+        bootstrap_module._require_artifacts_git_ignored(client, run_dir)
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "artifacts"
+    assert ".git/info/exclude" in str(captured.value)
+
+
+def test_require_artifacts_git_ignored_skips_directory_outside_repo(
+    tmp_path: Path,
+) -> None:
+    """A run directory outside repo_dir needs no ignore check.
+
+    `git add -A` inside the worktree could never reach a path outside it.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    _init_repo(git, repo)
+    client = IssueClient(CommandRunner(), repo)
+    outside = tmp_path / "elsewhere" / "run"
+    outside.mkdir(parents=True)
+
+    bootstrap_module._require_artifacts_git_ignored(client, outside)
+
+
+def test_execute_bootstrap_rejects_unignored_artifact_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bootstrap fails closed, before writing any artifact or invoking Oracle.
+
+    A prior implementation only hid the claimed run directory from its own
+    dirty-workspace check and otherwise trusted the host to keep it out of
+    `.gitignore` by convention; a host repository without that convention
+    could let an ordinary `git add -A` for the first implementation commit
+    sweep these private, Issue-derived artifacts into the resulting pull
+    request, which is created outside `submit` and so outside its own
+    artifact protections.
+    """
+    issue = sample_issue()
+    FakeIssueClient.snapshots = [issue]
+    FakeIssueClient.branches = ["main"]
+    FakeIssueClient.shas = [SHA_A]
+    FakeIssueClient.heads = [SHA_A.encode()]
+    FakeIssueClient.statuses = [b""]
+    install_orchestration_fakes(monkeypatch)
+    monkeypatch.setattr(FakeIssueClient, "ignored", False)
+
+    with pytest.raises(LooprError) as captured:
+        execute_bootstrap(
+            issue_value="7",
+            repo_dir=tmp_path,
+            artifacts_dir=Path("artifacts"),
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "artifacts"
+    assert FakeIssueClient.instance is not None
+    assert FakeIssueClient.instance.ignored_calls
+    run_dirs = list((tmp_path / "artifacts" / "runs").iterdir())
+    assert len(run_dirs) == 1
+    assert list(run_dirs[0].iterdir()) == []
 
 
 def test_execute_bootstrap_rejects_workspace_dirtied_during_generation(
