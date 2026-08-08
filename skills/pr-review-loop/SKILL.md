@@ -1,39 +1,58 @@
 ---
 name: pr-review-loop
-description: Review and improve a pull request through independent Oracle/ChatGPT review while the invoking host agent owns implementation work; optionally bootstrap that work from an open GitHub Issue.
+description: Use this skill when an open GitHub pull request should be independently reviewed and improved until approval, or when an open GitHub Issue should be implemented and then carried through that PR review loop. Trigger it for requests to review, fix, resolve, improve, or finalize a PR even when the user does not explicitly mention pr-review-loop. The host agent owns implementation and QA; skill scripts provide deterministic Git/GitHub/Oracle operations.
 ---
 
 # pr-review-loop
 
-Use this skill to improve one GitHub pull request without embedding or launching a specific implementation agent. Codex CLI, Claude Code, Cursor CLI, and compatible hosts all use the same canonical implementation.
+Use this skill to take one GitHub pull request through independent Oracle/ChatGPT review without embedding or launching a specific implementation agent. The user does not need to name this skill or run its scripts directly: a compatible host should select the skill from task intent and use its commands as internal deterministic primitives.
+
+Codex CLI, Claude Code, Cursor CLI, and compatible hosts all use the same canonical implementation.
+
+## When to use this skill
+
+Use this skill when the host is asked to:
+
+- review an open pull request and address blocking findings;
+- fix, resolve, improve, or finalize an existing pull request;
+- continue iterating on a pull request until independent review approves it;
+- implement an open GitHub Issue when the intended outcome includes creating a pull request and carrying that pull request through this review loop.
+
+Do not use this skill merely to summarize repository or PR metadata, triage an Issue without implementation, or perform local pre-PR QA when no PR review workflow is intended.
+
+Treat `scripts/cli.py` as the skill's machine interface, not as the primary user-facing UI. Do not require the user to invoke `bootstrap`, `review`, or `submit` manually unless they explicitly ask for manual operation or debugging instructions.
 
 ## Starting from a GitHub Issue
 
-`bootstrap` is a thin entry point for work that has no pull request yet. It reads one open Issue, asks Oracle/ChatGPT to turn that Issue and bounded repository evidence into an implementation-ready prompt, and returns the prompt to the host. It never implements the change, and it never creates a pull request.
+`bootstrap` is a thin internal entry point for work that has no pull request yet. It reads one open Issue, asks Oracle/ChatGPT to turn that Issue and bounded repository evidence into an implementation-ready prompt, and returns the prompt to the host. It never implements the change, and it never creates a pull request.
 
 ```text
-bootstrap --issue
-        ↓
+open Issue
+    ↓
+bootstrap
+    ↓
 implementation_prompt
-        ↓
-host agent implements + runs repository QA + commits/pushes + opens a PR (e.g. "Fixes #123")
-        ↓
-review --pr
-        ↓
-existing pr-review-loop workflow below, unchanged
+    ↓
+host agent implements + runs repository QA + commits/pushes + opens a PR
+    ↓
+review
+    ↓
+existing PR review loop below
 ```
 
-Once the host has opened the pull request, hand off completely to the workflow below; `review` and `submit` have no Issue-specific behavior and no persistent state connects them to `bootstrap`. `bootstrap` writes artifacts under `.pr-review-loop/runs/` before that first commit exists, so ensure `.pr-review-loop/` is excluded from the host's implementation commit (add it to `.gitignore` first if the repository does not already exclude it); `submit` later refuses to run if the artifact directory is tracked.
+Once the host has opened the pull request, hand off completely to the PR workflow below; `review` and `submit` have no Issue-specific behavior and no persistent state connects them to `bootstrap`.
 
-## Workflow
+`bootstrap` writes artifacts under `.pr-review-loop/runs/` before that first commit exists. Ensure `.pr-review-loop/` is excluded from the host's implementation commit; add it to `.gitignore` first if the repository does not already exclude it. `submit` later refuses to run if the artifact directory is tracked.
+
+## Pull request workflow
 
 1. Run `review` against the exact current PR head.
 2. Finish on `APPROVE`.
-3. On `REQUEST_CHANGES`, triage the blocking findings (below), implement only what triage marks `fix`, and run repository QA.
+3. On `REQUEST_CHANGES`, triage the blocking findings, implement only what triage marks `fix`, and run repository QA.
 4. Run `submit` against the reviewed head, but only when triage produced a real patch.
 5. Run a fresh `review` on the resulting head and repeat until approval or the chosen iteration limit.
 
-The host agent owns planning, triage, editing, QA, and iteration. Oracle/ChatGPT owns independent review. Skill scripts own deterministic Git/GitHub inspection, review publication, patch validation, one commit, and the lease-protected push.
+The host agent owns planning, triage, editing, QA, and iteration. Oracle/ChatGPT owns independent review. Skill scripts own deterministic Issue/Git/GitHub inspection, review publication, patch validation, one commit, and the lease-protected push.
 
 ## Triaging blocking findings
 
@@ -56,7 +75,7 @@ For every finding:
 8. After a successful `submit`, run a fresh `review` before deciding the PR is done.
 9. If triage produced no `fix` disposition — every blocking finding resolved to `already_addressed`, `outdated`, `clarify`, or `defer` — stop the loop instead of calling `submit` or re-running `review` on the unchanged head. Report each disposition with its evidence and hand the still-open `REQUEST_CHANGES` review to the user or a maintainer to dismiss or override; this skill never dismisses or overrides a review on the host's behalf.
 
-## Commands
+## Internal commands
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
