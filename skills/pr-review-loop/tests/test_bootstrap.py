@@ -189,9 +189,16 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     assert result.implementation_prompt == "Implement the requested change."
     assert FakeIssueClient.instance is not None
     assert FakeIssueClient.instance.ensure_calls == [SHA_A]
+    run_relative = Path(result.artifacts_dir).relative_to(tmp_path.resolve())
     assert FakeIssueClient.instance.status_args == [
-        ["status", "--porcelain", "--", ".", ":(exclude,top,literal)artifacts"],
-        ["status", "--porcelain", "--", ".", ":(exclude,top,literal)artifacts"],
+        ["status", "--porcelain"],
+        [
+            "status",
+            "--porcelain",
+            "--",
+            ".",
+            f":(exclude,top,literal){run_relative.as_posix()}",
+        ],
     ]
     artifacts = Path(result.artifacts_dir)
     assert artifacts.name.startswith("bootstrap-issue-7-")
@@ -428,76 +435,127 @@ def test_execute_bootstrap_rejects_untracked_files_on_base_commit(
     assert captured.value.category == "workspace"
     assert FakeIssueClient.instance is not None
     assert FakeIssueClient.instance.status_args == [
-        ["status", "--porcelain", "--", ".", ":(exclude,top,literal)artifacts"],
+        ["status", "--porcelain"],
     ]
 
 
-def test_worktree_is_dirty_excludes_own_artifacts_directory(tmp_path: Path) -> None:
-    """Creating this command's own artifacts directory must not read as dirty.
-
-    A prior implementation relied on the host repository's `.gitignore` to
-    keep `artifacts_dir` invisible to `git status`; that is not guaranteed
-    for every host repository, so the check must exclude it directly rather
-    than assume it is already ignored.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "repo"
+def _init_repo(git: str, repo: Path) -> None:
+    """Initialize a test-controlled Git repository with an empty base commit."""
     repo.mkdir()
     _git(git, ["init", "-q"], cwd=repo)
     _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
     _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.py").write_text("base\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    _git(git, ["commit", "-q", "--allow-empty", "-m", "base"], cwd=repo)
+
+
+def test_worktree_is_dirty_with_no_exclude_checks_whole_tree(tmp_path: Path) -> None:
+    """The pre-Oracle check (`exclude_dir=None`) must see the entire worktree.
+
+    No run directory has been claimed yet at this point, so nothing may be
+    hidden from `git status`, including pre-existing tracked content
+    already inside a caller-controlled `--artifacts-dir`.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    _init_repo(git, repo)
+    (repo / "artifacts").mkdir()
+    (repo / "artifacts" / "tracked.py").write_text("base\n")
+    _git(git, ["add", "artifacts/tracked.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "add tracked"], cwd=repo)
     client = IssueClient(CommandRunner(), repo)
-    artifacts_dir = Path("artifacts")
 
-    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is False
+    assert bootstrap_module._worktree_is_dirty(client, None) is False
 
-    run_dir = repo / artifacts_dir / "bootstrap-issue-7-run"
+    (repo / "artifacts" / "tracked.py").write_text("changed\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, None) is True
+
+
+def test_worktree_is_dirty_excludes_fresh_run_directory(tmp_path: Path) -> None:
+    """A freshly claimed run directory, wholly untracked, must not read as dirty.
+
+    `git status` collapses a wholly untracked directory into one summary
+    line for its nearest untracked ancestor (for example `?? artifacts/`);
+    excluding the exact leaf run directory must still suppress that
+    summary line when the run directory is the only content underneath.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    _init_repo(git, repo)
+    client = IssueClient(CommandRunner(), repo)
+    run_dir = repo / "artifacts" / "runs" / "bootstrap-issue-7-run"
     run_dir.mkdir(parents=True)
     (run_dir / "result.json").write_text("{}\n")
 
-    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is False
+    assert bootstrap_module._worktree_is_dirty(client, run_dir) is False
 
     (repo / "other-untracked.txt").write_text("x\n")
 
-    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is True
+    assert bootstrap_module._worktree_is_dirty(client, run_dir) is True
 
 
-def test_worktree_is_dirty_treats_glob_artifacts_dir_name_as_literal(
+def test_worktree_is_dirty_excludes_only_the_specific_run_directory(
     tmp_path: Path,
 ) -> None:
-    """An artifacts directory named with pathspec metacharacters stays literal.
+    """The post-Oracle check must hide only the exact claimed run directory.
 
-    A prior implementation built the exclusion pathspec without `literal`
-    magic, so an `--artifacts-dir` value such as `*` was interpreted as a
-    glob and excluded the entire worktree from `git status`, hiding
-    unrelated dirty files instead of only the tool's own run output.
+    A prior implementation excluded the entire configured `artifacts_dir`
+    subtree, so `bootstrap --artifacts-dir src` (or any shared artifacts
+    directory holding other tracked content) would silently accept a
+    modified tracked file elsewhere in that subtree as a clean workspace.
+    Excluding only the specific run directory this command claimed keeps
+    every other change under that shared directory visible.
     """
     git = shutil.which("git")
     assert git is not None
     repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.py").write_text("base\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    _init_repo(git, repo)
+    (repo / "artifacts").mkdir()
+    (repo / "artifacts" / "tracked.py").write_text("base\n")
+    _git(git, ["add", "artifacts/tracked.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "add tracked"], cwd=repo)
     client = IssueClient(CommandRunner(), repo)
-    artifacts_dir = Path("*")
+    run_dir = repo / "artifacts" / "runs" / "bootstrap-issue-7-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text("{}\n")
 
-    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is False
+    assert bootstrap_module._worktree_is_dirty(client, run_dir) is False
+
+    (repo / "artifacts" / "tracked.py").write_text("changed\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, run_dir) is True
+
+
+def test_worktree_is_dirty_treats_glob_run_directory_name_as_literal(
+    tmp_path: Path,
+) -> None:
+    """A run directory named with pathspec metacharacters stays literal.
+
+    A prior implementation built the exclusion pathspec without `literal`
+    magic, so a path such as `*` was interpreted as a glob and excluded
+    the entire worktree from `git status`, hiding unrelated dirty files
+    instead of only the tool's own run output.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "repo"
+    _init_repo(git, repo)
+    client = IssueClient(CommandRunner(), repo)
+    run_dir = repo / "*"
+    run_dir.mkdir()
+    (run_dir / "result.json").write_text("{}\n")
+
+    assert bootstrap_module._worktree_is_dirty(client, run_dir) is False
 
     (repo / "other-untracked.txt").write_text("x\n")
 
-    assert bootstrap_module._worktree_is_dirty(client, artifacts_dir) is True
+    assert bootstrap_module._worktree_is_dirty(client, run_dir) is True
 
 
-def test_artifacts_exclude_pathspec_is_none_outside_repo(tmp_path: Path) -> None:
-    """An artifacts directory outside repo_dir needs no exclusion pathspec.
+def test_exclude_pathspec_for_is_none_outside_repo(tmp_path: Path) -> None:
+    """A path outside repo_dir needs no exclusion pathspec.
 
     A path `git status` cannot report on cannot contaminate its output, so
     there is nothing to exclude.
@@ -506,11 +564,11 @@ def test_artifacts_exclude_pathspec_is_none_outside_repo(tmp_path: Path) -> None
     repo.mkdir()
     outside = tmp_path / "elsewhere"
 
-    assert bootstrap_module._artifacts_exclude_pathspec(repo, outside) is None
+    assert bootstrap_module._exclude_pathspec_for(repo, outside) is None
 
 
-def test_artifacts_exclude_pathspec_is_none_for_repo_root(tmp_path: Path) -> None:
-    """An artifacts directory equal to repo_dir itself needs no pathspec.
+def test_exclude_pathspec_for_is_none_for_repo_root(tmp_path: Path) -> None:
+    """A path equal to repo_dir itself needs no pathspec.
 
     Excluding the whole repository would defeat the cleanliness check
     entirely, so this degenerate case is treated as nothing-to-exclude.
@@ -518,7 +576,7 @@ def test_artifacts_exclude_pathspec_is_none_for_repo_root(tmp_path: Path) -> Non
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    assert bootstrap_module._artifacts_exclude_pathspec(repo, Path()) is None
+    assert bootstrap_module._exclude_pathspec_for(repo, Path()) is None
 
 
 def test_execute_bootstrap_rejects_workspace_dirtied_during_generation(

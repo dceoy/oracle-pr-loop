@@ -38,7 +38,7 @@ def execute_bootstrap(
     initial = issue_client.snapshot()
     base_ref, base_sha = _base_snapshot(issue_client)
     _ensure_base_available(issue_client, base_ref, base_sha)
-    _ensure_workspace_bound_to_base(issue_client, base_ref, base_sha, artifacts_dir)
+    _ensure_workspace_bound_to_base(issue_client, base_ref, base_sha)
 
     writer = ArtifactWriter(
         claim_run_directory(
@@ -64,7 +64,7 @@ def execute_bootstrap(
         or after_ref != base_ref
         or after_sha != base_sha
         or after_head != base_sha
-        or _worktree_is_dirty(issue_client, artifacts_dir)
+        or _worktree_is_dirty(issue_client, writer.root)
     ):
         raise LooprError(
             EXIT_RACE,
@@ -135,7 +135,6 @@ def _ensure_workspace_bound_to_base(
     issue_client: IssueClient,
     base_ref: str,
     base_sha: str,
-    artifacts_dir: Path,
 ) -> None:
     """Require the local checkout to already be clean and at base_sha.
 
@@ -143,6 +142,9 @@ def _ensure_workspace_bound_to_base(
     not advisory metadata; a checkout left on an unrelated or stale commit,
     or one carrying pre-existing untracked files, would let the host build
     the first commit and pull request on the wrong or contaminated history.
+    No run directory has been claimed yet at this point, so the complete
+    worktree is checked; nothing, including any pre-existing content under
+    a caller-controlled `--artifacts-dir`, may be excluded.
 
     Raises:
         LooprError: local `HEAD` is not base_sha, or tracked or untracked
@@ -156,7 +158,7 @@ def _ensure_workspace_bound_to_base(
             f"`git switch -c <branch> {base_sha}` before running bootstrap"
         )
         raise LooprError(EXIT_PRECONDITION, "workspace", message)
-    if _worktree_is_dirty(issue_client, artifacts_dir):
+    if _worktree_is_dirty(issue_client, None):
         raise LooprError(
             EXIT_PRECONDITION,
             "workspace",
@@ -165,23 +167,23 @@ def _ensure_workspace_bound_to_base(
         )
 
 
-def _artifacts_exclude_pathspec(repo_dir: Path, artifacts_dir: Path) -> str | None:
-    """Return a `git status` pathspec excluding this command's own artifacts.
+def _exclude_pathspec_for(repo_dir: Path, path: Path) -> str | None:
+    """Return a `git status` pathspec excluding one specific real path.
 
-    `execute_bootstrap` claims a run directory under `artifacts_dir` and
-    writes its own bounded prompt-generation artifacts there before the
-    post-Oracle workspace recheck runs; that self-created, tool-owned
-    output must not itself be flagged as workspace contamination, and this
-    must hold regardless of whether a given host repository also lists
-    `artifacts_dir` in `.gitignore`.
+    Used to hide this command's own claimed run directory from the
+    post-Oracle workspace recheck, and this must hold regardless of
+    whether a given host repository also lists that path in `.gitignore`.
+    Only the exact run directory is ever passed here, never a caller's
+    broader `--artifacts-dir`, so unrelated content elsewhere under a
+    shared artifacts directory stays visible to the check.
 
     Returns:
-        A `:(exclude,top,literal)<path>` pathspec for `artifacts_dir`, or
-        None when it does not resolve inside repo_dir and so cannot appear
-        in `git status` output at all.
+        A `:(exclude,top,literal)<path>` pathspec for path, or None when it
+        does not resolve inside repo_dir and so cannot appear in `git
+        status` output at all, or equals repo_dir itself.
     """
     root = repo_dir.resolve()
-    target = artifacts_dir if artifacts_dir.is_absolute() else root / artifacts_dir
+    target = path if path.is_absolute() else root / path
     try:
         relative = target.resolve().relative_to(root)
     except ValueError:
@@ -191,20 +193,23 @@ def _artifacts_exclude_pathspec(repo_dir: Path, artifacts_dir: Path) -> str | No
     return f":(exclude,top,literal){relative.as_posix()}"
 
 
-def _worktree_is_dirty(issue_client: IssueClient, artifacts_dir: Path) -> bool:
+def _worktree_is_dirty(issue_client: IssueClient, exclude_dir: Path | None) -> bool:
     """Report whether the local checkout has any tracked or untracked changes.
 
-    Any change outside `artifacts_dir` counts, whether or not the host
-    repository's `.gitignore`/`.git/info/exclude` also covers that
-    directory.
+    `exclude_dir`, when given, must be the exact run directory this command
+    itself claimed and wrote artifacts into; any other change anywhere else
+    in the worktree, including elsewhere under a shared `--artifacts-dir`,
+    still counts. Passing None checks the complete worktree, which the
+    pre-Oracle check requires since no run directory exists yet.
 
     Returns:
         True if the checkout has any pending tracked or untracked change
-        outside artifacts_dir.
+        outside exclude_dir.
     """
     args = ["status", "--porcelain"]
-    pathspec = _artifacts_exclude_pathspec(issue_client.repo_dir, artifacts_dir)
-    if pathspec is not None:
-        args = [*args, "--", ".", pathspec]
+    if exclude_dir is not None:
+        pathspec = _exclude_pathspec_for(issue_client.repo_dir, exclude_dir)
+        if pathspec is not None:
+            args = [*args, "--", ".", pathspec]
     status = issue_client.git_bytes(args, max_output=64 * 1024)
     return bool(status.strip())
