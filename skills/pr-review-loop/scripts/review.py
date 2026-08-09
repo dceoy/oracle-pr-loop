@@ -158,13 +158,13 @@ def _publication(
             "oracle_schema",
             "review body with audit footer exceeds GitHub's body limit",
         )
-    inline_bytes = sum(len(comment.body.encode("utf-8")) for comment in comments)
-    if inline_bytes > MAX_POSTED_BODY_BYTES:
-        raise LooprError(
-            EXIT_ORACLE,
-            "oracle_schema",
-            "inline review comments exceed GitHub's body limit",
-        )
+    for comment in comments:
+        if len(comment.body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
+            raise LooprError(
+                EXIT_ORACLE,
+                "oracle_schema",
+                "an inline review comment exceeds GitHub's body limit",
+            )
     return body, comments
 
 

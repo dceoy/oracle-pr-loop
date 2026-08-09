@@ -737,11 +737,11 @@ def test_added_deleted_and_context_lines_anchor_on_their_own_side(
     assert [(item.side, item.line) for item in comments] == [(side, line)]
 
 
-def test_inline_comments_are_bounded_before_publication(
+def test_one_oversized_inline_comment_is_bounded_before_publication(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Oversized inline content fails before any GitHub write."""
+    """A single inline comment over GitHub's per-comment body limit fails closed."""
     oversized = finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"})
     oversized["description"] = "x" * 70_000
     _install_findings(monkeypatch, (oversized,), frozenset({("file.py", "RIGHT", 7)}))
@@ -758,6 +758,30 @@ def test_inline_comments_are_bounded_before_publication(
     assert captured.value.category == "oracle_schema"
     assert FakeGitHubClient.instance is not None
     assert FakeGitHubClient.instance.post_count == 0
+
+
+def test_many_individually_bounded_inline_comments_are_not_rejected_in_aggregate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """GitHub bounds each comment body independently, not their combined size.
+
+    Each of these findings is well within GitHub's per-comment body limit on
+    its own, but their combined size exceeds it; the publication must not
+    reject the whole review over a limit GitHub's create-review contract does
+    not impose.
+    """
+    findings = tuple(
+        finding(f"F{index}", {"path": "file.py", "line": index, "side": "RIGHT"})
+        | {"description": "x" * 40_000}
+        for index in range(1, 4)
+    )
+    anchors = frozenset(("file.py", "RIGHT", index) for index in range(1, 4))
+    _install_findings(monkeypatch, findings, anchors)
+
+    github = _published(tmp_path)
+
+    assert len(github.posted_comments[0]) == len(findings)
 
 
 def test_post_write_race_dismisses_review_carrying_inline_comments(
