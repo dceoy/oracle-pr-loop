@@ -107,6 +107,14 @@ operational errors remain Oracle failures, not review verdicts.
 See the [connector operations reference](operations.md) for account setup,
 direct `@GitHub` smoke testing, and disconnected fallback verification.
 
+When `ORACLE_REMOTE_HOST` is configured, the Oracle invocation retries only
+the remote service's exact pre-acceptance `ERROR: busy` response. It uses six
+retry opportunities with delays based on 1, 2, 4, 8, 16, and 30 seconds,
+multiplied by 0.75–1.0 jitter and capped at 30 seconds. The original command,
+session slug, and attachments are reused. Authentication, configuration,
+unrelated HTTP errors, and ambiguous transport or accepted-run failures remain
+fail-fast.
+
 `review` never edits the workspace, commits, pushes, or launches an agent.
 
 ## `submit`

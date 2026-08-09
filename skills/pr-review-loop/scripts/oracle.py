@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
+import time
 from pathlib import Path, PurePosixPath
+from random import SystemRandom
 from typing import TYPE_CHECKING, cast
 
 from .models import (
@@ -22,7 +25,7 @@ from .models import (
 from .process import CommandError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from .artifacts import TemporaryFileWriter
     from .github import GitHubClient, IssueClient
@@ -38,6 +41,12 @@ MAX_REVIEW_BODY_BYTES = 60_000
 CORE_BUNDLE_FILES = 4
 MAX_ORACLE_ATTACHMENTS = MAX_CHANGED_FILES + MAX_INSTRUCTION_FILES + CORE_BUNDLE_FILES
 MAX_ORACLE_ARG_BYTES = 256 * 1024
+REMOTE_BUSY_INITIAL_DELAY_SECONDS = 1.0
+REMOTE_BUSY_MAX_DELAY_SECONDS = 30.0
+REMOTE_BUSY_MAX_RETRIES = 6
+REMOTE_BUSY_JITTER_MIN = 0.75
+REMOTE_BUSY_JITTER_MAX = 1.0
+REMOTE_HOST_ENV = "ORACLE_REMOTE_HOST"
 BOOTSTRAP_CORE_BUNDLE_FILES = 2
 MAX_BOOTSTRAP_ATTACHMENTS = MAX_INSTRUCTION_FILES + BOOTSTRAP_CORE_BUNDLE_FILES
 TOP_KEYS = {
@@ -437,6 +446,103 @@ def _validate_oracle_command(command: list[str]) -> None:
         )
 
 
+def _is_remote_busy(error: CommandError, environment: Mapping[str, str]) -> bool:
+    """Recognize Oracle's pre-acceptance remote-service busy failure.
+
+    The Oracle remote client turns the server's ``409 {"error":"busy"}``
+    response into the session log line ``ERROR: busy``. Requiring the remote
+    host configuration as well as that exact terminal line prevents local
+    browser errors, unrelated 4xx responses, and ambiguous transport failures
+    from entering the retry loop.
+
+    Returns:
+        Whether error is the narrowly retryable remote contention failure.
+    """
+    if error.returncode is None or not environment.get(REMOTE_HOST_ENV, "").strip():
+        return False
+    output = "\n".join(part for part in (error.stdout, error.stderr) if part)
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return bool(lines and lines[-1] == "ERROR: busy")
+
+
+def _remote_busy_delay(
+    retry_number: int,
+    random_value: Callable[[], float],
+) -> float:
+    """Select one bounded exponentially increasing delay with jitter.
+
+    Args:
+        retry_number: One-based number of the retry about to be made.
+        random_value: A source returning a value in the unit interval.
+
+    Returns:
+        The selected delay in seconds.
+    """
+    nominal = min(
+        REMOTE_BUSY_INITIAL_DELAY_SECONDS * (2 ** (retry_number - 1)),
+        REMOTE_BUSY_MAX_DELAY_SECONDS,
+    )
+    sample = min(max(random_value(), 0.0), 1.0)
+    multiplier = REMOTE_BUSY_JITTER_MIN + sample * (
+        REMOTE_BUSY_JITTER_MAX - REMOTE_BUSY_JITTER_MIN
+    )
+    return nominal * multiplier
+
+
+def _log_remote_busy_retry(attempt: int, next_attempt: int, delay: float) -> None:
+    """Write one concise remote contention diagnostic to stderr."""
+    sys.stderr.write(
+        "pr-review-loop oracle: remote busy on "
+        f"attempt {attempt}; retrying attempt {next_attempt} in {delay:.2f}s\n"
+    )
+
+
+def _run_oracle_with_retries(
+    runner: CommandRunner,
+    command: list[str],
+    repo_dir: Path,
+    raw_path: Path,
+    environment: Mapping[str, str],
+    sleep: Callable[[float], None],
+    random_value: Callable[[], float],
+) -> None:
+    """Run Oracle, retrying only bounded remote-service busy failures.
+
+    Raises:
+        LooprError: The Oracle command failed permanently or exhausted the
+            remote contention retry budget.
+    """
+    attempt = 1
+    busy_retries = 0
+    while True:
+        try:
+            runner.run(
+                command,
+                cwd=repo_dir,
+                env=environment,
+                timeout=3600,
+                max_output=MAX_ORACLE_OUTPUT,
+                watch_path=raw_path,
+            )
+        except CommandError as exc:
+            if not _is_remote_busy(exc, environment):
+                raise LooprError(EXIT_ORACLE, "oracle", str(exc)) from exc
+            if busy_retries >= REMOTE_BUSY_MAX_RETRIES:
+                message = (
+                    "Oracle remote service remained busy after "
+                    f"{attempt} attempts; retry budget exhausted after "
+                    f"{REMOTE_BUSY_MAX_RETRIES} retries"
+                )
+                raise LooprError(EXIT_ORACLE, "oracle", message) from exc
+            busy_retries += 1
+            delay = _remote_busy_delay(busy_retries, random_value)
+            _log_remote_busy_retry(attempt, attempt + 1, delay)
+            sleep(delay)
+            attempt += 1
+        else:
+            return
+
+
 def _snapshot(pull_request: PullRequest) -> JsonObject:
     """Return the stable pull-request metadata snapshot.
 
@@ -762,8 +868,10 @@ def invoke_oracle(
     *,
     model: str | None = None,
     max_attachments: int,
+    _sleep: Callable[[float], None] | None = None,
+    _random_value: Callable[[], float] | None = None,
 ) -> str:
-    """Invoke Oracle once and return its raw, bounded, credential-free output.
+    """Invoke Oracle and return its raw, bounded, credential-free output.
 
     Returns:
         The Oracle command's raw output text.
@@ -789,17 +897,18 @@ def invoke_oracle(
         slug,
     )
     _validate_oracle_command(command)
-    try:
-        runner.run(
-            command,
-            cwd=repo_dir,
-            env=runner.oracle_env(),
-            timeout=3600,
-            max_output=MAX_ORACLE_OUTPUT,
-            watch_path=raw_path,
-        )
-    except CommandError as exc:
-        raise LooprError(EXIT_ORACLE, "oracle", str(exc)) from exc
+    environment = runner.oracle_env()
+    sleep = time.sleep if _sleep is None else _sleep
+    random_value = SystemRandom().random if _random_value is None else _random_value
+    _run_oracle_with_retries(
+        runner,
+        command,
+        repo_dir,
+        raw_path,
+        environment,
+        sleep,
+        random_value,
+    )
     descriptor: int | None = None
     try:
         descriptor = os.open(

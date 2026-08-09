@@ -17,16 +17,22 @@ from scripts.oracle import (
     MAX_ORACLE_ARG_BYTES,
     MAX_ORACLE_ATTACHMENTS,
     PROMPT,
+    REMOTE_BUSY_INITIAL_DELAY_SECONDS,
+    REMOTE_BUSY_JITTER_MAX,
+    REMOTE_BUSY_JITTER_MIN,
+    REMOTE_BUSY_MAX_DELAY_SECONDS,
+    REMOTE_BUSY_MAX_RETRIES,
+    _remote_busy_delay,
     build_bootstrap_bundle,
     build_review_bundle,
     invoke_oracle,
     parse_bootstrap,
     parse_review,
 )
-from scripts.process import CommandResult, CommandRunner
+from scripts.process import CommandError, CommandResult, CommandRunner
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from pytest_mock import MockerFixture
     from scripts.github import GitHubClient, IssueClient
@@ -46,6 +52,8 @@ def _invoke(
     *,
     thinking_time: str | None = None,
     model: str | None = None,
+    _sleep: Callable[[float], None] | None = None,
+    _random_value: Callable[[], float] | None = None,
 ) -> str:
     """Invoke the test transport with stable bounds and a test slug."""
     return invoke_oracle(
@@ -58,6 +66,8 @@ def _invoke(
         "test-slug",
         model=model,
         max_attachments=max_attachments,
+        _sleep=_sleep,
+        _random_value=_random_value,
     )
 
 
@@ -598,9 +608,13 @@ class _FakeIssueGitHub:
 class _FakeOracleRunner(CommandRunner):
     """Fake the Oracle subprocess by writing a fixed payload to watch_path."""
 
-    def __init__(self, payload: str) -> None:
+    def __init__(
+        self,
+        payload: str,
+        source_env: Mapping[str, str] | None = None,
+    ) -> None:
         """Initialize a fake Oracle transport with one fixed raw response."""
-        super().__init__()
+        super().__init__(source_env)
         self.payload = payload
         self.commands: list[tuple[str, ...]] = []
 
@@ -626,6 +640,211 @@ class _FakeOracleRunner(CommandRunner):
             watch_path.write_text(self.payload, encoding="utf-8")
             return CommandResult(argv, 0, b"", "")
         pytest.fail(f"unexpected command: {argv}")
+
+
+class _SequenceOracleRunner(CommandRunner):
+    """Fake Oracle with a sequence of failed or successful invocations."""
+
+    def __init__(
+        self,
+        outcomes: Sequence[CommandError | str],
+        source_env: Mapping[str, str],
+    ) -> None:
+        """Initialize the deterministic remote contention sequence."""
+        super().__init__(source_env)
+        self.outcomes = list(outcomes)
+        self.commands: list[tuple[str, ...]] = []
+        self.watch_paths: list[Path] = []
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Return or raise the next configured Oracle transport outcome."""
+        del cwd, env, timeout, input_text, check, max_output
+        argv = tuple(str(value) for value in args)
+        self.commands.append(argv)
+        if watch_path is None:
+            pytest.fail("Oracle invocation must provide a watched output path")
+        self.watch_paths.append(watch_path)
+        if not self.outcomes:
+            pytest.fail("Oracle outcome sequence was exhausted")
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, CommandError):
+            raise outcome
+        watch_path.write_text(outcome, encoding="utf-8")
+        return CommandResult(argv, 0, b"", "")
+
+
+def _remote_busy_failure(output: str = "ERROR: busy\n") -> CommandError:
+    """Return one completed Oracle subprocess failure for remote contention."""
+    return CommandError(
+        "command failed (1): oracle: ERROR: busy",
+        returncode=1,
+        stdout=output,
+    )
+
+
+def _remote_environment() -> dict[str, str]:
+    """Return the minimal environment that selects Oracle remote mode."""
+    return {"ORACLE_REMOTE_HOST": "oracle.example:9473"}
+
+
+def test_invoke_oracle_retries_remote_busy_then_preserves_request(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Busy rejections retry, then reuse the exact accepted Oracle request."""
+    runner = _SequenceOracleRunner(
+        [_remote_busy_failure(), _remote_busy_failure(), "raw"],
+        _remote_environment(),
+    )
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    delays: list[float] = []
+
+    assert (
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (),
+            MAX_ORACLE_ATTACHMENTS,
+            _sleep=delays.append,
+            _random_value=lambda: 0.0,
+        )
+        == "raw"
+    )
+
+    assert delays == pytest.approx([0.75, 1.5])
+    assert len(runner.commands) == 3
+    assert runner.commands[1:] == [runner.commands[0], runner.commands[0]]
+    assert runner.watch_paths == [runner.watch_paths[0]] * 3
+    diagnostics = capsys.readouterr().err
+    assert "attempt 1" in diagnostics
+    assert "attempt 2" in diagnostics
+    assert "0.75s" in diagnostics
+    assert "1.50s" in diagnostics
+
+
+def test_remote_busy_delays_are_exponential_capped_and_jittered() -> None:
+    """Delay selection is deterministic to test and bounded at its cap."""
+    delays = [
+        _remote_busy_delay(retry_number, lambda: 1.0)
+        for retry_number in range(1, REMOTE_BUSY_MAX_RETRIES + 1)
+    ]
+
+    assert delays == pytest.approx([1.0, 2.0, 4.0, 8.0, 16.0, 30.0])
+    for retry_number, delay in enumerate(delays, start=1):
+        nominal = min(
+            REMOTE_BUSY_INITIAL_DELAY_SECONDS * (2 ** (retry_number - 1)),
+            REMOTE_BUSY_MAX_DELAY_SECONDS,
+        )
+        low = _remote_busy_delay(retry_number, lambda: 0.0)
+        assert low == pytest.approx(nominal * REMOTE_BUSY_JITTER_MIN)
+        assert delay <= nominal * REMOTE_BUSY_JITTER_MAX
+        assert low < delay
+
+
+def test_remote_busy_budget_exhaustion_is_bounded(tmp_path: Path) -> None:
+    """The final busy response fails without an unbudgeted extra sleep."""
+    runner = _SequenceOracleRunner(
+        [_remote_busy_failure()] * (REMOTE_BUSY_MAX_RETRIES + 1),
+        _remote_environment(),
+    )
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    delays: list[float] = []
+
+    with pytest.raises(LooprError, match="retry budget exhausted"):
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (),
+            MAX_ORACLE_ATTACHMENTS,
+            _sleep=delays.append,
+            _random_value=lambda: 0.5,
+        )
+
+    assert len(runner.commands) == REMOTE_BUSY_MAX_RETRIES + 1
+    assert len(delays) == REMOTE_BUSY_MAX_RETRIES
+
+
+@pytest.mark.parametrize(
+    ("environment", "output"),
+    [
+        pytest.param(_remote_environment(), "ERROR: unauthorized\n", id="unauthorized"),
+        pytest.param(
+            _remote_environment(),
+            "ERROR: busy while the browser is running\n",
+            id="accepted-run-error",
+        ),
+        pytest.param({"NOT_REMOTE": "1"}, "ERROR: busy\n", id="local-busy"),
+    ],
+)
+def test_only_remote_busy_is_retryable(
+    environment: dict[str, str],
+    output: str,
+    tmp_path: Path,
+) -> None:
+    """Unrelated failures and local errors remain fail-fast."""
+    runner = _SequenceOracleRunner(
+        [CommandError("command failed", returncode=1, stdout=output)],
+        environment,
+    )
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    delays: list[float] = []
+
+    with pytest.raises(LooprError, match="command failed"):
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (),
+            MAX_ORACLE_ATTACHMENTS,
+            _sleep=delays.append,
+            _random_value=lambda: 0.0,
+        )
+
+    assert len(runner.commands) == 1
+    assert delays == []
+
+
+def test_remote_busy_backoff_resets_for_the_next_invocation(tmp_path: Path) -> None:
+    """A successful request does not leak its retry count to the next one."""
+    runner = _SequenceOracleRunner(
+        [_remote_busy_failure(), "first", _remote_busy_failure(), "second"],
+        _remote_environment(),
+    )
+    delays: list[float] = []
+
+    for index in range(2):
+        writer = TemporaryFileWriter(tmp_path / f"oracle-{index}", runner)
+        assert (
+            _invoke(
+                runner,
+                writer,
+                tmp_path,
+                "prompt",
+                (),
+                MAX_ORACLE_ATTACHMENTS,
+                _sleep=delays.append,
+                _random_value=lambda: 0.0,
+            )
+            == ("first", "second")[index]
+        )
+
+    assert delays == pytest.approx([0.75, 0.75])
 
 
 @pytest.mark.parametrize(

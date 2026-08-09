@@ -51,6 +51,49 @@ def test_gh_env_preserves_ordinary_authentication_sources() -> None:
     assert environment["GH_CONFIG_DIR"] == "gh-config-dir"
 
 
+def test_oracle_env_preserves_remote_transport_configuration() -> None:
+    """Oracle receives supported remote settings without putting tokens in argv."""
+    runner = CommandRunner({
+        "ORACLE_HOME_DIR": "oracle-home",
+        "ORACLE_REMOTE_HOST": "oracle.example:9473",
+        "ORACLE_REMOTE_TOKEN": "remote-token-value",
+    })
+
+    environment = runner.oracle_env()
+
+    assert environment["ORACLE_HOME_DIR"] == "oracle-home"
+    assert environment["ORACLE_REMOTE_HOST"] == "oracle.example:9473"
+    assert environment["ORACLE_REMOTE_TOKEN"] == "remote-token-value"
+    assert runner.redact("remote-token-value") == "[REDACTED]"
+
+
+def test_command_error_keeps_bounded_redacted_completed_output(tmp_path: Path) -> None:
+    """Retry classifiers can inspect failed streams without exposing secrets."""
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "API_TOKEN": "command-secret-value",
+    })
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import sys; "
+            "sys.stdout.write('stdout: command-secret-value'); "
+            "sys.stderr.write('stderr: command-secret-value'); "
+            "raise SystemExit(7)"
+        ),
+    ]
+
+    with pytest.raises(CommandError) as captured:
+        runner.run(command, cwd=tmp_path, env=runner.base_env(), timeout=5)
+
+    error = captured.value
+    assert error.returncode == 7
+    assert error.stdout == "stdout: [REDACTED]"
+    assert error.stderr == "stderr: [REDACTED]"
+    assert "command-secret-value" not in str(error)
+
+
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:
     """Output growth past the configured bound terminates the command."""
     runner = CommandRunner({"PATH": os.environ["PATH"]})

@@ -34,7 +34,21 @@ class CommandResult:
 
 
 class CommandError(RuntimeError):
-    """A redacted subprocess failure."""
+    """A redacted subprocess failure with optional completed-process output."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        returncode: int | None = None,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        """Initialize one failure, preserving optional bounded output metadata."""
+        super().__init__(message)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class CommandRunner:
@@ -155,6 +169,9 @@ class CommandRunner:
             "DBUS_SESSION_BUS_ADDRESS",
             "ORACLE_BROWSER_PROFILE_DIR",
             "ORACLE_CHATGPT_ACCOUNT_EMAIL",
+            "ORACLE_HOME_DIR",
+            "ORACLE_REMOTE_HOST",
+            "ORACLE_REMOTE_TOKEN",
         })
 
     def run(
@@ -241,7 +258,12 @@ class CommandRunner:
             )
             command = self.redact(" ".join(argv))
             message = f"command failed ({proc.returncode}): {command}: {detail[:2000]}"
-            raise CommandError(message)
+            raise CommandError(
+                message,
+                returncode=proc.returncode,
+                stdout=self.redact(stdout.decode("utf-8", "replace")),
+                stderr=stderr,
+            )
         return result
 
     def _await_completion(
