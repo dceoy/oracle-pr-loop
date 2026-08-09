@@ -123,6 +123,33 @@ def test_oracle_remote_token_only_in_config_file_is_still_redacted(
     assert runner.redact(f"token={config_only_token}") == "token=[REDACTED]"
 
 
+def test_oracle_remote_token_from_env_is_trimmed_before_registration() -> None:
+    """A whitespace-padded env token registers as the trimmed value Oracle uses."""
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "ORACLE_REMOTE_TOKEN": " remote-secret-token ",
+    })
+
+    assert runner.contains_secret("remote-secret-token")
+    assert runner.redact("token=remote-secret-token") == "token=[REDACTED]"
+
+
+def test_oracle_remote_token_from_env_whitespace_only_is_not_registered() -> None:
+    """A whitespace-only env token is not a secret, matching Oracle's trimming.
+
+    Oracle authenticates with no token in this case, so registering the
+    raw whitespace string as a secret would make `redact()` rewrite every
+    run of matching whitespace in unrelated output.
+    """
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "ORACLE_REMOTE_TOKEN": "    ",
+    })
+
+    assert runner.contains_secret("    ") is False
+    assert runner.redact("a    b") == "a    b"
+
+
 def test_oracle_config_remote_token_is_trimmed_before_registration(
     tmp_path: Path,
 ) -> None:
@@ -356,6 +383,30 @@ def test_oracle_config_comment_stripping_is_string_aware(tmp_path: Path) -> None
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
     assert runner.oracle_config_remote_host == "https://10.0.0.9:9473"
+
+
+def test_oracle_config_block_comment_inside_a_key_does_not_splice_identifiers(
+    tmp_path: Path,
+) -> None:
+    """A block comment cannot bridge two token halves into one key.
+
+    Oracle's own `JSON5.parse` treats a comment as token-separating
+    trivia, so `remote/*x*/Host` is two bare identifiers, not one
+    `remoteHost` key, and its config loader rejects the file, falling
+    back to an empty config. Silently deleting the comment here would
+    instead splice the halves together and see a declared `remoteHost`
+    that Oracle itself never loads.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remote/*x*/Host: '10.0.0.9:9473' } }",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
 
 
 def test_oracle_config_with_unterminated_block_comment_fails_closed(

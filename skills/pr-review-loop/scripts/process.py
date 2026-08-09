@@ -68,7 +68,11 @@ def _strip_json5_comments(text: str) -> str:
     quote style is not mistaken for the start of a comment.
 
     Returns:
-        text with every such comment removed.
+        text with every `//` comment removed and every `/* */` block
+        comment replaced by a single space, so a block comment can never
+        splice two tokens (e.g. an unquoted key) together the way JSON5's
+        own tokenizer -- which treats comments as trivia between tokens,
+        not as zero-width -- never would.
 
     Raises:
         ValueError: text ends inside an unterminated `'`/`"`-delimited
@@ -104,6 +108,7 @@ def _strip_json5_comments(text: str) -> str:
             continue
         if char == "/" and index + 1 < length and text[index + 1] == "*":
             index = _skip_json5_block_comment(text, index, length)
+            result.append(" ")
             continue
         result.append(char)
         index += 1
@@ -377,7 +382,8 @@ class CommandRunner:
         self.secrets = {
             value
             for key, value in self.source_env.items()
-            if value
+            if key != "ORACLE_REMOTE_TOKEN"
+            and value
             and len(value) >= MIN_SECRET_LENGTH
             and any(
                 marker in key.upper()
@@ -393,6 +399,19 @@ class CommandRunner:
                 )
             )
         }
+        # Registered from its normalized form only: Oracle's own resolver
+        # trims this value before use, so a whitespace-only token
+        # authenticates as no token at all and must not become a
+        # registered secret (e.g. redacting every run of matching
+        # whitespace in Oracle's output).
+        normalized_remote_token = normalize_oracle_remote_value(
+            self.source_env.get("ORACLE_REMOTE_TOKEN")
+        )
+        if (
+            normalized_remote_token
+            and len(normalized_remote_token) >= MIN_SECRET_LENGTH
+        ):
+            self.secrets.add(normalized_remote_token)
         self._oracle_config_remote_error: LooprError | None = None
         self._oracle_config_remote_host: str | None = None
         try:

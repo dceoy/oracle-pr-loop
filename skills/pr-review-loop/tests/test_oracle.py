@@ -1463,6 +1463,39 @@ def test_oracle_invocation_survives_json5_config_with_local_only_settings(
     assert "--browser-manual-login" in oracle_argv
 
 
+def test_oracle_invocation_ignores_comment_spliced_remote_host_key(
+    tmp_path: Path,
+) -> None:
+    """A block comment cannot splice `remote`/`Host` into one declared key.
+
+    Oracle's own `JSON5.parse` treats the comment as token-separating
+    trivia, so `remote/*x*/Host` is two bare identifiers rather than one
+    `remoteHost` key; Oracle's config loader rejects the file and falls
+    back to an empty config. pr-review-loop must likewise not infer
+    remote mode from it and must still pass `--browser-manual-login`.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remote/*x*/Host: '10.0.0.9:9473' } }",
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+
+
 def test_oracle_invocation_accepts_config_host_matching_padded_env_host(
     tmp_path: Path,
 ) -> None:
