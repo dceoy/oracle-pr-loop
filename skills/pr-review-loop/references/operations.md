@@ -41,16 +41,18 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-GitHub connector use depends on the ChatGPT account connected to Oracle's persistent browser profile. The review prompt begins with `@GitHub` and requests supplemental, advisory context; there is no separate `pr-review-loop` connector-selection flag, attachment, or verdict field. The attached snapshot, patch, instruction files, and exact identity remain authoritative, and the deterministic attachment-only path remains valid when the connector is unavailable or unauthorized.
+The current Oracle browser command submits ordinary prompt text and files; it has no browser-control or app-selection/invocation-inspection interface. A pasted `@GitHub` is therefore only literal text, not evidence that ChatGPT selected the GitHub app. The guaranteed `review` path remains attachment-only. Do not claim connector support from a response that merely mentions GitHub or outside context.
 
-To verify the connector-enabled path in an Oracle-enabled environment, use a disposable or otherwise appropriate test PR because `review` publishes a GitHub review:
+To perform a manual connector smoke test in an Oracle-enabled environment, use a disposable or otherwise appropriate test PR because `review` publishes a GitHub review:
 
 1. Connect and authorize GitHub in the ChatGPT account used by Oracle's persistent browser profile.
 2. Choose a test PR whose correct assessment requires a known repository value outside the attached changed files, such as an unchanged caller or related test.
-3. Run `python3 skills/pr-review-loop/scripts/cli.py review --pr <TEST_PR>` and verify the ChatGPT UI shows an actual GitHub app invocation and the returned review uses that outside context. A response that merely mentions GitHub is not evidence of invocation.
-4. Verify the returned `repository`, `pr_number`, `base_sha`, and `head_sha` exactly match the attached snapshot and inspect the published review's commit anchor.
-5. Disconnect or unauthorize GitHub and repeat the review. Where ChatGPT permits fallback, the attachment-only review must still complete; an Oracle/UI operational error must remain fail-closed and be documented as such.
-6. If literal `@GitHub` text does not invoke the app, record the minimal UI or upstream Oracle interaction required and do not claim the connector-enabled acceptance criterion is met.
+3. In the ChatGPT composer, open the app/mention picker and select GitHub so the composer renders a real GitHub app token or chip. Do not type or paste `@GitHub` as plain text; that does not select the app.
+4. Submit the review prompt and attachments in the selected app turn, then verify the ChatGPT UI records an actual GitHub app/tool invocation and that the returned review uses the known outside context. A response that merely mentions GitHub is not evidence of invocation.
+5. Verify the returned `repository`, `pr_number`, `base_sha`, and `head_sha` exactly match the attached snapshot and inspect the published review's commit anchor.
+6. Disconnect or unauthorize GitHub and repeat the test. Where ChatGPT permits fallback, the attachment-only review must still complete; an Oracle/UI operational error must remain fail-closed and be documented as such.
+
+The current Oracle command cannot perform steps 3–4 or inspect their result. Automating or verifying this path requires an upstream Oracle browser-control capability; until that exists and a live smoke test succeeds, Issue #50's connector-invocation acceptance criterion remains open.
 
 ## Recovery
 
