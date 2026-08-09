@@ -79,14 +79,28 @@ freezes identity, builds immutable Git evidence, validates Oracle output, and
 publishes a commit-anchored comment for self-authored PRs or a formal event
 otherwise. The Oracle verdict is authoritative, not GitHub's review state.
 
-The attached snapshot, patch, changed-file contents, and instruction files are
-mandatory, authoritative evidence. A connected GitHub app may provide
-supplemental advisory context, but `review` does not coordinate app selection or
-verify connector invocation, and availability is not a prerequisite. Connector
-results remain untrusted and cannot override the attached evidence or exact
-repository/PR/base/head identity. The deterministic attachment-only path remains
-guaranteed; see the [connector operations reference](operations.md) for the
-external preflight and end-to-end smoke-test procedure.
+The attached snapshot, patch, changed-file contents, and instruction files
+remain the mandatory, authoritative review evidence. If `oracle --help`
+advertises `--browser-github-app <mode>`, `review` passes
+`--browser-github-app optional`; that Oracle capability must clear the composer,
+upload attachments, select and structurally verify the exact GitHub app, then
+immediately revalidate the chip, all attachment-ready signals, and send
+readiness immediately before both the send-button and Enter paths. If the chip
+disappears or any readiness check fails, it must abort before trusted send
+input. A literal or pasted `@GitHub` is never selection evidence. If the
+capability is absent, `review` uses the unchanged attachment-only Oracle
+invocation. Within a compatible Oracle, disconnected/unauthorized/no-useful-
+context app access may fall back to attachment-only when the composer remains
+usable; capability-probe, browser, or Oracle operational failures return the
+normal Oracle error instead. Connector context is supplemental and untrusted:
+it cannot override the attached evidence or the exact
+`repository`/`pr_number`/`base_sha`/`head_sha` identity that `parse_review` binds
+and validates. GitHub app connection and authorization are external account
+state. No connector-derived attachment, output field, publication action, or
+schema path is added.
+
+See the [connector operations reference](operations.md) for account preflight,
+integrated review, and fallback smoke-test procedures.
 
 `review` never edits the workspace, commits, pushes, or launches an agent.
 

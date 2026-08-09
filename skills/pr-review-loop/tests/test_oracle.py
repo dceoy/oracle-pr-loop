@@ -17,13 +17,14 @@ from scripts.oracle import (
     MAX_ORACLE_ARG_BYTES,
     MAX_ORACLE_ATTACHMENTS,
     PROMPT,
+    _oracle_supports_github_app,
     build_bootstrap_bundle,
     build_review_bundle,
     invoke_oracle,
     parse_bootstrap,
     parse_review,
 )
-from scripts.process import CommandResult, CommandRunner
+from scripts.process import CommandError, CommandResult, CommandRunner
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -205,6 +206,25 @@ def test_parse_review_rejects_identity_mismatch(field: str, value: object) -> No
         parse_review(payload, pull_request)
 
     assert captured.value.category == "oracle_identity"
+
+
+def test_connector_context_cannot_extend_trusted_review_schema() -> None:
+    """Supplemental connector material cannot add a second trusted data path."""
+    pull_request = _sample_pr()
+    payload = _review_payload(
+        pull_request,
+        connector_context={
+            "repository": "other/repository",
+            "pr_number": 999,
+            "base_sha": SHA_B,
+            "head_sha": SHA_A,
+        },
+    )
+
+    with pytest.raises(LooprError) as captured:
+        parse_review(payload, pull_request)
+
+    assert captured.value.category == "oracle_schema"
 
 
 def test_review_prompt_does_not_claim_literal_connector_invocation() -> None:
@@ -575,10 +595,18 @@ class _FakeIssueGitHub:
 class _FakeOracleRunner(CommandRunner):
     """Fake the Oracle subprocess by writing a fixed payload to watch_path."""
 
-    def __init__(self, payload: str) -> None:
+    def __init__(
+        self,
+        payload: str,
+        *,
+        help_output: str = "",
+        help_stderr: bytes = b"",
+    ) -> None:
         """Initialize a fake Oracle transport with one fixed raw response."""
         super().__init__()
         self.payload = payload
+        self.help_output = help_output
+        self.help_stderr = help_stderr
         self.commands: list[tuple[str, ...]] = []
 
     def run(
@@ -598,11 +626,122 @@ class _FakeOracleRunner(CommandRunner):
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
         if argv and argv[0] == "oracle":
+            if argv == ("oracle", "--help"):
+                return CommandResult(
+                    argv,
+                    0,
+                    self.help_output.encode(),
+                    "",
+                    self.help_stderr,
+                )
             if watch_path is None:
                 pytest.fail("Oracle invocation must provide a watched output path")
             watch_path.write_text(self.payload, encoding="utf-8")
             return CommandResult(argv, 0, b"", "")
         pytest.fail(f"unexpected command: {argv}")
+
+
+def test_oracle_capability_gate_adds_post_upload_app_mode(
+    tmp_path: Path,
+) -> None:
+    """Supported Oracle receives the capability without local target handoff flags."""
+    runner = _FakeOracleRunner("{}", help_output="--browser-github-app <mode>")
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    prompt = "Review the attached evidence."
+
+    raw = invoke_oracle(
+        runner,
+        writer,
+        tmp_path,
+        "heavy",
+        prompt,
+        (),
+        "supported-turn",
+        max_attachments=MAX_ORACLE_ATTACHMENTS,
+        github_app_mode="optional",
+    )
+
+    assert raw == "{}"
+    assert runner.commands[0] == ("oracle", "--help")
+    command = runner.commands[1]
+    assert command[command.index("--browser-github-app") + 1] == "optional"
+    assert "--remote-chrome" not in command
+    assert "--browser-tab" not in command
+    assert command[command.index("--prompt") + 1] == prompt
+    assert "@GitHub" not in command[command.index("--prompt") + 1]
+
+
+def test_unsupported_oracle_keeps_attachment_only_arguments(tmp_path: Path) -> None:
+    """An older Oracle falls back without receiving an unknown option."""
+    runner = _FakeOracleRunner("{}", help_output="--browser-github-appx <mode>")
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+
+    invoke_oracle(
+        runner,
+        writer,
+        tmp_path,
+        "heavy",
+        "Review the attached evidence.",
+        (),
+        "attachment-only",
+        max_attachments=MAX_ORACLE_ATTACHMENTS,
+        github_app_mode="optional",
+    )
+
+    assert runner.commands[0] == ("oracle", "--help")
+    command = runner.commands[1]
+    assert "--browser-github-app" not in command
+
+
+def test_oracle_capability_probe_failure_is_operational(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed capability probe cannot be reinterpreted as a review result."""
+    runner = _FakeOracleRunner("{}")
+
+    def failed_probe(*_args: object, **_kwargs: object) -> CommandResult:
+        probe_error = "help probe failed"
+        raise CommandError(probe_error)
+
+    monkeypatch.setattr(runner, "run", failed_probe)
+
+    with pytest.raises(LooprError, match="could not inspect Oracle GitHub-app"):
+        _oracle_supports_github_app(runner, tmp_path)
+
+
+def test_oracle_capability_probe_rejects_invalid_stderr(tmp_path: Path) -> None:
+    """Capability matching cannot consume lossy stderr bytes."""
+    runner = _FakeOracleRunner(
+        "{}",
+        help_output="--browser-github-app <mode>",
+        help_stderr=b"\xff",
+    )
+
+    with pytest.raises(LooprError, match="not valid UTF-8"):
+        _oracle_supports_github_app(runner, tmp_path)
+
+
+def test_oracle_without_app_mode_does_not_probe_or_change_arguments(
+    tmp_path: Path,
+) -> None:
+    """Bootstrap and ordinary callers preserve the original Oracle command."""
+    runner = _FakeOracleRunner("{}", help_output="--browser-github-app <mode>")
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+
+    invoke_oracle(
+        runner,
+        writer,
+        tmp_path,
+        "heavy",
+        "Review the attached evidence.",
+        (),
+        "attachment-only",
+        max_attachments=MAX_ORACLE_ATTACHMENTS,
+    )
+
+    assert len(runner.commands) == 1
+    assert "--browser-github-app" not in runner.commands[0]
 
 
 def test_bootstrap_bundle_rejects_excessive_instruction_file_inventory(

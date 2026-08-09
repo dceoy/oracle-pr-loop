@@ -6,7 +6,7 @@ import json
 import os
 import stat
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from .models import (
     EXIT_ORACLE,
@@ -34,12 +34,14 @@ MAX_PATCH_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_ATTACHMENTS_BYTES = 20 * 1024 * 1024
 MAX_ORACLE_OUTPUT = 4 * 1024 * 1024
+MAX_ORACLE_HELP_OUTPUT = 128 * 1024
 MAX_REVIEW_BODY_BYTES = 60_000
 CORE_BUNDLE_FILES = 4
 MAX_ORACLE_ATTACHMENTS = MAX_CHANGED_FILES + MAX_INSTRUCTION_FILES + CORE_BUNDLE_FILES
 MAX_ORACLE_ARG_BYTES = 256 * 1024
 BOOTSTRAP_CORE_BUNDLE_FILES = 2
 MAX_BOOTSTRAP_ATTACHMENTS = MAX_INSTRUCTION_FILES + BOOTSTRAP_CORE_BUNDLE_FILES
+ORACLE_GITHUB_APP_FLAG = "--browser-github-app"
 TOP_KEYS = {
     "schema_version",
     "repository",
@@ -437,6 +439,65 @@ def _validate_oracle_command(command: list[str]) -> None:
         )
 
 
+def _oracle_supports_github_app(runner: CommandRunner, repo_dir: Path) -> bool:
+    """Detect the optional Oracle capability without sending a prompt.
+
+    Returns:
+        ``True`` when Oracle advertises the exact post-upload app-selection flag.
+
+    Raises:
+        LooprError: Oracle help could not be inspected safely.
+    """
+    try:
+        result = runner.run(
+            ("oracle", "--help"),
+            cwd=repo_dir,
+            env=runner.oracle_env(),
+            timeout=30,
+            max_output=MAX_ORACLE_HELP_OUTPUT,
+        )
+    except CommandError as exc:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle",
+            f"could not inspect Oracle GitHub-app capability: {exc}",
+        ) from exc
+    try:
+        stdout = result.stdout.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle",
+            "Oracle capability output is not valid UTF-8",
+        ) from exc
+    raw_stderr = result.stderr_bytes
+    if raw_stderr is None:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle",
+            "Oracle capability stderr was unavailable for strict validation",
+        )
+    try:
+        stderr = raw_stderr.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle",
+            "Oracle capability output is not valid UTF-8",
+        ) from exc
+    if runner.contains_secret(result.stdout) or runner.contains_secret(raw_stderr):
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle",
+            "Oracle capability output contained a credential",
+        )
+    return any(
+        token == ORACLE_GITHUB_APP_FLAG
+        or token.startswith(f"{ORACLE_GITHUB_APP_FLAG}=")
+        for token in f"{stdout}\n{stderr}".split()
+    )
+
+
 def _snapshot(pull_request: PullRequest) -> JsonObject:
     """Return the stable pull-request metadata snapshot.
 
@@ -721,6 +782,7 @@ def invoke_oracle(
     slug: str,
     *,
     max_attachments: int,
+    github_app_mode: Literal["optional"] | None = None,
 ) -> str:
     """Invoke Oracle once and return its raw, bounded, credential-free output.
 
@@ -754,9 +816,10 @@ def invoke_oracle(
         slug,
         "--write-output",
         str(raw_path),
-        "--prompt",
-        prompt,
     ]
+    if github_app_mode == "optional" and _oracle_supports_github_app(runner, repo_dir):
+        command.extend((ORACLE_GITHUB_APP_FLAG, github_app_mode))
+    command.extend(("--prompt", prompt))
     for attachment in attachments:
         command.extend(("--file", str(attachment)))
     _validate_oracle_command(command)

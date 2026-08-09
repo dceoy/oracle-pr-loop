@@ -64,6 +64,7 @@ def _generate_review(
         attachments,
         slug,
         max_attachments=MAX_ORACLE_ATTACHMENTS,
+        github_app_mode="optional",
     )
     return parse_review(raw, pull_request)
 
