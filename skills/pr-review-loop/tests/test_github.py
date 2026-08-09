@@ -1507,6 +1507,52 @@ def test_client_diff_anchors_drops_a_head_tree_attribute_off_the_worktree(
     assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
 
 
+def test_client_diff_anchors_ignores_a_local_override_of_a_head_tree_diff_unset(
+    tmp_path: Path,
+) -> None:
+    """A local `info/attributes` rule cannot unmask a tracked `-diff` path.
+
+    `$GIT_DIR/info/attributes` outranks a tree passed via `check-attr
+    --source`, so a local rule forcing `diff` back to `set` for a path the
+    head tree marks `-diff` could otherwise make `paths_with_diff_unset`
+    miss it -- not merely drop a valid anchor, but keep one GitHub's
+    create-review API would reject, since GitHub never resolves attributes
+    from this clone's `$GIT_DIR`. `diff_anchors` must still drop every
+    anchor for such a path while keeping anchors for an ordinary file
+    changed in the same commit.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "masked-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.txt").write_text("line1\nline2\nline3\n")
+    (repo / "other.py").write_text("alpha\n")
+    _git(git, ["add", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".gitattributes").write_text("file.txt -diff\n")
+    (repo / "file.txt").write_text("line1\nCHANGED\nline3\n")
+    (repo / "other.py").write_text("BRAVO\n")
+    _git(git, ["add", ".gitattributes", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".git" / "info" / "attributes").write_text("file.txt diff\n")
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(
+        base, head, paths=("file.txt", "other.py", ".gitattributes")
+    )
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors if path == "file.txt"} == (
+        set()
+    )
+    assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
+
+
 def test_client_diff_anchors_degrades_to_no_anchors_without_check_attr_source(
     tmp_path: Path,
 ) -> None:

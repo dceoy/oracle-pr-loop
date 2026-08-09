@@ -6,6 +6,7 @@ import json
 import operator
 import os
 import re
+import tempfile
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -894,50 +895,43 @@ class _ImmutableGitMixin:
             return True
         return b"\0" in data
 
-    def paths_with_diff_unset(
+    def _check_attr_diff_isolated(
         self, sha: str, paths: frozenset[str], *, max_output: int
-    ) -> frozenset[str]:
-        """Return every path whose `diff` attribute is `unset` in the tree at sha.
+    ) -> bytes:
+        """Run `check-attr --source=sha diff` against an isolated Git directory.
 
-        `--source=sha` resolves tracked `.gitattributes` blobs from the
-        frozen commit tree itself, not the ambient worktree, so a checkout
-        left on an unrelated ref (for example, still on the PR's base while
-        its head declares `<path> -diff`) cannot hide an attribute the
-        reviewed tree actually declares. `-c core.attributesFile=/dev/null`
-        closes the same default-global-attributes gap `patch()` closes,
-        since `check-attr` consults that config key regardless of
-        `--source`. `$GIT_DIR/info/attributes` has no equivalent override
-        and still applies on top of `--source`, so a local rule there can
-        make this report `unset` for a path neither tree actually marks
-        that way; that only ever drops an anchor GitHub would have
-        accepted, never keeps one it would reject, so it stays on the safe
-        side of the same trade-off `blob_is_binary` already makes. A path
-        this reports `unset` for is one GitHub's own diff can render as
-        binary/non-diffable, independent of whatever textual hunk
-        `patch()` produced under the worktree's own attributes.
-
-        `--source` itself requires Git 2.40; an older `check-attr` rejects
-        it as an unknown option and the command fails before reporting
-        anything, and this skill's public contract requires only "Git",
-        with no minimum version. Treating every candidate path as `unset`
-        when the command fails is the same fail-closed answer
-        `blob_is_binary` gives an unreadable blob: it only ever drops
-        anchors this call cannot verify, instead of raising a precondition
-        error that would abort an otherwise publishable review.
+        The isolated directory is a throwaway bare repository whose
+        `objects/info/alternates` points at this clone's real object store
+        (resolved from `git rev-parse --git-common-dir`), so `--source` can
+        resolve sha's tree while no local `$GIT_DIR/info/attributes` --
+        this clone's own or a linked worktree's shared one -- exists to
+        contend with it.
 
         Returns:
-            The subset of paths whose `diff` attribute resolves to `unset`
-            at sha, or every path given when `check-attr` itself failed.
-
-        Raises:
-            LooprError: `check-attr` returned a malformed or non-UTF-8
-                `-z` record.
+            The command's raw `-z`-delimited stdout.
         """
-        if not paths:
-            return frozenset()
-        try:
-            output = self.git_bytes(
+        common_dir = Path(
+            self
+            .git_bytes(["rev-parse", "--git-common-dir"], max_output=4096)
+            .decode("utf-8", "strict")
+            .strip()
+        )
+        if not common_dir.is_absolute():
+            common_dir = self.repo_dir / common_dir
+        objects_dir = common_dir.resolve(strict=True) / "objects"
+        with tempfile.TemporaryDirectory(prefix="looprattrs-") as tmp_dir:
+            isolated_git_dir = Path(tmp_dir) / "attrs.git"
+            self.git_bytes(
+                ["init", "--quiet", "--bare", "--template=", str(isolated_git_dir)],
+                max_output=4096,
+            )
+            alternates = isolated_git_dir / "objects" / "info" / "alternates"
+            alternates.parent.mkdir(parents=True, exist_ok=True)
+            alternates.write_text(f"{objects_dir}\n", encoding="utf-8")
+            return self.git_bytes(
                 [
+                    "--git-dir",
+                    str(isolated_git_dir),
                     "-c",
                     "core.attributesFile=/dev/null",
                     "check-attr",
@@ -950,7 +944,58 @@ class _ImmutableGitMixin:
                 max_output=max_output,
                 input_text="".join(f"{path}\0" for path in paths),
             )
-        except LooprError:
+
+    def paths_with_diff_unset(
+        self, sha: str, paths: frozenset[str], *, max_output: int
+    ) -> frozenset[str]:
+        """Return every path whose `diff` attribute is `unset` in the tree at sha.
+
+        `--source=sha` resolves tracked `.gitattributes` blobs from the
+        frozen commit tree itself, not the ambient worktree, so a checkout
+        left on an unrelated ref (for example, still on the PR's base while
+        its head declares `<path> -diff`) cannot hide an attribute the
+        reviewed tree actually declares. `$GIT_DIR/info/attributes` outranks
+        every other attribute source, including a tree passed via
+        `--source`, so a local rule there (present only in this clone, never
+        visible to GitHub) could otherwise force `diff` back to `set` for a
+        path the reviewed tree itself marks `-diff` -- masking a real
+        non-diffable path rather than merely missing one, and letting an
+        anchor through that GitHub's create-review API would reject.
+        `check-attr` therefore never runs against this clone's own Git
+        directory: a throwaway bare repository, created fresh for this call
+        with an empty `info/` directory and an `objects/info/alternates`
+        pointing at this clone's own object store (resolved from `git
+        rev-parse --git-common-dir`, so a linked worktree's shared
+        `info/attributes` is bypassed too, not just this checkout's), gives
+        `--source` a tree to resolve with no local attribute file able to
+        contend with it. `-c core.attributesFile=/dev/null` closes the
+        remaining default-global-attributes gap, since the throwaway
+        directory's own freshly created config cannot be assumed to lack
+        one.
+
+        `--source` itself requires Git 2.40; an older `check-attr` rejects
+        it as an unknown option and the command fails before reporting
+        anything, and this skill's public contract requires only "Git",
+        with no minimum version. Treating every candidate path as `unset`
+        when the command -- or building its isolated Git directory --
+        fails is the same fail-closed answer `blob_is_binary` gives an
+        unreadable blob: it only ever drops anchors this call cannot
+        verify, instead of raising a precondition error that would abort
+        an otherwise publishable review.
+
+        Returns:
+            The subset of paths whose `diff` attribute resolves to `unset`
+            at sha, or every path given when `check-attr` itself failed.
+
+        Raises:
+            LooprError: `check-attr` returned a malformed or non-UTF-8
+                `-z` record.
+        """
+        if not paths:
+            return frozenset()
+        try:
+            output = self._check_attr_diff_isolated(sha, paths, max_output=max_output)
+        except (LooprError, OSError, UnicodeDecodeError):
             return frozenset(paths)
         fields = output.split(b"\0")
         if fields and fields[-1] == b"":
