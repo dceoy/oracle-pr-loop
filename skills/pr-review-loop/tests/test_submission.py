@@ -201,6 +201,38 @@ def test_success_commits_and_pushes_without_runtime_files(tmp_path: Path) -> Non
     assert not (repo / "artifacts").exists()
 
 
+def test_legacy_runtime_artifacts_are_never_staged(tmp_path: Path) -> None:
+    """Pre-existing .pr-review-loop/ files from an older revision stay untracked."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    legacy_dir = repo / ".pr-review-loop" / "runs"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "submit-pr-1-old" / "staged.patch"
+    legacy_file.parent.mkdir(parents=True)
+    legacy_file.write_text("stale audit artifact\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        runner=runner,
+    )
+
+    assert result.resulting_head_sha == result.commit_sha
+    committed_paths = _git(
+        repo,
+        "show",
+        "--name-only",
+        "--pretty=format:",
+        result.commit_sha,
+    ).splitlines()
+    assert not any(path.startswith(".pr-review-loop") for path in committed_paths)
+    assert legacy_file.exists()
+    status = _git(repo, "status", "--porcelain", "--", ".pr-review-loop")
+    assert status.strip().startswith("??")
+
+
 def test_empty_workspace_fails_without_commit(tmp_path: Path) -> None:
     """An unchanged workspace cannot create an empty commit."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)

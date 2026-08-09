@@ -37,6 +37,7 @@ POLL_INTERVAL_SECONDS = 2
 RAW_DIFF_HEADER_FIELD_COUNT = 5
 REMOTE_REF_LINE_FIELD_COUNT = 2
 COMMIT_MESSAGE = "loopr: apply reviewed changes"
+LEGACY_ARTIFACTS_PATHSPEC = ":(exclude,top).pr-review-loop"
 
 
 @dataclass(frozen=True)
@@ -265,7 +266,11 @@ def execute_submit(
         expected_head,
     )
     _require_same_snapshot(initial, github.snapshot(), phase="before staging")
-    _git(command_runner, github.repo_dir, ["add", "--all", "--"])
+    _git(
+        command_runner,
+        github.repo_dir,
+        ["add", "--all", "--", ".", LEGACY_ARTIFACTS_PATHSPEC],
+    )
     _git(
         command_runner,
         github.repo_dir,
