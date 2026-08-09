@@ -18,6 +18,7 @@ from scripts.github import (
     GitHubClient,
     IssueClient,
     diff_anchors,
+    diff_base_paths,
     diff_blob_shas,
     resolve_issue_target,
     resolve_target,
@@ -1178,6 +1179,19 @@ def test_diff_anchors_ignores_unsafe_and_unreadable_header_paths() -> None:
     )
 
 
+def test_diff_base_paths_maps_a_rename_to_its_pre_rename_path() -> None:
+    """A rename's head path maps to its own section's base path, not itself."""
+    base_paths = diff_base_paths(
+        SAMPLE_PATCH, frozenset({"file.py", "gone.py", "new.py"})
+    )
+
+    assert base_paths == {
+        "file.py": "file.py",
+        "gone.py": "gone.py",
+        "new.py": "old.py",
+    }
+
+
 def test_diff_anchors_reads_a_header_path_containing_a_space() -> None:
     """Git's tab separator after a spaced path must not look like a control char."""
     patch = (
@@ -1551,6 +1565,45 @@ def test_client_diff_anchors_ignores_a_local_override_of_a_head_tree_diff_unset(
         set()
     )
     assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
+
+
+def test_client_diff_anchors_checks_the_base_side_path_for_a_rename(
+    tmp_path: Path,
+) -> None:
+    """A base-only `-diff` rule on the pre-rename path must still drop anchors.
+
+    `diff_anchors` addresses a rename's anchors, including its `LEFT`
+    lines, under the file's head-side path. A base tree's `-diff` rule is
+    keyed to whatever path it names; a rule such as `old.txt -diff` only
+    matches `old.txt`, never `new.txt`. Checking the base tree's attribute
+    with the head-side path `new.txt` instead of the diff's own base-side
+    path `old.txt` would never match that rule, letting an anchor through
+    that GitHub's create-review API would still refuse because the base
+    tree itself marks the file `-diff`.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "rename-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "old.txt").write_text("line1\nline2\nline3\n")
+    (repo / ".gitattributes").write_text("old.txt -diff\n")
+    _git(git, ["add", "old.txt", ".gitattributes"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "old.txt").rename(repo / "new.txt")
+    (repo / "new.txt").write_text("line1\nCHANGED\nline3\n")
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-am", "rename"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("new.txt",))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert anchors == frozenset()
 
 
 def test_client_diff_anchors_degrades_to_no_anchors_without_check_attr_source(

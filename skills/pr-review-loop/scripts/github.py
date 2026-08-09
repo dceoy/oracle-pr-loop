@@ -399,6 +399,37 @@ def diff_anchors(
     return frozenset(anchors)
 
 
+def diff_base_paths(
+    patch: str, allowed_paths: frozenset[str]
+) -> dict[str, str]:
+    """Map each allowed head path to the base path its own diff section names.
+
+    `diff_anchors` addresses every anchor, including a rename's `LEFT`
+    lines, by the file's head-side path. A rename's base-side path is a
+    different string, so validating that file's `diff` attribute at the
+    base commit against the head-side path would check the wrong
+    `.gitattributes` pattern and miss a base-only `-diff` rule declared
+    for the old name.
+
+    Returns:
+        Each allowed head path mapped to its own section's base path, or
+        to itself when the section names no base path at all (an
+        addition) or the same path on both sides (no rename).
+    """
+    base_paths: dict[str, str] = {}
+    old_path: str | None = None
+    for line in patch.split("\n"):
+        if line.startswith("diff --git "):
+            old_path = None
+        elif line.startswith("--- "):
+            old_path = _header_path(line.removeprefix("--- "), "a/")
+        elif line.startswith("+++ "):
+            head_path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+            if head_path is not None and head_path in allowed_paths:
+                base_paths[head_path] = old_path or head_path
+    return base_paths
+
+
 def diff_blob_shas(
     patch: str, allowed_paths: frozenset[str]
 ) -> dict[str, tuple[str, str]]:
@@ -1426,6 +1457,15 @@ class GitHubClient(_ImmutableGitMixin):
         independently of the worktree, and dropped whenever either tree
         marks it `-diff`.
 
+        A rename's anchors are addressed by the file's head-side path (see
+        `diff_anchors`), but a `-diff` rule the base tree declares for that
+        file is keyed to its base-side path, which can differ from the
+        head-side path across the rename. The base tree is therefore
+        checked with each candidate's own base-side path from
+        `diff_base_paths`, not with the head-side path used to address the
+        anchor, so a base-only rule on the pre-rename name still drops the
+        anchor.
+
         Returns:
             The anchors, restricted to the snapshot's validated changed
             paths, confirmed non-binary by content, and not marked `-diff`
@@ -1458,10 +1498,21 @@ class GitHubClient(_ImmutableGitMixin):
             return binary_by_sha[sha]
 
         candidate_paths = frozenset(path for path, _side, _line in anchors)
-        attribute_forced = self.paths_with_diff_unset(
+        base_paths = diff_base_paths(text, candidate_paths)
+        head_paths_by_base_path: dict[str, list[str]] = {}
+        for head_path in candidate_paths:
+            head_paths_by_base_path.setdefault(
+                base_paths.get(head_path, head_path), []
+            ).append(head_path)
+        base_forced = self.paths_with_diff_unset(
             pull_request.base_sha,
-            candidate_paths,
+            frozenset(head_paths_by_base_path),
             max_output=MAX_ANCHOR_ATTR_BYTES,
+        )
+        attribute_forced = frozenset(
+            head_path
+            for base_path in base_forced
+            for head_path in head_paths_by_base_path[base_path]
         ) | self.paths_with_diff_unset(
             pull_request.head_sha,
             candidate_paths,
