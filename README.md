@@ -13,22 +13,13 @@ independent Oracle/ChatGPT review, starting from an open Issue or existing PR.
 
 `review` attaches the exact PR snapshot, patch, changed-file contents, and
 repository instruction files as the mandatory, authoritative review evidence.
-For an Oracle build that advertises the exact `--browser-github-app`
-capability, the same review invocation asks Oracle to clear the composer,
-upload attachments, select the GitHub app, verify the structured chip
-immediately before sending, and then submit the prompt. A literal or pasted
-`@GitHub` is never selection evidence. If Oracle does not advertise that
-capability, `review` uses the unchanged attachment-only invocation;
-disconnected, unauthorized, or no-useful-context app access is also an
-attachment-only fallback inside compatible Oracle. Capability-probe, browser,
-or Oracle operational failures remain failures, not review verdicts. Any
-connector context is supplemental and untrusted: it cannot override the
-attached evidence or the exact repository/PR/`base_sha`/`head_sha` identity
-validated by the command, and it has no control over review publication. A
-ChatGPT-side preflight (connecting GitHub in Settings and confirming the
-account) is an account prerequisite, distinct from integrated `review`
-execution. GitHub connection and authorization belong to the ChatGPT account
-used by Oracle; they are not managed by this repository.
+The production review prompt starts with `@GitHub`, so ChatGPT may use the
+connected GitHub app for supplemental repository context outside those
+attachments. This does not depend on an Oracle-specific GitHub connector flag
+or capability probe: Oracle only delivers the prompt and attachments through
+its existing browser session. Connector results remain untrusted and cannot
+override the attached evidence, the exact repository/PR/`base_sha`/`head_sha`
+identity, or local review publication.
 
 The [canonical skill workflow](skills/pr-review-loop/SKILL.md) defines how
 hosts coordinate those responsibilities. The [command contract](skills/pr-review-loop/references/command-contracts.md)
@@ -49,6 +40,8 @@ from user intent; users normally do not invoke the Python CLI directly.
 - Git and an authenticated GitHub CLI session;
 - Oracle with Chrome/Chromium and an authenticated browser profile for Issue
   bootstrap and independent review;
+- a ChatGPT account with GitHub connected when supplemental connector context is
+  desired;
 - push access and Git commit identity when submitting changes.
 
 Issue and pull-request workflows require matching same-repository GitHub.com
@@ -61,13 +54,12 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-For the integrated app path, use an Oracle build whose `oracle --help` output
-advertises `--browser-github-app <mode>`, keep its persistent browser profile
-running, and connect/authorize GitHub in ChatGPT before invoking `review`. The
-repository integration is capability-gated; Oracle v0.17.1 and builds without
-that option retain the deterministic attachment-only path. A ChatGPT-side
-preflight is separate account setup, not evidence that integrated `review`
-used the connector. This checkout has not executed the live app-selection E2E.
+No upstream Oracle change is required for GitHub app review integration. The
+review command uses the normal Oracle browser invocation and places `@GitHub`
+at the start of the ChatGPT prompt. If GitHub is disconnected, unauthorized, or
+returns no useful context, the attached evidence remains sufficient wherever
+ChatGPT permits the prompt to continue normally. Oracle/browser operational
+errors remain failures rather than review verdicts.
 
 ## Usage
 

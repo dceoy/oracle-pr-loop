@@ -132,14 +132,6 @@ class AcceptanceReviewRunner(CommandRunner):
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
         if argv and argv[0] == "oracle":
-            if argv == ("oracle", "--help"):
-                return CommandResult(
-                    args=argv,
-                    returncode=0,
-                    stdout=b"Usage: oracle",
-                    stderr="",
-                    stderr_bytes=b"",
-                )
             if watch_path is None:
                 msg = "Oracle invocation must provide a watched output path"
                 raise AssertionError(msg)

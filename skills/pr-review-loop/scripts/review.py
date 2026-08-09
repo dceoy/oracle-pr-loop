@@ -32,6 +32,16 @@ if TYPE_CHECKING:
     from .models import OracleReview, PullRequest
 
 
+def _review_prompt(pull_request: PullRequest) -> str:
+    """Return the trusted review prompt with direct GitHub app invocation."""
+    return "@GitHub\n" + PROMPT.format(
+        repository=pull_request.repository,
+        pr_number=pull_request.number,
+        base_sha=pull_request.base_sha,
+        head_sha=pull_request.head_sha,
+    )
+
+
 def _generate_review(
     command_runner: CommandRunner,
     github: GitHubClient,
@@ -45,12 +55,7 @@ def _generate_review(
         The strictly validated Oracle review.
     """
     attachments = build_review_bundle(command_runner, github, writer, pull_request)
-    prompt = PROMPT.format(
-        repository=pull_request.repository,
-        pr_number=pull_request.number,
-        base_sha=pull_request.base_sha,
-        head_sha=pull_request.head_sha,
-    )
+    prompt = _review_prompt(pull_request)
     slug = (
         f"loopr-review-{pull_request.number}-"
         f"{pull_request.head_sha[:12]}-{uuid.uuid4().hex[:8]}"
@@ -64,7 +69,6 @@ def _generate_review(
         attachments,
         slug,
         max_attachments=MAX_ORACLE_ATTACHMENTS,
-        github_app_mode="optional",
     )
     return parse_review(raw, pull_request)
 

@@ -25,17 +25,12 @@ MIN_SECRET_LENGTH = 4
 
 @dataclass(frozen=True)
 class CommandResult:
-    """A completed bounded command result.
-
-    ``stderr`` is redacted for ordinary diagnostics. ``stderr_bytes`` is kept
-    for callers that must validate the original bounded bytes before parsing.
-    """
+    """A completed bounded command result."""
 
     args: tuple[str, ...]
     returncode: int
     stdout: bytes
     stderr: str
-    stderr_bytes: bytes | None = None
 
 
 class CommandError(RuntimeError):
@@ -239,7 +234,7 @@ class CommandRunner:
                 raise
 
         stderr = self.redact(stderr_bytes.decode("utf-8", "replace"))
-        result = CommandResult(argv, proc.returncode, stdout, stderr, stderr_bytes)
+        result = CommandResult(argv, proc.returncode, stdout, stderr)
         if check and proc.returncode != 0:
             detail = (
                 stderr.strip() or self.redact(stdout.decode("utf-8", "replace")).strip()
