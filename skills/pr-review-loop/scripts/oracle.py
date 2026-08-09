@@ -915,6 +915,7 @@ def invoke_oracle(
             "Oracle attachment count exceeds the command bound",
         )
     raw_path = writer.root / "oracle-raw.json"
+    env = runner.oracle_env()
     command = _oracle_command(
         raw_path,
         thinking_time,
@@ -922,10 +923,10 @@ def invoke_oracle(
         prompt,
         attachments,
         slug,
-        manual_login=False,
+        manual_login=not bool(env.get("ORACLE_REMOTE_HOST")),
     )
     _validate_oracle_command(command)
-    environment = runner.oracle_env()
+    environment = env
     sleep = time.sleep if _sleep is None else _sleep
     random_value = SystemRandom().random if _random_value is None else _random_value
     _run_oracle_with_retries(

@@ -84,7 +84,7 @@ Use `.agents/skills/pr-review-loop` and execute the same common flow. Repository
 
 ### Local Oracle browser
 
-`pr-review-loop` no longer passes `--browser-manual-login` on every Oracle invocation, so local-browser hosts must set `browser.manualLogin: true` in `~/.oracle/config.json` (or `ORACLE_BROWSER_PROFILE_DIR` to relocate the profile); without it, Oracle falls back to its zero-config temporary-profile launcher mode and `bootstrap`/`review` cannot reuse a signed-in session. Existing local-browser setups upgrading past this change must add that config key once. Initialize the persistent profile once, signing in when Chrome opens:
+`pr-review-loop` still passes `--browser-manual-login` on every Oracle invocation unless `ORACLE_REMOTE_HOST` is set in its process environment (see below), so existing local-browser hosts keep reusing their persistent authenticated profile with no config changes required; set `ORACLE_BROWSER_PROFILE_DIR` to relocate that profile. Initialize the persistent profile once, signing in when Chrome opens:
 
 ```console
 oracle --engine browser --browser-manual-login --browser-keep-browser \
@@ -112,7 +112,7 @@ export ORACLE_REMOTE_TOKEN='...'  # token printed by `oracle serve`; it rotates 
 oracle --engine browser --prompt "Reply with ready"
 ```
 
-`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` from its own process environment to every Oracle invocation, so setting them once in the host's environment (or persisting `browser.remoteHost`/`browser.remoteToken` in `~/.oracle/config.json`, for example via `oracle bridge client --write-config`) is enough; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. `ORACLE_REMOTE_TOKEN` is redacted from logs and rejected in attachments and patches by the same credential safeguards as any other known secret.
+`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` to every Oracle invocation, and `ORACLE_REMOTE_HOST` is its only signal for remote transport; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. Export both variables in the environment `pr-review-loop` runs in: persisting `browser.remoteHost`/`browser.remoteToken` only to `~/.oracle/config.json` is not a supported path, since `pr-review-loop` cannot see that file — it would still pass `--browser-manual-login`, and the token would not be redacted from logs or rejected in attachments and patches.
 
 ## Recovery
 

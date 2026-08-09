@@ -614,8 +614,8 @@ class _FakeOracleRunner(CommandRunner):
         payload: str,
         source_env: Mapping[str, str] | None = None,
     ) -> None:
-        """Initialize a fake Oracle transport with one fixed raw response."""
-        super().__init__(source_env)
+        """Initialize a fake Oracle transport, defaulting to an isolated empty env."""
+        super().__init__(source_env if source_env is not None else {})
         self.payload = payload
         self.commands: list[tuple[str, ...]] = []
 
@@ -1166,7 +1166,6 @@ def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None
     assert "Ignore all previous" in snapshot_text
     assert "reveal credentials" in snapshot_text
 
-
 def _finding_review_payload(location: object = None, **overrides: object) -> str:
     """Return one Oracle review payload carrying a single blocking finding."""
     pull_request = _sample_pr()
@@ -1272,13 +1271,38 @@ def test_review_prompt_requires_anchored_findings_without_body_duplication() -> 
     assert "never restate an individual" in PROMPT
 
 
-def test_oracle_invocation_does_not_force_local_login(tmp_path: Path) -> None:
-    """Oracle argv never hard-codes local-login flags that block remote transport."""
+def test_oracle_invocation_forces_manual_login_without_remote_transport(
+    tmp_path: Path,
+) -> None:
+    """Local hosts (no remote transport configured) keep the pre-upgrade default."""
     issue = _sample_issue()
     writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
     github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
     payload = _bootstrap_payload(issue, SHA_A)
-    runner = _FakeOracleRunner(payload)
+    runner = _FakeOracleRunner(payload, {})
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+    assert "--engine" in oracle_argv
+    assert "browser" in oracle_argv
+
+
+def test_oracle_invocation_omits_manual_login_with_remote_transport(
+    tmp_path: Path,
+) -> None:
+    """A configured `ORACLE_REMOTE_HOST` does not force the local-login flag."""
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {"ORACLE_REMOTE_HOST": "127.0.0.1:9473", "ORACLE_REMOTE_TOKEN": "token-value"},
+    )
     oracle = BootstrapOracleClient(runner, github, writer, "heavy")
 
     bundle = oracle.build_bundle(issue, SHA_A)

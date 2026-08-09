@@ -105,6 +105,15 @@ def test_command_error_keeps_bounded_redacted_completed_output(tmp_path: Path) -
     assert "command-secret-value" not in str(error)
 
 
+def test_oracle_remote_token_only_in_config_file_is_not_redacted() -> None:
+    """A token never exported to the environment is invisible to redaction."""
+    runner = CommandRunner({"PATH": os.environ["PATH"]})
+    config_only_token = "config-file-only-secret-token"
+
+    assert not runner.contains_secret(config_only_token)
+    assert runner.redact(f"token={config_only_token}") == f"token={config_only_token}"
+
+
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:
     """Output growth past the configured bound terminates the command."""
     runner = CommandRunner({"PATH": os.environ["PATH"]})
