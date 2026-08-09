@@ -385,6 +385,64 @@ def test_oracle_config_comment_stripping_is_string_aware(tmp_path: Path) -> None
     assert runner.oracle_config_remote_host == "https://10.0.0.9:9473"
 
 
+def test_oracle_config_line_comment_stops_at_u2028_line_separator(
+    tmp_path: Path,
+) -> None:
+    r"""A `//` comment ends at U+2028, one of JSON5's `LineTerminator`s.
+
+    Oracle's own `JSON5.parse` treats U+2028 (and U+2029) as ending a
+    line comment, not just `\r`/`\n`. Treating the `browser` object
+    after it as still-commented text would hide a declared `remoteHost`
+    that Oracle itself loads.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ // comment\u2028"
+        "  browser: { remoteHost: '10.0.0.9:9473', "
+        "remoteToken: 'remote-secret-token' } }",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("remote-secret-token")
+
+
+def test_oracle_config_line_comment_stops_at_u2029_paragraph_separator(
+    tmp_path: Path,
+) -> None:
+    """A `//` comment also ends at U+2029, JSON5's other `LineTerminator`."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ // comment\u2029  browser: { remoteHost: '10.0.0.9:9473' } }",
+        encoding="utf-8",
+    )
+
+
+def test_oracle_config_treats_u2028_as_ordinary_whitespace(
+    tmp_path: Path,
+) -> None:
+    """U+2028 also parses when used as plain inter-token whitespace.
+
+    JSON5's `WhiteSpace` includes U+2028/U+2029 generally, not only as
+    a comment terminator, so a config using either between ordinary
+    tokens is still Oracle-valid and must not be rejected here.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser:\u2028{ remoteHost: '10.0.0.9:9473' } }",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
 def test_oracle_config_block_comment_inside_a_key_does_not_splice_identifiers(
     tmp_path: Path,
 ) -> None:

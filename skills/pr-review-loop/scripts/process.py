@@ -41,6 +41,27 @@ def normalize_oracle_remote_value(value: object) -> str | None:
     return stripped or None
 
 
+def _skip_json5_line_comment(text: str, start: int, length: int) -> tuple[int, bool]:
+    r"""Return the index just past a `//` line comment starting at `start`.
+
+    JSON5's `LineTerminator` -- `\r`, `\n`, U+2028, or U+2029 -- ends the
+    comment. Only `\r`/`\n` are valid JSON whitespace, so a consumed
+    U+2028/U+2029 terminator must not reach `json.loads` verbatim; the
+    caller substitutes a JSON-legal separator for it instead.
+
+    Returns:
+        The index just past the comment, plus past its terminator when
+        one was found before the text ended, and whether such a
+        terminator was found.
+    """
+    index = start + 2
+    while index < length and text[index] not in "\r\n\u2028\u2029":
+        index += 1
+    if index < length:
+        return index + 1, True
+    return index, False
+
+
 def _skip_json5_block_comment(text: str, start: int, length: int) -> int:
     """Return the index just past a `/* */` block comment starting at `start`.
 
@@ -61,18 +82,24 @@ def _skip_json5_block_comment(text: str, start: int, length: int) -> int:
 
 
 def _strip_json5_comments(text: str) -> str:
-    """Remove `//` and `/* */` comments that are outside string literals.
+    r"""Remove `//`/`/* */` comments and normalize JSON5-only whitespace.
 
     Both `"`- and `'`-delimited strings (JSON5 permits single-quoted
     strings) are honored as literal spans, so a `//`/`/*` inside either
-    quote style is not mistaken for the start of a comment.
+    quote style is not mistaken for the start of a comment. U+2028/U+2029
+    are also normalized to a plain space outside strings: JSON5's
+    `WhiteSpace` includes them (as ordinary separators and as the
+    `LineTerminator` a `//` comment ends at), but `json.loads` only
+    accepts `\t`/`\n`/`\r`/space, so either character reaching it verbatim
+    would fail a config Oracle itself parses.
 
     Returns:
-        text with every `//` comment removed and every `/* */` block
-        comment replaced by a single space, so a block comment can never
-        splice two tokens (e.g. an unquoted key) together the way JSON5's
-        own tokenizer -- which treats comments as trivia between tokens,
-        not as zero-width -- never would.
+        text with every `//` comment removed, every `/* */` block comment
+        replaced by a single space (so a block comment can never splice
+        two tokens, e.g. an unquoted key, together the way JSON5's own
+        tokenizer -- which treats comments as trivia between tokens, not
+        as zero-width -- never would), and every stray U+2028/U+2029
+        outside a string replaced by a single space.
 
     Raises:
         ValueError: text ends inside an unterminated `'`/`"`-delimited
@@ -102,15 +129,19 @@ def _strip_json5_comments(text: str) -> str:
             index += 1
             continue
         if char == "/" and index + 1 < length and text[index + 1] == "/":
-            index += 2
-            while index < length and text[index] not in "\r\n":
-                index += 1
+            index, terminated = _skip_json5_line_comment(text, index, length)
+            if terminated:
+                result.append(" ")
             continue
         if char == "/" and index + 1 < length and text[index + 1] == "*":
             index = _skip_json5_block_comment(text, index, length)
             result.append(" ")
             continue
-        result.append(char)
+        # JSON5 `WhiteSpace` includes U+2028/U+2029 outside strings, but
+        # `json.loads` only accepts `\t\n\r `, so a config using either as
+        # ordinary inter-token whitespace (not just as a comment terminator,
+        # handled above) must still be normalized to plain-space here.
+        result.append(" " if char in "\u2028\u2029" else char)
         index += 1
     if string_quote is not None:
         message = "Unterminated JSON5 string literal."
