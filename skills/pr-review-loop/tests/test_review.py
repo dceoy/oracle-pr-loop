@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, override
 
 import pytest
 from scripts import review as review_module
@@ -632,6 +632,66 @@ def test_global_findings_stay_in_the_aggregate_body(
     assert "Overall: changes required." in body
 
 
+@pytest.mark.parametrize(
+    ("oracle_verdict", "expected_findings"),
+    [("APPROVE", ()), ("REQUEST_CHANGES", (finding("F1"),))],
+)
+def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    oracle_verdict: str,
+    expected_findings: tuple[JsonObject, ...],
+) -> None:
+    """``diff_anchors()`` never runs when no finding can be published inline.
+
+    An ``APPROVE`` verdict carries zero findings, and this ``REQUEST_CHANGES``
+    verdict's only finding has a null location; either way, no finding could
+    ever receive an inline anchor, so the diff/blob/attribute validation work
+    in ``diff_anchors()`` must not run at all.
+    """
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
+    install_orchestration_fakes(monkeypatch)
+
+    class VerdictOracleClient(FakeOracleClient):
+        @staticmethod
+        def review(
+            pull_request: PullRequest,
+            _attachments: tuple[Path, ...],
+        ) -> OracleReview:
+            return replace(
+                approve_review(pull_request),
+                verdict=oracle_verdict,
+                blocking_findings=expected_findings,
+                implementation_prompt=("Fix F1." if expected_findings else None),
+            )
+
+    monkeypatch.setattr(review_module, "OracleClient", VerdictOracleClient)
+
+    class ForbidAnchorDiscoveryGitHubClient(FakeGitHubClient):
+        @override
+        def diff_anchors(
+            self,
+            _pull_request: PullRequest,
+        ) -> frozenset[tuple[str, str, int]]:
+            msg = "diff_anchors() must not run when no finding requests a location"
+            raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        review_module, "GitHubClient", ForbidAnchorDiscoveryGitHubClient
+    )
+
+    result = execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        thinking_time="heavy",
+        runner=CommandRunner(),
+    )
+
+    assert result.verdict == oracle_verdict
+
+
 def test_mixed_findings_are_partitioned_without_duplication(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -837,6 +897,60 @@ def test_pre_post_race_blocks_inline_publication(
     assert captured.value.code == EXIT_RACE
     assert FakeGitHubClient.instance is not None
     assert FakeGitHubClient.instance.post_count == 0
+
+
+def test_head_change_during_anchor_discovery_blocks_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A head change while ``diff_anchors()`` runs is caught before the write.
+
+    ``_publication()`` runs the bounded diff plus per-blob/attribute
+    validation subprocesses inside ``diff_anchors()``. The pre-write
+    freshness snapshot must be taken after that work completes, immediately
+    before ``post_review()``, so a drift introduced during anchor discovery
+    is still caught instead of silently posting a review against a commit
+    that is no longer current.
+    """
+    _install_findings(
+        monkeypatch,
+        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
+        frozenset({("file.py", "RIGHT", 7)}),
+    )
+
+    class DriftDuringAnchorsGitHubClient(FakeGitHubClient):
+        """Simulate the PR head changing while `diff_anchors()` runs."""
+
+        def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
+            super().__init__(runner, repo_dir)
+            self._drifted = False
+
+        def snapshot(self) -> PullRequest:
+            """Return the original head until anchor discovery causes drift."""
+            return sample_pr(head_sha=SHA_C if self._drifted else SHA_B)
+
+        def diff_anchors(
+            self,
+            pull_request: PullRequest,
+        ) -> frozenset[tuple[str, str, int]]:
+            self._drifted = True
+            return super().diff_anchors(pull_request)
+
+    monkeypatch.setattr(review_module, "GitHubClient", DriftDuringAnchorsGitHubClient)
+    FakeGitHubClient.snapshots = []
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
+    assert DriftDuringAnchorsGitHubClient.instance is not None
+    assert DriftDuringAnchorsGitHubClient.instance.post_count == 0
 
 
 @pytest.mark.parametrize("verdict", ["APPROVE", "REQUEST_CHANGES"])

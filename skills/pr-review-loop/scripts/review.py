@@ -101,6 +101,7 @@ def execute_review(
             thinking_time,
         )
 
+    body, comments = _publication(github, initial, verdict)
     before_post = github.snapshot()
     if not github.same_snapshot(initial, before_post):
         raise LooprError(
@@ -108,7 +109,6 @@ def execute_review(
             "stale_state",
             "pull request base or head changed before review posting",
         )
-    body, comments = _publication(github, initial, verdict)
     event = github.review_event(initial, verdict.verdict)
     review_id, _ = github.post_review(initial, event, body, comments)
 
@@ -147,10 +147,14 @@ def _publication(
         LooprError: The composed body or the inline comments exceed GitHub's
             body limit.
     """
-    comments, unanchored = _partition_findings(
-        verdict,
-        github.diff_anchors(pull_request),
+    anchors: frozenset[tuple[str, str, int]] = (
+        github.diff_anchors(pull_request)
+        if any(
+            finding.get("location") is not None for finding in verdict.blocking_findings
+        )
+        else frozenset()
     )
+    comments, unanchored = _partition_findings(verdict, anchors)
     body = _aggregate_body(pull_request, verdict, unanchored)
     if len(body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
         raise LooprError(
