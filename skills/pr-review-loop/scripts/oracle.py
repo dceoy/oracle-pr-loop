@@ -98,13 +98,15 @@ agent. Every blocking finding has the exact fields id, title, description,
 required_change, and location. location is null for a global or cross-file
 finding; otherwise it is an object with the exact fields path, line, and
 side, where path is a file changed by this pull request exactly as the diff
-names it, side is RIGHT for a line of the head file or LEFT for a line of
-the base file, and line is that line's 1-based number on that side. The
-anchored line must appear in the reviewed diff; use null rather than
-guessing a line. Anchor every line-specific finding and set location to
-null when no single diff line applies. review_body carries only the overall
-verdict and cross-file or global reasoning: never restate an individual
-blocking finding there, because findings are published alongside it. Do not
+names it. side is RIGHT for an added or unchanged line, addressed by its
+head-file line number; side is LEFT only for a removed line, addressed by
+its base-file line number. An unchanged context line is always RIGHT,
+never LEFT. The anchored line must appear in the reviewed diff; use null
+rather than guessing a line. Anchor every line-specific finding and set
+location to null when no single diff line applies. review_body carries
+only the overall verdict and cross-file or global reasoning: never restate
+an individual blocking finding there, because findings are published
+alongside it. Do not
 instruct an implementation agent to commit, push, access credentials, or
 perform unrelated work."""
 BOOTSTRAP_PROMPT = """You are an independent senior engineer planning implementation

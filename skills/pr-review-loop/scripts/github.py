@@ -338,7 +338,7 @@ def _scan_body_line(
         return
     path = cursor.path
     if path is not None and path in allowed_paths:
-        if marker in {" ", "-"}:
+        if marker == "-":
             anchors.add((path, "LEFT", cursor.old_line))
         if marker in {" ", "+"}:
             anchors.add((path, "RIGHT", cursor.new_line))
@@ -354,12 +354,14 @@ def diff_anchors(
     """Enumerate every `(path, side, line)` GitHub can anchor a comment to.
 
     Only lines that the frozen base-to-head patch itself contains are
-    enumerated: added and context lines on `RIGHT` with their head-file line
-    numbers, removed and context lines on `LEFT` with their base-file line
-    numbers. A file is addressed by the path it has at head, which is the path
-    GitHub's review API expects, so a rename's `LEFT` lines and a deletion's
-    lines stay addressable. Any path outside allowed_paths, and any diff
-    section this scanner cannot read unambiguously, contributes no anchors.
+    enumerated, matching GitHub's own line-comment semantics: added and
+    unchanged/context lines on `RIGHT` with their head-file line numbers, and
+    only removed lines on `LEFT` with their base-file line numbers. A context
+    line is never a valid `LEFT` anchor. A file is addressed by the path it
+    has at head, which is the path GitHub's review API expects, so a rename's
+    `LEFT` lines and a deletion's lines stay addressable. Any path outside
+    allowed_paths, and any diff section this scanner cannot read
+    unambiguously, contributes no anchors.
 
     Returns:
         The anchors the reviewed diff supports.

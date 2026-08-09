@@ -1121,23 +1121,30 @@ index 6666666..7777777 100644
 
 
 def test_diff_anchors_maps_each_line_kind_to_its_own_side() -> None:
-    """Added, removed, and context lines anchor on the side that contains them."""
+    """Added and context lines anchor RIGHT only; only removed lines anchor LEFT."""
     anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py", "gone.py", "new.py"}))
 
     assert anchors == frozenset({
-        ("file.py", "LEFT", 1),
         ("file.py", "RIGHT", 1),
         ("file.py", "LEFT", 2),
         ("file.py", "RIGHT", 2),
-        ("file.py", "LEFT", 3),
         ("file.py", "RIGHT", 3),
         ("gone.py", "LEFT", 1),
         ("gone.py", "LEFT", 2),
         ("new.py", "LEFT", 3),
         ("new.py", "RIGHT", 3),
-        ("new.py", "LEFT", 4),
         ("new.py", "RIGHT", 4),
     })
+
+
+def test_diff_anchors_rejects_a_context_line_as_a_left_anchor() -> None:
+    """A context line is never a valid LEFT anchor, only RIGHT."""
+    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py"}))
+
+    assert ("file.py", "LEFT", 1) not in anchors
+    assert ("file.py", "LEFT", 3) not in anchors
+    assert ("file.py", "RIGHT", 1) in anchors
+    assert ("file.py", "RIGHT", 3) in anchors
 
 
 def test_diff_anchors_excludes_paths_outside_the_validated_inventory() -> None:
@@ -1182,6 +1189,40 @@ def test_client_diff_anchors_reads_the_frozen_base_to_head_diff(
         ("file.py", "LEFT", 1),
         ("file.py", "RIGHT", 1),
     })
+
+
+def test_client_diff_anchors_rejects_a_context_line_as_left(tmp_path: Path) -> None:
+    """A real diff's unchanged context line yields no LEFT anchor for GitHub.
+
+    GitHub's create-review API accepts LEFT only for a removed line; sending
+    it a context line's base-file position produces an HTTP 422 for the whole
+    atomic review, so this must never be treated as a valid anchor.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "context-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\nbeta\ngamma\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("alpha\nBRAVO\ngamma\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert ("file.py", "LEFT", 1) not in anchors
+    assert ("file.py", "LEFT", 3) not in anchors
+    assert ("file.py", "RIGHT", 1) in anchors
+    assert ("file.py", "RIGHT", 3) in anchors
+    assert ("file.py", "LEFT", 2) in anchors
+    assert ("file.py", "RIGHT", 2) in anchors
 
 
 def test_post_review_publishes_inline_comments_in_the_same_request(

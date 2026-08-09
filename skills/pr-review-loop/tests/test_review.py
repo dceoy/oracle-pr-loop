@@ -687,6 +687,29 @@ def test_unanchorable_location_never_attaches_to_another_line(
     assert "Title F1" in github.posted_bodies[0]
 
 
+def test_context_line_left_location_degrades_to_aggregate_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A LEFT location for an unchanged context line is never sent as inline.
+
+    The reviewed diff's anchor set (as `GitHubClient.diff_anchors` would
+    report it) contains this context line only as `RIGHT`, matching GitHub's
+    own review-comment semantics; a proposed `LEFT` location for it must not
+    validate, or GitHub would reject the whole atomic review with HTTP 422.
+    """
+    _install_findings(
+        monkeypatch,
+        (finding("F1", {"path": "file.py", "line": 1, "side": "LEFT"}),),
+        frozenset({("file.py", "RIGHT", 1)}),
+    )
+
+    github = _published(tmp_path)
+
+    assert github.posted_comments[0] == ()
+    assert "Title F1" in github.posted_bodies[0]
+
+
 @pytest.mark.parametrize(
     ("side", "line"),
     [("RIGHT", 12), ("LEFT", 4), ("RIGHT", 5)],

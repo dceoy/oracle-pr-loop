@@ -52,7 +52,9 @@ Each finding contains `id`, `title`, `description`, and `required_change`.
 Each blocking finding is `{id, title, description, required_change, location}`,
 where `location` is `null` for a global or cross-file finding or
 `{path, line, side}` with `side` of `LEFT` (base file) or `RIGHT` (head file)
-for a line-specific one.
+for a line-specific one. `side` is `RIGHT` for an added or unchanged line
+(head file) or `LEFT` for a removed line (base file); an unchanged context line
+is always `RIGHT`, matching GitHub's own review-comment semantics.
 
 The command freezes repository/PR/base/head identity, builds evidence from
 immutable Git objects, validates Oracle output strictly, cleans its private
