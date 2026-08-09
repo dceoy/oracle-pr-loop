@@ -474,6 +474,53 @@ def test_github_client_snapshot_maps_canonical_full_pr_fields(tmp_path: Path) ->
     assert snapshot.is_draft is False
 
 
+def test_github_client_snapshot_rejects_truncated_inventory(tmp_path: Path) -> None:
+    """Review snapshots still reject GitHub's capped changed-file list."""
+    payload = _pr_payload()
+    payload["files"] = [{"path": f"file-{index}.py"} for index in range(100)]
+    payload["changedFiles"] = 101
+    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
+    runner = FakePrGh(payload)
+    client = GitHubClient(runner, repo)
+    client.initialize("21")
+
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+
+    assert captured.value.category == "inventory"
+
+
+def test_github_client_identity_snapshot_omits_review_inventory(
+    tmp_path: Path,
+) -> None:
+    """Submit identity reads do not request review-only file evidence."""
+    payload = _pr_payload()
+    payload["files"] = [{"path": f"file-{index}.py"} for index in range(100)]
+    payload["changedFiles"] = 101
+    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
+    runner = FakePrGh(payload)
+    client = GitHubClient(runner, repo)
+
+    client.initialize_for_submit("21")
+    snapshot = client.identity_snapshot()
+
+    assert snapshot.head_sha == "b" * 40
+    pr_call = next(call for call in runner.gh_calls if call[1] == "pr")
+    fields = pr_call[pr_call.index("--json") + 1]
+    assert set(fields.split(",")) == {
+        "url",
+        "number",
+        "state",
+        "isDraft",
+        "baseRefName",
+        "baseRefOid",
+        "headRefName",
+        "headRefOid",
+        "headRepository",
+        "headRepositoryOwner",
+    }
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

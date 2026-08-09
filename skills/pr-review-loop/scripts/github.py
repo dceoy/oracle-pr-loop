@@ -19,6 +19,7 @@ from .models import (
     JsonValue,
     LooprError,
     PullRequest,
+    PullRequestIdentity,
 )
 from .process import CommandError
 
@@ -38,6 +39,10 @@ MAX_ISSUE_BODY_BYTES = 200_000
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
     "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
+)
+PR_IDENTITY_FIELDS = (
+    "url,number,state,isDraft,baseRefName,baseRefOid,"
+    "headRefName,headRefOid,headRepository,headRepositoryOwner"
 )
 ISSUE_GRAPHQL_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $lastComments: Int!) {
@@ -795,13 +800,8 @@ class GitHubClient(_ImmutableGitMixin):
             LooprError: GitHub's response was malformed, inconsistent, or
                 failed identity validation.
         """
-        data = parse_json_object(
-            self._text(
-                ["pr", "view", self.url, "--json", PR_FIELDS],
-                max_output=8 * 1024 * 1024,
-            ),
-            category="github_schema",
-        )
+        data = self._pull_request_data(PR_FIELDS)
+        identity = self._parse_identity(data, require_open=require_open)
         files_value = data.get("files")
         if not isinstance(files_value, list):
             raise LooprError(
@@ -836,6 +836,77 @@ class GitHubClient(_ImmutableGitMixin):
                 "duplicate changed paths",
             )
 
+        author = require_object(data.get("author"), field="author")
+        author_login = require_string(author.get("login"), field="author.login")
+        if not author_login:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "identity",
+                "pull request author was empty",
+            )
+        pull_request = PullRequest(
+            repository=identity.repository,
+            number=identity.number,
+            url=identity.url,
+            title=require_string(data.get("title"), field="title", allow_empty=True),
+            body=require_string(data.get("body"), field="body", allow_empty=True),
+            author=author_login,
+            state=identity.state,
+            is_draft=identity.is_draft,
+            base_ref=identity.base_ref,
+            base_sha=identity.base_sha,
+            head_ref=identity.head_ref,
+            head_sha=identity.head_sha,
+            head_repository=identity.head_repository,
+            changed_paths=tuple(sorted(paths)),
+            raw=data,
+        )
+        return pull_request
+
+    def identity_snapshot(
+        self,
+        *,
+        require_open: bool = True,
+    ) -> PullRequestIdentity:
+        """Collect and validate PR identity, state, and ref fields only.
+
+        Submit uses this smaller snapshot because GitHub CLI caps the
+        `files` field at 100 entries, while review requires the complete
+        changed-file inventory.
+
+        Returns:
+            The validated pull-request identity and ref snapshot.
+        """
+        return self._parse_identity(
+            self._pull_request_data(PR_IDENTITY_FIELDS),
+            require_open=require_open,
+        )
+
+    def _pull_request_data(self, fields: str) -> JsonObject:
+        """Fetch one bounded GitHub pull-request response.
+
+        Returns:
+            The parsed GitHub pull-request response.
+        """
+        return parse_json_object(
+            self._text(
+                ["pr", "view", self.url, "--json", fields],
+                max_output=8 * 1024 * 1024,
+            ),
+            category="github_schema",
+        )
+
+    def _parse_identity(
+        self,
+        data: JsonObject,
+        *,
+        require_open: bool,
+    ) -> PullRequestIdentity:
+        """Parse and validate the shared PR identity fields.
+
+        Returns:
+            The validated pull-request identity and ref snapshot.
+        """
         head_repository = require_object(
             data.get("headRepository"),
             field="headRepository",
@@ -857,14 +928,10 @@ class GitHubClient(_ImmutableGitMixin):
                 head_repository.get("name"), field="headRepository.name"
             )
             head_repo = f"{owner}/{name}"
-        author = require_object(data.get("author"), field="author")
-        pull_request = PullRequest(
+        identity = PullRequestIdentity(
             repository=self.repository,
             number=require_integer(data.get("number"), field="number"),
             url=require_string(data.get("url"), field="url"),
-            title=require_string(data.get("title"), field="title", allow_empty=True),
-            body=require_string(data.get("body"), field="body", allow_empty=True),
-            author=require_string(author.get("login"), field="author.login"),
             state=require_string(data.get("state"), field="state"),
             is_draft=require_boolean(data.get("isDraft"), field="isDraft"),
             base_ref=require_string(data.get("baseRefName"), field="baseRefName"),
@@ -872,15 +939,14 @@ class GitHubClient(_ImmutableGitMixin):
             head_ref=require_string(data.get("headRefName"), field="headRefName"),
             head_sha=require_string(data.get("headRefOid"), field="headRefOid"),
             head_repository=head_repo,
-            changed_paths=tuple(sorted(paths)),
             raw=data,
         )
-        self._validate_snapshot_identity(pull_request, require_open=require_open)
-        return pull_request
+        self._validate_snapshot_identity(identity, require_open=require_open)
+        return identity
 
     def _validate_snapshot_identity(
         self,
-        pull_request: PullRequest,
+        pull_request: PullRequestIdentity,
         *,
         require_open: bool,
     ) -> None:
@@ -909,12 +975,6 @@ class GitHubClient(_ImmutableGitMixin):
                 EXIT_PRECONDITION,
                 "repository",
                 "fork pull requests are not supported",
-            )
-        if not pull_request.author:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "identity",
-                "pull request author was empty",
             )
         if not SHA_RE.fullmatch(pull_request.base_sha) or not SHA_RE.fullmatch(
             pull_request.head_sha

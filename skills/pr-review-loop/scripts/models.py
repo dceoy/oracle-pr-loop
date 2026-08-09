@@ -47,6 +47,23 @@ class PullRequest:
 
 
 @dataclass(frozen=True)
+class PullRequestIdentity:
+    """An immutable GitHub pull-request identity and ref snapshot."""
+
+    repository: str
+    number: int
+    url: str
+    state: str
+    is_draft: bool
+    base_ref: str
+    base_sha: str
+    head_ref: str
+    head_sha: str
+    head_repository: str
+    raw: JsonObject
+
+
+@dataclass(frozen=True)
 class IssueSnapshot:
     """An immutable GitHub Issue snapshot used to bootstrap implementation work."""
 

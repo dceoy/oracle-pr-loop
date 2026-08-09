@@ -15,7 +15,7 @@ from .models import (
     EXIT_PRECONDITION,
     EXIT_RACE,
     LooprError,
-    PullRequest,
+    PullRequestIdentity,
     SubmitResult,
 )
 from .process import CommandError, CommandRunner
@@ -70,7 +70,7 @@ def execute_submit(
 
     github = GitHubClient(command_runner, repo_dir)
     github.initialize_for_submit(pr_value)
-    initial = github.snapshot()
+    initial = github.identity_snapshot()
     if initial.head_sha != expected_head:
         raise LooprError(
             EXIT_RACE,
@@ -79,7 +79,11 @@ def execute_submit(
         )
 
     _validate_local_workspace(command_runner, github.repo_dir, expected_head)
-    _require_same_snapshot(initial, github.snapshot(), phase="before staging")
+    _require_same_snapshot(
+        initial,
+        github.identity_snapshot(),
+        phase="before staging",
+    )
 
     add_args = ["add", "--all", "--", "."]
     if not _legacy_artifacts_already_ignored(command_runner, github.repo_dir):
@@ -107,7 +111,11 @@ def execute_submit(
             "staged patch metadata contains a known credential value",
         )
     _require_no_known_credentials_in_staged_blobs(command_runner, github)
-    _require_same_snapshot(initial, github.snapshot(), phase="before commit")
+    _require_same_snapshot(
+        initial,
+        github.identity_snapshot(),
+        phase="before commit",
+    )
 
     _require_no_merge_state(command_runner, github.repo_dir)
     _git(
@@ -127,7 +135,11 @@ def execute_submit(
     )
     commit_sha = _require_single_child_commit(github, expected_head)
 
-    _require_same_snapshot(initial, github.snapshot(), phase="before push")
+    _require_same_snapshot(
+        initial,
+        github.identity_snapshot(),
+        phase="before push",
+    )
     remote_head = _remote_head(command_runner, github.repo_dir, initial.head_ref)
     if remote_head != expected_head:
         raise LooprError(
@@ -589,8 +601,8 @@ def _contains_gitlink_change(raw: bytes) -> bool:
 
 
 def _require_same_snapshot(
-    initial: PullRequest,
-    current: PullRequest,
+    initial: PullRequestIdentity,
+    current: PullRequestIdentity,
     *,
     phase: str,
 ) -> None:
@@ -615,9 +627,9 @@ def _require_same_snapshot(
 
 def _poll_result(
     github: GitHubClient,
-    initial: PullRequest,
+    initial: PullRequestIdentity,
     commit_sha: str,
-) -> PullRequest:
+) -> PullRequestIdentity:
     """Wait until GitHub exposes the pushed commit as the PR head.
 
     Transient GitHub read failures are retried within the poll budget;
@@ -632,7 +644,7 @@ def _poll_result(
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     while True:
         try:
-            current = github.snapshot(require_open=False)
+            current = github.identity_snapshot(require_open=False)
         except LooprError as exc:
             if exc.category != "github" or time.monotonic() >= deadline:
                 raise
