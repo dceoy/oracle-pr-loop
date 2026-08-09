@@ -3,26 +3,19 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .github import (
     SHA_RE,
-    normalize_repo,
-    parse_json_object,
-    require_integer,
-    require_object,
-    require_string,
-    resolve_target,
-    validate_ref,
+    GitHubClient,
 )
 from .models import (
     EXIT_GITHUB,
     EXIT_PRECONDITION,
     EXIT_RACE,
-    JsonObject,
     LooprError,
+    PullRequest,
     SubmitResult,
 )
 from .process import CommandError, CommandRunner
@@ -30,10 +23,6 @@ from .process import CommandError, CommandRunner
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-PR_FIELDS = (
-    "url,number,state,isDraft,baseRefName,baseRefOid,"
-    "headRefName,headRefOid,headRepository,headRepositoryOwner"
-)
 MAX_PATCH_BYTES = 20 * 1024 * 1024
 MAX_STAGED_CONTENT_BYTES = MAX_PATCH_BYTES
 MAX_REMOTE_OUTPUT = 1024 * 1024
@@ -47,231 +36,6 @@ REMOTE_REF_LINE_FIELD_COUNT = 2
 COMMIT_MESSAGE = "apply reviewed changes"
 LEGACY_ARTIFACTS_PATH = ".pr-review-loop"
 LEGACY_ARTIFACTS_PATHSPEC = f":(exclude,top){LEGACY_ARTIFACTS_PATH}"
-
-
-@dataclass(frozen=True)
-class SubmissionSnapshot:
-    """The remote pull-request identity and refs used for one submission."""
-
-    repository: str
-    number: int
-    url: str
-    state: str
-    is_draft: bool
-    base_ref: str
-    base_sha: str
-    head_ref: str
-    head_sha: str
-    head_repository: str
-    raw: JsonObject
-
-
-class SubmitGitHubClient:
-    """Read and revalidate a pull request through ordinary GitHub credentials."""
-
-    def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
-        """Initialize an unresolved submission client."""
-        self.runner = runner
-        self.repo_dir = repo_dir.resolve()
-        self.repository = ""
-        self.number = 0
-        self.url = ""
-
-    def initialize(self, pr_value: str) -> None:
-        """Resolve and cross-check the local repository and target PR.
-
-        Raises:
-            LooprError: The repository or target PR is ambiguous, invalid,
-                or unreachable.
-        """
-        root = self._git_text(["rev-parse", "--show-toplevel"]).strip()
-        self.repo_dir = Path(root).resolve()
-        fetch_repo = normalize_repo(self._git_text(["remote", "get-url", "origin"]))
-        push_repo = normalize_repo(
-            self._git_text(["remote", "get-url", "--push", "origin"])
-        )
-        if fetch_repo.lower() != push_repo.lower():
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "origin fetch and push URLs must identify the same repository",
-            )
-        self.repository, self.number, self.url = resolve_target(
-            pr_value,
-            fetch_repo,
-        )
-        if self.repository.lower() != fetch_repo.lower():
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "local origin does not match pull request repository",
-            )
-
-    def _git_text(self, args: Sequence[str]) -> str:
-        try:
-            result = self.runner.run(
-                ["git", *args],
-                cwd=self.repo_dir,
-                env=self.runner.base_env(),
-                max_output=MAX_REMOTE_OUTPUT,
-            )
-            return result.stdout.decode("utf-8", "strict")
-        except (CommandError, UnicodeError) as exc:
-            raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-
-    def _gh_text(self, args: Sequence[str]) -> str:
-        try:
-            result = self.runner.run(
-                ["gh", *args],
-                cwd=self.repo_dir,
-                env=self.runner.gh_env(),
-                max_output=MAX_REMOTE_OUTPUT,
-            )
-            return result.stdout.decode("utf-8", "strict")
-        except (CommandError, UnicodeError) as exc:
-            raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
-
-    def _fetch_snapshot(self) -> SubmissionSnapshot:
-        payload = self._gh_text(["pr", "view", self.url, "--json", PR_FIELDS])
-        data = parse_json_object(payload, category="github_schema")
-        head_repository = require_object(
-            data.get("headRepository"),
-            field="headRepository",
-        )
-        head_owner = require_object(
-            data.get("headRepositoryOwner"),
-            field="headRepositoryOwner",
-        )
-        name_with_owner = head_repository.get("nameWithOwner")
-        if isinstance(name_with_owner, str) and name_with_owner:
-            head_repo = name_with_owner
-        else:
-            owner = require_string(
-                head_owner.get("login"),
-                field="headRepositoryOwner.login",
-            )
-            name = require_string(
-                head_repository.get("name"),
-                field="headRepository.name",
-            )
-            head_repo = f"{owner}/{name}"
-        return SubmissionSnapshot(
-            repository=self.repository,
-            number=require_integer(data.get("number"), field="number"),
-            url=require_string(data.get("url"), field="url"),
-            state=require_string(data.get("state"), field="state"),
-            is_draft=bool(data.get("isDraft")),
-            base_ref=require_string(data.get("baseRefName"), field="baseRefName"),
-            base_sha=require_string(data.get("baseRefOid"), field="baseRefOid"),
-            head_ref=require_string(data.get("headRefName"), field="headRefName"),
-            head_sha=require_string(data.get("headRefOid"), field="headRefOid"),
-            head_repository=head_repo,
-            raw=data,
-        )
-
-    def snapshot(self) -> SubmissionSnapshot:
-        """Return one strictly validated pre-write remote PR snapshot.
-
-        Returns:
-            The validated snapshot, required to be open and non-draft.
-        """
-        snapshot = self._fetch_snapshot()
-        self._validate_identity(snapshot)
-        self._validate_open_state(snapshot)
-        self._validate_shape(snapshot)
-        return snapshot
-
-    def snapshot_after_push(self) -> SubmissionSnapshot:
-        """Return one identity-validated post-write remote PR snapshot.
-
-        State-only changes (for example the PR closing immediately after an
-        accepted push) are not a submission failure, so this variant does
-        not require the PR to remain open or non-draft.
-
-        Returns:
-            The identity- and shape-validated snapshot.
-        """
-        snapshot = self._fetch_snapshot()
-        self._validate_identity(snapshot)
-        self._validate_shape(snapshot)
-        return snapshot
-
-    def _validate_identity(self, snapshot: SubmissionSnapshot) -> None:
-        expected_url = self.url.lower()
-        actual_url = snapshot.url.rstrip("/").lower()
-        if snapshot.number != self.number or actual_url != expected_url:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "identity",
-                "ambiguous pull request identity",
-            )
-
-    @staticmethod
-    def _validate_open_state(snapshot: SubmissionSnapshot) -> None:
-        if snapshot.state != "OPEN" or snapshot.is_draft:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "state",
-                "pull request must be open and non-draft",
-            )
-
-    def _validate_shape(self, snapshot: SubmissionSnapshot) -> None:
-        if snapshot.head_repository.lower() != self.repository.lower():
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "fork pull requests are not supported",
-            )
-        if not _is_sha(snapshot.base_sha) or not _is_sha(snapshot.head_sha):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "sha",
-                "invalid base or head SHA",
-            )
-        validate_ref(snapshot.base_ref)
-        validate_ref(snapshot.head_ref)
-
-    def poll_result(
-        self,
-        initial: SubmissionSnapshot,
-        commit_sha: str,
-    ) -> SubmissionSnapshot:
-        """Wait until GitHub exposes the pushed commit as the PR head.
-
-        Transient GitHub read failures are retried within the poll budget;
-        malformed or schema-invalid responses fail immediately.
-
-        Returns:
-            The confirmed post-push submission snapshot.
-
-        Raises:
-            LooprError: GitHub did not expose the pushed head before the
-                poll deadline, or the PR head diverged to an unrelated commit.
-        """
-        deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
-        while True:
-            try:
-                current = self.snapshot_after_push()
-            except LooprError as exc:
-                if exc.category != "github" or time.monotonic() >= deadline:
-                    raise
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
-            if current.head_sha == commit_sha:
-                return current
-            if current.head_sha != initial.head_sha:
-                raise LooprError(
-                    EXIT_RACE,
-                    "stale_state",
-                    "pull request head changed after push",
-                )
-            if time.monotonic() >= deadline:
-                raise LooprError(
-                    EXIT_GITHUB,
-                    "github",
-                    "GitHub did not expose the pushed head before timeout",
-                )
-            time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def execute_submit(
@@ -297,18 +61,15 @@ def execute_submit(
             fail-closed precondition.
     """
     command_runner = runner or CommandRunner()
-    if not _is_sha(expected_head):
+    if SHA_RE.fullmatch(expected_head) is None:
         raise LooprError(
             EXIT_PRECONDITION,
             "sha",
             "--expected-head must be a full lowercase commit SHA",
         )
 
-    _require_single_push_url(command_runner, repo_dir)
-    repo_root = _repo_root(command_runner, repo_dir)
-
-    github = SubmitGitHubClient(command_runner, repo_root)
-    github.initialize(pr_value)
+    github = GitHubClient(command_runner, repo_dir)
+    github.initialize_for_submit(pr_value)
     initial = github.snapshot()
     if initial.head_sha != expected_head:
         raise LooprError(
@@ -345,7 +106,7 @@ def execute_submit(
             "credentials",
             "staged patch metadata contains a known credential value",
         )
-    _require_no_known_credentials_in_staged_blobs(command_runner, github.repo_dir)
+    _require_no_known_credentials_in_staged_blobs(command_runner, github)
     _require_same_snapshot(initial, github.snapshot(), phase="before commit")
 
     _require_no_merge_state(command_runner, github.repo_dir)
@@ -364,11 +125,7 @@ def execute_submit(
             COMMIT_MESSAGE,
         ],
     )
-    commit_sha = _require_single_child_commit(
-        command_runner,
-        github.repo_dir,
-        expected_head,
-    )
+    commit_sha = _require_single_child_commit(github, expected_head)
 
     _require_same_snapshot(initial, github.snapshot(), phase="before push")
     remote_head = _remote_head(command_runner, github.repo_dir, initial.head_ref)
@@ -378,7 +135,7 @@ def execute_submit(
             "lease_lost",
             "remote branch head changed before push",
         )
-    _reject_gitlink_changes(command_runner, github.repo_dir, commit_sha)
+    _reject_gitlink_changes(github, commit_sha)
 
     ref = f"refs/heads/{initial.head_ref}"
     push_args = [
@@ -407,7 +164,7 @@ def execute_submit(
             push_error=exc,
         )
 
-    resulting = github.poll_result(initial, commit_sha)
+    resulting = _poll_result(github, initial, commit_sha)
     return SubmitResult(
         repository=initial.repository,
         pr_number=initial.number,
@@ -417,46 +174,6 @@ def execute_submit(
         commit_sha=commit_sha,
         pushed_branch=initial.head_ref,
     )
-
-
-def _require_single_push_url(runner: CommandRunner, repo_dir: Path) -> None:
-    try:
-        result = runner.run(
-            ["git", "remote", "get-url", "--push", "--all", "origin"],
-            cwd=repo_dir,
-            env=runner.base_env(),
-            max_output=MAX_REMOTE_OUTPUT,
-        )
-        output = result.stdout.decode("utf-8", "strict")
-    except (CommandError, UnicodeError) as exc:
-        raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-    push_urls = output.splitlines()
-    if len(push_urls) != 1 or not push_urls[0]:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "repository",
-            "origin must have exactly one push URL",
-        )
-
-
-def _repo_root(runner: CommandRunner, repo_dir: Path) -> Path:
-    try:
-        result = runner.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=repo_dir,
-            env=runner.base_env(),
-            max_output=MAX_REMOTE_OUTPUT,
-        )
-        root = result.stdout.decode("utf-8", "strict").strip()
-    except (CommandError, UnicodeError) as exc:
-        raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-    if not root:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "git",
-            "Git returned an empty repository root",
-        )
-    return Path(root).resolve()
 
 
 def _legacy_artifacts_already_ignored(
@@ -589,8 +306,7 @@ def _require_no_merge_state(runner: CommandRunner, repo_dir: Path) -> None:
 
 
 def _require_single_child_commit(
-    runner: CommandRunner,
-    repo_dir: Path,
+    github: GitHubClient,
     expected_head: str,
 ) -> str:
     """Require the new HEAD to be one hook-free commit on expected_head.
@@ -602,14 +318,13 @@ def _require_single_child_commit(
         LooprError: The created commit does not have exactly one parent, or
             its parent is not expected_head.
     """
-    fields = _git_text(
-        runner,
-        repo_dir,
+    fields = github.git_text(
         ["rev-list", "--parents", "-n", "1", "HEAD"],
+        max_output=MAX_REMOTE_OUTPUT,
     ).split()
     if (
         len(fields) != COMMIT_PARENTS_FIELD_COUNT
-        or not _is_sha(fields[0])
+        or SHA_RE.fullmatch(fields[0]) is None
         or fields[1] != expected_head
     ):
         raise LooprError(
@@ -622,7 +337,7 @@ def _require_single_child_commit(
 
 def _require_no_known_credentials_in_staged_blobs(
     runner: CommandRunner,
-    repo_dir: Path,
+    github: GitHubClient,
 ) -> None:
     """Scan bounded staged path metadata and blob contents for credentials.
 
@@ -633,7 +348,7 @@ def _require_no_known_credentials_in_staged_blobs(
     """
     raw = _git(
         runner,
-        repo_dir,
+        github.repo_dir,
         [
             "diff",
             "--cached",
@@ -653,17 +368,15 @@ def _require_no_known_credentials_in_staged_blobs(
         )
     scanned_bytes = 0
     for object_id in _staged_object_ids(raw):
-        object_type = _git_text(
-            runner,
-            repo_dir,
+        object_type = github.git_text(
             ["cat-file", "-t", object_id],
+            max_output=MAX_REMOTE_OUTPUT,
         ).strip()
         if object_type != "blob":
             continue
-        size_text = _git_text(
-            runner,
-            repo_dir,
+        size_text = github.git_text(
             ["cat-file", "-s", object_id],
+            max_output=MAX_REMOTE_OUTPUT,
         ).strip()
         try:
             size = int(size_text)
@@ -683,9 +396,7 @@ def _require_no_known_credentials_in_staged_blobs(
                 "credentials",
                 "staged blob content exceeds the credential scan bound",
             )
-        content = _git(
-            runner,
-            repo_dir,
+        content = github.git_bytes(
             ["cat-file", "blob", object_id],
             max_output=max(1, size),
         )
@@ -723,7 +434,7 @@ def _staged_object_id(parts: list[bytes]) -> str | None:
             "git",
             "Git returned a non-ASCII staged object ID",
         ) from exc
-    if not _is_sha(object_id):
+    if SHA_RE.fullmatch(object_id) is None:
         raise LooprError(
             EXIT_PRECONDITION,
             "git",
@@ -789,8 +500,7 @@ def _staged_object_ids(raw: bytes) -> list[str]:
 
 
 def _reject_gitlink_changes(
-    runner: CommandRunner,
-    repo_dir: Path,
+    github: GitHubClient,
     commit_sha: str,
 ) -> None:
     """Fail closed when the exact candidate commit changes a gitlink.
@@ -799,9 +509,8 @@ def _reject_gitlink_changes(
         LooprError: The commit's diff could not be read, or it changes a gitlink.
     """
     try:
-        result = runner.run(
+        raw = github.git_bytes(
             [
-                "git",
                 "diff-tree",
                 "--no-commit-id",
                 "--raw",
@@ -813,13 +522,11 @@ def _reject_gitlink_changes(
                 commit_sha,
                 "--",
             ],
-            cwd=repo_dir,
-            env=runner.base_env(),
             max_output=MAX_GITLINK_DIFF_BYTES,
         )
-    except CommandError as exc:
+    except LooprError as exc:
         raise LooprError(EXIT_PRECONDITION, "submodule", str(exc)) from exc
-    if _contains_gitlink_change(result.stdout):
+    if _contains_gitlink_change(raw):
         raise LooprError(
             EXIT_PRECONDITION,
             "submodule",
@@ -882,8 +589,8 @@ def _contains_gitlink_change(raw: bytes) -> bool:
 
 
 def _require_same_snapshot(
-    initial: SubmissionSnapshot,
-    current: SubmissionSnapshot,
+    initial: PullRequest,
+    current: PullRequest,
     *,
     phase: str,
 ) -> None:
@@ -904,6 +611,48 @@ def _require_same_snapshot(
     ):
         message = f"pull request base or head changed {phase}"
         raise LooprError(EXIT_RACE, "stale_state", message)
+
+
+def _poll_result(
+    github: GitHubClient,
+    initial: PullRequest,
+    commit_sha: str,
+) -> PullRequest:
+    """Wait until GitHub exposes the pushed commit as the PR head.
+
+    Transient GitHub read failures are retried within the poll budget;
+    malformed or schema-invalid responses fail immediately.
+
+    Returns:
+        The snapshot containing commit_sha as the PR head.
+
+    Raises:
+        LooprError: The remote snapshot is malformed, stale, or unavailable.
+    """
+    deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
+    while True:
+        try:
+            current = github.snapshot(require_open=False)
+        except LooprError as exc:
+            if exc.category != "github" or time.monotonic() >= deadline:
+                raise
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+        if current.head_sha == commit_sha:
+            return current
+        if current.head_sha != initial.head_sha:
+            raise LooprError(
+                EXIT_RACE,
+                "stale_state",
+                "pull request head changed after push",
+            )
+        if time.monotonic() >= deadline:
+            raise LooprError(
+                EXIT_GITHUB,
+                "github",
+                "GitHub did not expose the pushed head before timeout",
+            )
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
@@ -927,7 +676,7 @@ def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
             "remote pull-request branch response was malformed",
         )
     sha = fields[0]
-    if not _is_sha(sha):
+    if SHA_RE.fullmatch(sha) is None:
         raise LooprError(
             EXIT_GITHUB,
             "remote_ref",
@@ -995,7 +744,7 @@ def _remote_matches(
     if len(lines) != 1:
         return None
     remote_sha, separator, remote_ref = lines[0].partition("\t")
-    if separator != "\t" or remote_ref != ref or not _is_sha(remote_sha):
+    if separator != "\t" or remote_ref != ref or SHA_RE.fullmatch(remote_sha) is None:
         return None
     if remote_sha == commit_sha:
         return True
@@ -1115,7 +864,3 @@ def _git_text(
             "git",
             "Git returned non-UTF-8 output",
         ) from exc
-
-
-def _is_sha(value: str) -> bool:
-    return SHA_RE.fullmatch(value) is not None
