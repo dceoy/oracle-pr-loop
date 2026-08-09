@@ -25,7 +25,6 @@ def test_review_result_serializes_stable_schema() -> None:
         github_review_id=42,
         blocking_findings=(),
         implementation_prompt=None,
-        artifacts_dir="/private/review",
     )
 
     payload = result.as_json()
@@ -46,7 +45,6 @@ def test_submit_result_serializes_stable_schema() -> None:
         resulting_head_sha="c" * 40,
         commit_sha="c" * 40,
         pushed_branch="feature",
-        artifacts_dir="/private/submit",
     )
 
     payload = result.as_json()
@@ -66,7 +64,6 @@ def test_bootstrap_result_serializes_stable_schema() -> None:
         base_ref="main",
         base_sha="a" * 40,
         implementation_prompt="Implement the requested change.",
-        artifacts_dir="/private/bootstrap",
     )
 
     payload = result.as_json()
@@ -81,5 +78,4 @@ def test_bootstrap_result_serializes_stable_schema() -> None:
         "base_ref": "main",
         "base_sha": "a" * 40,
         "implementation_prompt": "Implement the requested change.",
-        "artifacts_dir": "/private/bootstrap",
     }

@@ -1,111 +1,36 @@
-"""Private deterministic artifact writes."""
+"""Private command-scoped files used while invoking Oracle."""
 
 from __future__ import annotations
 
-import datetime as dt
+import contextlib
 import json
 import os
 import stat
+import tempfile
 import uuid
-from contextlib import suppress
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import EXIT_PRECONDITION, EXIT_RACE, JsonValue, LooprError
+from .models import EXIT_PRECONDITION, JsonValue, LooprError
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from .process import CommandRunner
 
-_RUN_DIRECTORY_ATTEMPTS = 8
 
-
-def trusted_runs_root(repo_dir: Path, artifacts_dir: Path) -> Path:
-    """Descend to the run root from a trusted anchor without following symlinks.
-
-    `artifacts_dir` is typically a repository-relative path (for example,
-    `.pr-review-loop`), and a checked-out pull request or repository controls
-    its own contents, so a malicious tree could plant a symlink there to
-    redirect artifact writes outside the intended root. Each path component
-    is created fresh or verified to already be a real directory before
-    descending into it, and this applies to every component of
-    `artifacts_dir` itself (not just a `runs` child) so an absolute path, or
-    a symlink anywhere in its ancestry, cannot redirect the run root either.
-    `..` components are rejected outright because they could otherwise walk
-    the trusted anchor back out of it.
-
-    Returns:
-        The trusted `runs` directory under `artifacts_dir`.
-
-    Raises:
-        LooprError: `artifacts_dir` contains a `..` component, or a path
-            component exists but is not a real directory.
-    """
-    if ".." in artifacts_dir.parts:
-        raise LooprError(
-            EXIT_RACE,
-            "artifacts",
-            "artifact directory path may not contain '..'",
-        )
-    if artifacts_dir.is_absolute():
-        anchor = Path(artifacts_dir.parts[0])
-        parts = (*artifacts_dir.parts[1:], "runs")
-    else:
-        anchor = repo_dir.resolve()
-        parts = (*artifacts_dir.parts, "runs")
-    current = anchor
-    for part in parts:
-        current /= part
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            current.mkdir(mode=0o700)
-            continue
-        if not stat.S_ISDIR(info.st_mode):
-            raise LooprError(
-                EXIT_RACE,
-                "artifacts",
-                "artifact directory path contains a non-directory or symlink",
-            )
-    return current
-
-
-def claim_run_directory(repo_dir: Path, artifacts_dir: Path, prefix: str) -> Path:
-    """Atomically claim a collision-resistant, unique run directory.
-
-    Returns:
-        The newly created, exclusively claimed run directory.
-
-    Raises:
-        LooprError: `artifacts_dir` is untrusted, or no unique directory
-            name could be claimed within the retry budget.
-    """
-    root = trusted_runs_root(repo_dir, artifacts_dir)
-    for _ in range(_RUN_DIRECTORY_ATTEMPTS):
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        candidate = root / f"{prefix}-{stamp}-{uuid.uuid4().hex}"
-        try:
-            candidate.mkdir(mode=0o700)
-        except FileExistsError:
-            continue
-        return candidate
-    raise LooprError(
-        EXIT_RACE,
-        "artifacts",
-        "could not allocate a unique run directory",
-    )
-
-
-class ArtifactWriter:
-    """Write redacted artifacts atomically into a private real directory."""
+class TemporaryFileWriter:
+    """Write redacted Oracle inputs atomically into a private temp directory."""
 
     def __init__(self, root: Path, runner: CommandRunner) -> None:
-        """Create and validate the private artifact root.
+        """Validate the command-owned private temporary root.
 
         Raises:
-            LooprError: The directory could not be created, inspected, or is
-                not a private real directory.
+            LooprError: The directory could not be inspected or is not a
+                private real directory.
         """
-        self.root = root.resolve()
+        self.root = root.absolute()
         self.runner = runner
         try:
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -113,8 +38,8 @@ class ArtifactWriter:
         except OSError as exc:
             raise LooprError(
                 EXIT_PRECONDITION,
-                "artifacts",
-                "failed to create or inspect the artifact directory",
+                "temporary_files",
+                "failed to inspect the private temporary directory",
             ) from exc
         if (
             not stat.S_ISDIR(metadata.st_mode)
@@ -123,9 +48,10 @@ class ArtifactWriter:
         ):
             raise LooprError(
                 EXIT_PRECONDITION,
-                "artifacts",
-                "artifact directory must be a private real directory",
+                "temporary_files",
+                "temporary directory must be a private real directory",
             )
+        self.root = self.root.resolve()
 
     def _path(self, relative: str) -> Path:
         """Resolve an artifact path without permitting root escape.
@@ -142,8 +68,8 @@ class ArtifactWriter:
         except (OSError, ValueError) as exc:
             raise LooprError(
                 EXIT_PRECONDITION,
-                "artifacts",
-                "artifact path escaped the private root",
+                "temporary_files",
+                "temporary file path escaped the private root",
             ) from exc
         return path
 
@@ -168,7 +94,7 @@ class ArtifactWriter:
                 "failed to write a private artifact",
             ) from exc
         finally:
-            with suppress(OSError):
+            with contextlib.suppress(OSError):
                 temporary.unlink(missing_ok=True)
         return path
 
@@ -220,3 +146,41 @@ class ArtifactWriter:
                 for key, item in value.items()
             }
         return value
+
+
+@contextmanager
+def temporary_file_writer(
+    runner: CommandRunner,
+    *,
+    prefix: str,
+) -> Generator[TemporaryFileWriter, None, None]:
+    """Create and deterministically clean one private Oracle temp directory.
+
+    Cleanup runs before the context exits and propagates failures so callers
+    can complete all safety checks before performing a GitHub write.
+
+    Yields:
+        A writer rooted in the command-owned temporary directory.
+
+    Raises:
+        LooprError: The temp directory could not be created or cleaned.
+    """
+    try:
+        temporary = tempfile.TemporaryDirectory(prefix=prefix)
+    except OSError as exc:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "temporary_files",
+            "failed to create the private temporary directory",
+        ) from exc
+    try:
+        yield TemporaryFileWriter(Path(temporary.name), runner)
+    finally:
+        try:
+            temporary.cleanup()
+        except OSError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "temporary_files",
+                "failed to clean the private temporary directory",
+            ) from exc

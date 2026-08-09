@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,6 +13,7 @@ from test_submission import GIT, ScenarioRunner, _fixture_repo, _git, _run_proce
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
 
 class MultiplePushUrlRunner(ScenarioRunner):
@@ -427,7 +427,6 @@ def test_multiple_push_urls_fail_before_staging(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -445,14 +444,12 @@ def test_ambiguous_push_failure_accepts_updated_remote(tmp_path: Path) -> None:
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
     remote_head = _git(repo, "ls-remote", str(remote), "refs/heads/feature").split()[0]
     assert remote_head == result.commit_sha
     assert result.resulting_head_sha == result.commit_sha
-    assert (Path(result.artifacts_dir) / "push.json").is_file()
 
 
 def test_known_credential_in_path_fails_before_commit(tmp_path: Path) -> None:
@@ -467,7 +464,6 @@ def test_known_credential_in_path_fails_before_commit(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -485,7 +481,6 @@ def test_closed_pr_after_push_accepts_exact_resulting_head(tmp_path: Path) -> No
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -502,7 +497,6 @@ def test_transient_github_failure_after_push_is_retried(tmp_path: Path) -> None:
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -570,7 +564,6 @@ def test_lease_loss_does_not_write_tags_or_submodule_remotes(tmp_path: Path) -> 
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -585,108 +578,6 @@ def test_lease_loss_does_not_write_tags_or_submodule_remotes(tmp_path: Path) -> 
     assert remote_submodule_head == published_submodule_head
 
 
-def test_previous_artifacts_are_excluded_from_submit(tmp_path: Path) -> None:
-    repo, remote, state, _base, head = _fixture_repo(tmp_path)
-    previous = repo / ".pr-review-loop" / "runs" / "previous"
-    previous.mkdir(parents=True)
-    (previous / "result.json").write_text("{}\n", encoding="utf-8")
-    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
-
-    result = execute_submit(
-        pr_value="1",
-        expected_head=head,
-        repo_dir=repo,
-        artifacts_dir=Path(".pr-review-loop"),
-        runner=ScenarioRunner(repo, remote, state),
-    )
-
-    committed_paths = _git(
-        repo, "ls-tree", "-r", "--name-only", result.commit_sha
-    ).splitlines()
-    assert "file.txt" in committed_paths
-    assert not any(path.startswith(".pr-review-loop/") for path in committed_paths)
-
-
-def test_gitignored_artifact_directory_does_not_block_staging(tmp_path: Path) -> None:
-    """Staging succeeds when Git already ignores the artifact directory.
-
-    Newer Git refuses `git add` when a pathspec argument names an already
-    ignored path, even with exclude magic. Once `.pr-review-loop/` is
-    covered by `.gitignore`, the exclude pathspec must not be passed to the
-    staging command at all -- Git already skips ignored paths under `.`
-    without it.
-    """
-    repo, remote, state, _base, head = _fixture_repo(tmp_path)
-    (repo / ".gitignore").write_text(".pr-review-loop/\n", encoding="utf-8")
-    _git(repo, "add", ".gitignore")
-    _git(repo, "commit", "-m", "ignore artifacts")
-    head = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "push", "origin", "feature")
-    state["headRefOid"] = head
-    previous = repo / ".pr-review-loop" / "runs" / "previous"
-    previous.mkdir(parents=True)
-    (previous / "result.json").write_text("{}\n", encoding="utf-8")
-    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
-
-    result = execute_submit(
-        pr_value="1",
-        expected_head=head,
-        repo_dir=repo,
-        artifacts_dir=Path(".pr-review-loop"),
-        runner=ScenarioRunner(repo, remote, state),
-    )
-
-    committed_paths = _git(
-        repo, "ls-tree", "-r", "--name-only", result.commit_sha
-    ).splitlines()
-    assert "file.txt" in committed_paths
-    assert not any(path.startswith(".pr-review-loop/") for path in committed_paths)
-
-
-def test_tracked_artifact_directory_is_rejected(tmp_path: Path) -> None:
-    repo, remote, state, _base, _head = _fixture_repo(tmp_path)
-    tracked = repo / ".pr-review-loop" / "tracked.txt"
-    tracked.parent.mkdir(parents=True)
-    tracked.write_text("repository content\n", encoding="utf-8")
-    _git(repo, "add", ".pr-review-loop/tracked.txt")
-    _git(repo, "commit", "-m", "track artifact path")
-    head = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "push", "origin", "feature")
-    state["headRefOid"] = head
-    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
-
-    with pytest.raises(LooprError) as captured:
-        execute_submit(
-            pr_value="1",
-            expected_head=head,
-            repo_dir=repo,
-            artifacts_dir=Path(".pr-review-loop"),
-            runner=ScenarioRunner(repo, remote, state),
-        )
-
-    assert captured.value.code == EXIT_PRECONDITION
-    assert captured.value.category == "artifacts"
-
-
-def test_only_previous_artifacts_remain_an_empty_patch(tmp_path: Path) -> None:
-    repo, remote, state, _base, head = _fixture_repo(tmp_path)
-    previous = repo / ".pr-review-loop" / "runs" / "previous"
-    previous.mkdir(parents=True)
-    (previous / "result.json").write_text("{}\n", encoding="utf-8")
-
-    with pytest.raises(LooprError) as captured:
-        execute_submit(
-            pr_value="1",
-            expected_head=head,
-            repo_dir=repo,
-            artifacts_dir=Path(".pr-review-loop"),
-            runner=ScenarioRunner(repo, remote, state),
-        )
-
-    assert captured.value.code == EXIT_PRECONDITION
-    assert captured.value.category == "empty_patch"
-
-
 def test_transient_remote_confirmation_after_push_is_retried(tmp_path: Path) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
@@ -696,7 +587,6 @@ def test_transient_remote_confirmation_after_push_is_retried(tmp_path: Path) -> 
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -717,7 +607,6 @@ def test_expected_remote_head_after_push_error_is_retried(
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -740,7 +629,6 @@ def test_resolved_merge_state_is_rejected_before_commit(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=ScenarioRunner(repo, remote, state),
         )
 
@@ -760,7 +648,6 @@ def test_escaped_credential_in_path_fails_before_commit(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -782,7 +669,6 @@ def test_fallback_accepts_commit_after_recovery_deadline(
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -816,7 +702,6 @@ def test_ref_rebinding_fails_before_staging(
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -875,7 +760,6 @@ def test_forged_tracking_ref_cannot_publish_an_unpublished_gitlink(
             pr_value="1",
             expected_head=expected_head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=ScenarioRunner(repo, remote, state),
         )
 

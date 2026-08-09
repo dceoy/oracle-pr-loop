@@ -1,77 +1,88 @@
-"""Tests for private audit artifact persistence."""
+"""Tests for command-scoped private Oracle files."""
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import stat
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from scripts import artifacts as artifacts_module
-from scripts.artifacts import ArtifactWriter, claim_run_directory
+from scripts.artifacts import TemporaryFileWriter, temporary_file_writer
 from scripts.models import LooprError
 from scripts.process import CommandRunner
 
 
-def test_claim_run_directory_retries_on_collision(
+def test_temporary_file_writer_cleans_up_after_success() -> None:
+    """The command-owned temporary directory is removed on success."""
+    observed: list[Path] = []
+
+    with temporary_file_writer(CommandRunner(), prefix="loopr-test-") as writer:
+        observed.append(writer.root)
+        writer.text("input.txt", "temporary")
+        assert writer.root.is_dir()
+
+    assert observed
+    assert not observed[0].exists()
+
+
+def test_temporary_file_writer_cleans_up_after_error() -> None:
+    """The command-owned temporary directory is removed on ordinary errors."""
+    observed: list[Path] = []
+
+    def fail_inside_context() -> None:
+        with temporary_file_writer(
+            CommandRunner(),
+            prefix="loopr-test-",
+        ) as writer:
+            observed.append(writer.root)
+            message = "stop"
+            raise RuntimeError(message)
+
+    with pytest.raises(RuntimeError):
+        fail_inside_context()
+
+    assert observed
+    assert not observed[0].exists()
+
+
+def test_temporary_file_writer_fails_closed_on_cleanup_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A colliding candidate run directory is retried with a fresh suffix."""
+    """Cleanup errors become command failures before callers can write."""
 
-    class _FixedDateTime(dt.datetime):
-        @classmethod
-        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
-            return cls(2026, 1, 1, tzinfo=tz)
+    class FailingTemporaryDirectory:
+        def __init__(self, **_: object) -> None:
+            self.name = str(tmp_path / "oracle-temp")
+            Path(self.name).mkdir(mode=0o700)
 
-    monkeypatch.setattr(artifacts_module.dt, "datetime", _FixedDateTime)
-    tokens = iter(["aaaaaaaa", "bbbbbbbb"])
+        @staticmethod
+        def cleanup() -> None:
+            message = "cleanup failed"
+            raise OSError(message)
+
     monkeypatch.setattr(
-        artifacts_module.uuid,
-        "uuid4",
-        lambda: SimpleNamespace(hex=next(tokens)),
+        artifacts_module.tempfile,
+        "TemporaryDirectory",
+        FailingTemporaryDirectory,
     )
-    stamp = "20260101T000000Z"
-    prefix = "run"
-    colliding = tmp_path / "artifacts" / "runs" / f"{prefix}-{stamp}-aaaaaaaa"
-    colliding.mkdir(parents=True)
 
-    result = claim_run_directory(tmp_path, Path("artifacts"), prefix)
-
-    assert result.name == f"{prefix}-{stamp}-bbbbbbbb"
-    assert result.is_dir()
-
-
-def test_claim_run_directory_rejects_symlinked_artifacts_component(
-    tmp_path: Path,
-) -> None:
-    """A repository-controlled symlink cannot redirect audit artifacts."""
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (tmp_path / "artifacts").symlink_to(outside, target_is_directory=True)
+    def fail_cleanup() -> None:
+        with temporary_file_writer(CommandRunner(), prefix="loopr-test-"):
+            pass
 
     with pytest.raises(LooprError) as captured:
-        claim_run_directory(tmp_path, Path("artifacts"), "run")
+        fail_cleanup()
 
-    assert captured.value.category == "artifacts"
-    assert not list(outside.iterdir())
-
-
-def test_claim_run_directory_rejects_relative_traversal(tmp_path: Path) -> None:
-    """A relative artifact root cannot escape the checkout."""
-    with pytest.raises(LooprError) as captured:
-        claim_run_directory(tmp_path, Path("../escape"), "run")
-
-    assert captured.value.category == "artifacts"
+    assert captured.value.category == "temporary_files"
 
 
 def test_json_redacts_secrets_before_serialization(tmp_path: Path) -> None:
     """Secrets are redacted from JSON values and keys before escaping."""
     secret = 'abc"def\\ghi'
-    writer = ArtifactWriter(
-        tmp_path / "artifacts",
+    writer = TemporaryFileWriter(
+        tmp_path / "oracle",
         CommandRunner({"SSH_PRIVATE_KEY": secret}),
     )
 
@@ -85,22 +96,22 @@ def test_json_redacts_secrets_before_serialization(tmp_path: Path) -> None:
 
 
 def test_writer_rejects_non_private_root(tmp_path: Path) -> None:
-    """An artifact root writable by group or others is rejected."""
-    root = tmp_path / "artifacts"
+    """A temporary root writable by group or others is rejected."""
+    root = tmp_path / "oracle"
     root.mkdir(mode=0o755)
     root.chmod(0o755)
 
     with pytest.raises(LooprError) as captured:
-        ArtifactWriter(root, CommandRunner())
+        TemporaryFileWriter(root, CommandRunner())
 
-    assert captured.value.category == "artifacts"
+    assert captured.value.category == "temporary_files"
 
 
 def test_writer_rejects_path_escape(tmp_path: Path) -> None:
-    """Relative artifact names cannot escape the private root."""
-    writer = ArtifactWriter(tmp_path / "artifacts", CommandRunner())
+    """Relative temporary names cannot escape the private root."""
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
 
     with pytest.raises(LooprError) as captured:
         writer.text("../outside.txt", "unsafe")
 
-    assert captured.value.category == "artifacts"
+    assert captured.value.category == "temporary_files"

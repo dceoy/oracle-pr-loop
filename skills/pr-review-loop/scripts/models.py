@@ -101,7 +101,6 @@ class ReviewResult:
     github_review_id: int
     blocking_findings: tuple[dict[str, str], ...]
     implementation_prompt: str | None
-    artifacts_dir: str
 
     def as_json(self) -> JsonObject:
         """Return the stable command result schema."""
@@ -118,7 +117,6 @@ class ReviewResult:
                 "github_review_id": self.github_review_id,
                 "blocking_findings": list(self.blocking_findings),
                 "implementation_prompt": self.implementation_prompt,
-                "artifacts_dir": self.artifacts_dir,
             },
         )
 
@@ -134,7 +132,6 @@ class SubmitResult:
     resulting_head_sha: str
     commit_sha: str
     pushed_branch: str
-    artifacts_dir: str
 
     def as_json(self) -> JsonObject:
         """Return the stable command result schema."""
@@ -150,7 +147,6 @@ class SubmitResult:
                 "resulting_head_sha": self.resulting_head_sha,
                 "commit_sha": self.commit_sha,
                 "pushed_branch": self.pushed_branch,
-                "artifacts_dir": self.artifacts_dir,
             },
         )
 
@@ -166,7 +162,6 @@ class BootstrapResult:
     base_ref: str
     base_sha: str
     implementation_prompt: str
-    artifacts_dir: str
 
     def as_json(self) -> JsonObject:
         """Return the stable command result schema."""
@@ -182,6 +177,5 @@ class BootstrapResult:
                 "base_ref": self.base_ref,
                 "base_sha": self.base_sha,
                 "implementation_prompt": self.implementation_prompt,
-                "artifacts_dir": self.artifacts_dir,
             },
         )

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,6 +21,7 @@ from scripts.submit import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
 
 def _git_executable() -> str:
@@ -174,7 +174,7 @@ def _fixture_repo(
     return repo, remote, state, base, head
 
 
-def test_success_commits_pushes_and_records_artifacts(tmp_path: Path) -> None:
+def test_success_commits_and_pushes_without_runtime_files(tmp_path: Path) -> None:
     """A valid patch becomes one commit and the exact remote PR head."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
@@ -184,7 +184,6 @@ def test_success_commits_pushes_and_records_artifacts(tmp_path: Path) -> None:
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -199,10 +198,121 @@ def test_success_commits_pushes_and_records_artifacts(tmp_path: Path) -> None:
         "refs/heads/feature",
     ).split()[0]
     assert remote_head == result.commit_sha
-    artifact_root = Path(result.artifacts_dir)
-    assert (artifact_root / "staged.patch").is_file()
-    recorded = json.loads((artifact_root / "result.json").read_text())
-    assert recorded["commit_sha"] == result.commit_sha
+    assert not (repo / "artifacts").exists()
+
+
+def test_legacy_runtime_artifacts_are_never_staged(tmp_path: Path) -> None:
+    """Pre-existing .pr-review-loop/ files from an older revision stay untracked."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    legacy_dir = repo / ".pr-review-loop" / "runs"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "submit-pr-1-old" / "staged.patch"
+    legacy_file.parent.mkdir(parents=True)
+    legacy_file.write_text("stale audit artifact\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        runner=runner,
+    )
+
+    assert result.resulting_head_sha == result.commit_sha
+    committed_paths = _git(
+        repo,
+        "show",
+        "--name-only",
+        "--pretty=format:",
+        result.commit_sha,
+    ).splitlines()
+    assert not any(path.startswith(".pr-review-loop") for path in committed_paths)
+    assert legacy_file.exists()
+    status = _git(repo, "status", "--porcelain", "--", ".pr-review-loop")
+    assert status.strip().startswith("??")
+
+
+def test_locally_ignored_legacy_artifacts_do_not_break_staging(
+    tmp_path: Path,
+) -> None:
+    """An upgraded checkout with .pr-review-loop/ in .git/info/exclude still submits."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    exclude_path = repo / ".git" / "info" / "exclude"
+    exclude_path.write_text(".pr-review-loop/\n", encoding="utf-8")
+    legacy_dir = repo / ".pr-review-loop" / "runs"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "leftover.txt").write_text("stale\n", encoding="utf-8")
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        runner=runner,
+    )
+
+    assert result.resulting_head_sha == result.commit_sha
+    committed_paths = _git(
+        repo,
+        "show",
+        "--name-only",
+        "--pretty=format:",
+        result.commit_sha,
+    ).splitlines()
+    assert not any(path.startswith(".pr-review-loop") for path in committed_paths)
+
+
+def test_pre_staged_legacy_artifact_fails_before_commit(tmp_path: Path) -> None:
+    """A legacy artifact staged before submit runs cannot be committed."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    legacy_dir = repo / ".pr-review-loop" / "runs"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "leftover.txt"
+    legacy_file.write_text("stale audit artifact\n", encoding="utf-8")
+    _git(repo, "add", "--", ".pr-review-loop")
+    runner = ScenarioRunner(repo, remote, state)
+
+    with pytest.raises(LooprError) as captured:
+        execute_submit(
+            pr_value="1",
+            expected_head=head,
+            repo_dir=repo,
+            runner=runner,
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "legacy_artifacts"
+    assert _git(repo, "rev-parse", "HEAD") == head
+
+
+def test_tracked_legacy_artifact_fails_before_commit(tmp_path: Path) -> None:
+    """A .pr-review-loop path already tracked in history blocks submission."""
+    repo, remote, state, _base, _head = _fixture_repo(tmp_path)
+    tracked_dir = repo / ".pr-review-loop"
+    tracked_dir.mkdir()
+    (tracked_dir / "tracked.txt").write_text("was committed\n", encoding="utf-8")
+    _git(repo, "add", "--", ".pr-review-loop")
+    _git(repo, "commit", "-m", "accidentally track legacy artifact")
+    tracked_head = _git(repo, "rev-parse", "HEAD")
+    state["headRefOid"] = tracked_head
+    _git(repo, "push", "origin", "feature")
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+
+    with pytest.raises(LooprError) as captured:
+        execute_submit(
+            pr_value="1",
+            expected_head=tracked_head,
+            repo_dir=repo,
+            runner=runner,
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "legacy_artifacts"
+    assert _git(repo, "rev-parse", "HEAD") == tracked_head
 
 
 def test_empty_workspace_fails_without_commit(tmp_path: Path) -> None:
@@ -215,7 +325,6 @@ def test_empty_workspace_fails_without_commit(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -236,7 +345,6 @@ def test_stale_remote_head_fails_before_staging(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -270,7 +378,6 @@ def test_lease_loss_does_not_overwrite_remote(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -305,7 +412,6 @@ def test_unresolved_conflict_fails_before_staging(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -324,7 +430,6 @@ def test_local_origin_mismatch_fails_before_staging(tmp_path: Path) -> None:
             pr_value="https://github.com/other/demo/pull/1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -343,7 +448,6 @@ def test_untracked_whitespace_error_fails_before_commit(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -364,7 +468,6 @@ def test_known_credential_in_staged_blob_fails_before_commit(tmp_path: Path) -> 
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -389,7 +492,6 @@ def test_known_credential_in_binary_blob_fails_before_commit(
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -413,7 +515,6 @@ def test_base_advance_after_push_keeps_success(tmp_path: Path) -> None:
         pr_value="1",
         expected_head=head,
         repo_dir=repo,
-        artifacts_dir=tmp_path / "artifacts",
         runner=runner,
     )
 
@@ -434,7 +535,6 @@ def test_malformed_head_ref_fails_before_staging(tmp_path: Path) -> None:
             pr_value="1",
             expected_head=head,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -455,7 +555,6 @@ def test_submit_cli_emits_the_stable_success_schema(
         resulting_head_sha="c" * 40,
         commit_sha="c" * 40,
         pushed_branch="feature",
-        artifacts_dir="/private/run",
     )
 
     def fake_submit(**_kwargs: object) -> SubmitResult:

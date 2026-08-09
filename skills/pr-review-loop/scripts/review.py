@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import sys
 from typing import TYPE_CHECKING
 
-from .artifacts import ArtifactWriter, claim_run_directory
+from .artifacts import temporary_file_writer
 from .github import GitHubClient
 from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
 from .oracle import OracleClient
@@ -21,7 +20,6 @@ def execute_review(
     *,
     pr_value: str,
     repo_dir: Path,
-    artifacts_dir: Path,
     thinking_time: str,
     runner: CommandRunner | None = None,
 ) -> ReviewResult:
@@ -39,17 +37,12 @@ def execute_review(
     github.initialize(pr_value)
     initial = github.snapshot()
     github.ensure_objects(initial)
-    writer = ArtifactWriter(
-        claim_run_directory(
-            repo_dir,
-            artifacts_dir,
-            f"review-pr-{initial.number}-{initial.head_sha[:12]}",
-        ),
+    with temporary_file_writer(
         command_runner,
-    )
-    writer.json("initial-snapshot.json", initial.raw)
-    oracle = OracleClient(command_runner, github, writer, thinking_time)
-    verdict = oracle.review(initial, oracle.build_bundle(initial))
+        prefix=f"pr-review-loop-review-{initial.number}-{initial.head_sha[:12]}-",
+    ) as writer:
+        oracle = OracleClient(command_runner, github, writer, thinking_time)
+        verdict = oracle.review(initial, oracle.build_bundle(initial))
 
     before_post = github.snapshot()
     if not github.same_snapshot(initial, before_post):
@@ -70,10 +63,9 @@ def execute_review(
             "review body with audit footer exceeds GitHub's body limit",
         )
     event = github.review_event(initial, verdict.verdict)
-    review_id, posted = github.post_review(initial, event, body)
+    review_id, _ = github.post_review(initial, event, body)
 
     try:
-        _persist_best_effort(writer, "github-review.json", posted)
         after_post = github.snapshot()
         verified = github.verify_posted(initial, review_id, body)
         _require_fresh_state(github, initial, after_post, verified, event)
@@ -90,48 +82,8 @@ def execute_review(
         github_review_id=review_id,
         blocking_findings=verdict.blocking_findings,
         implementation_prompt=verdict.implementation_prompt,
-        artifacts_dir=str(writer.root),
-    )
-    _persist_best_effort(
-        writer,
-        "result.json",
-        result.as_json(),
-        suppress_interrupts=True,
     )
     return result
-
-
-def _persist_best_effort(
-    writer: ArtifactWriter,
-    relative: str,
-    value: JsonValue,
-    *,
-    suppress_interrupts: bool = False,
-) -> None:
-    """Persist an audit artifact without hiding an already-posted review.
-
-    Before post-write verification, interrupts are re-raised so the surrounding
-    compensation block can dismiss the unreported review. After verification,
-    the caller may suppress every artifact-write failure so the verified review
-    ID is still returned instead of encouraging a duplicate retry.
-    """
-    try:
-        writer.json(relative, value)
-    except LooprError as exc:
-        message = (
-            "pr-review-loop review: warning: failed to persist artifact "
-            f"{relative}: {exc}"
-        )
-        sys.stderr.write(f"{message}\n")
-    except BaseException as exc:
-        if not suppress_interrupts:
-            raise
-        detail = str(exc) or type(exc).__name__
-        message = (
-            "pr-review-loop review: warning: failed to persist artifact "
-            f"{relative}: {detail}"
-        )
-        sys.stderr.write(f"{message}\n")
 
 
 _EXPECTED_REVIEW_STATE = {

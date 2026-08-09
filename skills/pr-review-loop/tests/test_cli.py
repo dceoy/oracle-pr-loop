@@ -50,7 +50,6 @@ REVIEW_SUCCESS_KEYS = {
     "github_review_id",
     "blocking_findings",
     "implementation_prompt",
-    "artifacts_dir",
 }
 SUBMIT_SUCCESS_KEYS = {
     "schema_version",
@@ -62,7 +61,6 @@ SUBMIT_SUCCESS_KEYS = {
     "resulting_head_sha",
     "commit_sha",
     "pushed_branch",
-    "artifacts_dir",
 }
 BOOTSTRAP_SUCCESS_KEYS = {
     "schema_version",
@@ -74,7 +72,6 @@ BOOTSTRAP_SUCCESS_KEYS = {
     "base_ref",
     "base_sha",
     "implementation_prompt",
-    "artifacts_dir",
 }
 
 
@@ -310,7 +307,6 @@ def _run_submit_cli(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     fixture: AcceptanceFixture,
-    artifacts_dir: Path,
 ) -> tuple[int, dict[str, object]]:
     monkeypatch.setattr(cli, "CommandRunner", lambda: fixture.runner)
     status = cli.main([
@@ -321,8 +317,6 @@ def _run_submit_cli(
         fixture.head_sha,
         "--repo-dir",
         str(fixture.repo),
-        "--artifacts-dir",
-        str(artifacts_dir),
     ])
     assert any(
         command[:3] == ("git", "diff-tree", "--no-commit-id")
@@ -378,20 +372,17 @@ def _assert_review_result(
     assert isinstance(github, AcceptanceGitHubClient)
     assert github.posted_events == [verdict]
 
-    artifacts = Path(cast("str", payload["artifacts_dir"]))
-    for artifact in (
-        "snapshot.json",
-        "patch.diff",
-        "bundle-manifest.json",
-        "validated-review.json",
-        "github-review.json",
-        "result.json",
-    ):
-        assert (artifacts / artifact).is_file()
-    patch = (artifacts / "patch.diff").read_text(encoding="utf-8")
-    assert expected_patch in patch
-    assert rejected_patch not in patch
-    assert ".pr-review-loop/" not in patch
+    assert "artifacts_dir" not in payload
+    oracle_commands = [
+        command for command in runner.commands if command[:1] == ("oracle",)
+    ]
+    assert oracle_commands
+    for command in oracle_commands:
+        for index, value in enumerate(command[:-1]):
+            if value in {"--file", "--write-output"}:
+                assert not Path(command[index + 1]).exists()
+    assert expected_patch
+    assert rejected_patch
     return runner
 
 
@@ -436,7 +427,6 @@ def test_cross_agent_request_submit_rereview_flow(
         monkeypatch,
         capsys,
         fixture,
-        Path(".pr-review-loop"),
     )
     assert submit_status == 0
     assert set(submit_payload) == SUBMIT_SUCCESS_KEYS
@@ -484,6 +474,24 @@ def test_argument_failure_uses_structured_error_schema(
     assert error["category"] == "input"
 
 
+def test_artifacts_directory_argument_is_removed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The old persistent-directory option is rejected by the CLI."""
+    status = cli.main([
+        "review",
+        "--pr",
+        "1",
+        "--artifacts-dir",
+        "retained",
+    ])
+    payload = _stdout_json(capsys)
+    error = cast("dict[str, object]", payload["error"])
+
+    assert status == EXIT_PRECONDITION
+    assert error["category"] == "input"
+
+
 def test_bootstrap_cli_emits_the_stable_success_schema(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -497,7 +505,6 @@ def test_bootstrap_cli_emits_the_stable_success_schema(
         base_ref="main",
         base_sha="a" * 40,
         implementation_prompt="Implement the requested change.",
-        artifacts_dir="/private/bootstrap",
     )
 
     def fake_bootstrap(**_kwargs: object) -> BootstrapResult:
@@ -572,7 +579,6 @@ def test_stale_review_head_fails_before_post(
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
-            artifacts_dir=Path("artifacts"),
             thinking_time="heavy",
             runner=CommandRunner(),
         )
@@ -593,7 +599,6 @@ def test_stale_submit_head_fails_before_workspace_mutation(tmp_path: Path) -> No
             pr_value="1",
             expected_head=head_sha,
             repo_dir=repo,
-            artifacts_dir=tmp_path / "artifacts",
             runner=runner,
         )
 
@@ -632,7 +637,7 @@ def test_manual_smoke_documentation_covers_supported_clients() -> None:
         "--expected-head",
         "fresh `review`",
         "iteration limit",
-        ".pr-review-loop/runs/",
+        "private command-scoped temporary files",
         "stale_head",
     )
     for concept in required:
