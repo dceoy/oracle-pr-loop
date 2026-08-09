@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 HUNK_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+INDEX_RE = re.compile(r"\Aindex ([0-9a-f]{40})\.\.([0-9a-f]{40})")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 OWNER_REPO_PART_COUNT = 2
 LS_TREE_FIELD_COUNT = 4
@@ -40,6 +41,8 @@ MAX_ISSUE_COMMENT_BYTES = 20_000
 MAX_ISSUE_COMMENTS_TOTAL_BYTES = 300_000
 MAX_ISSUE_BODY_BYTES = 200_000
 MAX_ANCHOR_PATCH_BYTES = 2 * 1024 * 1024
+MAX_ANCHOR_BLOB_BYTES = 2 * 1024 * 1024
+NULL_SHA = "0" * 40
 BODY_MARKERS = frozenset({" ", "+", "-", "\\"})
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
@@ -392,6 +395,46 @@ def diff_anchors(
             cursor.new_line = int(match.group(2))
             cursor.in_hunk = True
     return frozenset(anchors)
+
+
+def diff_blob_shas(
+    patch: str, allowed_paths: frozenset[str]
+) -> dict[str, tuple[str, str]]:
+    """Map each allowed head path to its base/head full blob object ids.
+
+    `--full-index` makes every file section's `index <old>..<new>` header
+    name the exact pre-image/post-image blob Git diffed, independently of
+    whatever attribute-driven text/binary decision produced the hunks that
+    follow it. A caller can read each id back directly by object id (see
+    `blob_is_binary`) to confirm that content, rather than trusting whatever
+    text/binary call the attribute-influenced hunk already made.
+
+    Returns:
+        Each allowed path's `(old_sha, new_sha)`, using `NULL_SHA` for a
+        side with no blob (an addition or deletion).
+    """
+    shas: dict[str, tuple[str, str]] = {}
+    pending: tuple[str, str] | None = None
+    old_path: str | None = None
+    in_hunk = False
+    for line in patch.split("\n"):
+        marker = line[:1]
+        if in_hunk and marker in BODY_MARKERS:
+            continue
+        in_hunk = False
+        if line.startswith("diff --git "):
+            pending, old_path = None, None
+        elif (match := INDEX_RE.match(line)) is not None:
+            pending = (match.group(1), match.group(2))
+        elif line.startswith("--- "):
+            old_path = _header_path(line.removeprefix("--- "), "a/")
+        elif line.startswith("+++ "):
+            path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+            if path is not None and path in allowed_paths and pending is not None:
+                shas[path] = pending
+        elif HUNK_RE.match(line) is not None:
+            in_hunk = True
+    return shas
 
 
 def parse_json_object(text: str, *, category: str) -> JsonObject:
@@ -818,6 +861,31 @@ class _ImmutableGitMixin:
             )
         return data
 
+    def blob_is_binary(self, sha: str, *, max_output: int) -> bool:
+        """Return whether the blob at sha contains a NUL byte.
+
+        Reading an object by its content-addressed id resolves it straight
+        from the object store, with no attribute lookup of any kind, so no
+        local `diff` attribute override can make binary content read back as
+        text here. A blob Git cannot read, or one too large to sample within
+        max_output, is treated as binary so a caller never trusts anchors
+        tied to it without an actual content check. This deliberately scans
+        further (the whole blob, up to max_output) than Git's own default
+        heuristic (a fixed leading sample) and refuses instead of sampling a
+        prefix when a blob exceeds max_output: both only ever cost a
+        legitimate text file its inline anchors, never risk anchoring a
+        comment GitHub's create-review API would reject.
+
+        Returns:
+            Whether the blob is unreadable, oversized, or contains a NUL
+            byte.
+        """
+        try:
+            data = self.git_bytes(["cat-file", "blob", sha], max_output=max_output)
+        except LooprError:
+            return True
+        return b"\0" in data
+
 
 class GitHubClient(_ImmutableGitMixin):
     """Read PR snapshots and post reviews through trusted CLI commands."""
@@ -1147,12 +1215,23 @@ class GitHubClient(_ImmutableGitMixin):
         local `diff.renameLimit` cannot silently fall back to reporting a
         rename as an unrelated delete-and-add pair, which would replace a
         small rename hunk's anchors with whole-file delete/add anchors.
+        `-c core.attributesFile=/dev/null` closes the global-attributes gap
+        `GIT_CONFIG_GLOBAL` leaves open: Git consults a default global
+        attributes file (`$XDG_CONFIG_HOME/git/attributes`, else
+        `$HOME/.config/git/attributes`) even with no global config present,
+        and a `diff` attribute there can make binary content read back as a
+        textual hunk. `$GIT_DIR/info/attributes` and any system attributes
+        file have no equivalent config override, so `diff_anchors`
+        additionally verifies every anchor's blob by content, independently
+        of any attribute.
 
         Returns:
             The patch's raw bytes.
         """
         return self.git_bytes(
             [
+                "-c",
+                "core.attributesFile=/dev/null",
                 "diff",
                 "--no-color",
                 "--no-ext-diff",
@@ -1176,8 +1255,20 @@ class GitHubClient(_ImmutableGitMixin):
     ) -> frozenset[tuple[str, str, int]]:
         """Enumerate the comment anchors the frozen base-to-head diff supports.
 
+        A local `diff` attribute (from `$GIT_DIR/info/attributes`, global or
+        system attributes, or an uncommitted worktree `.gitattributes` edit)
+        can make `patch()` emit a textual hunk for content GitHub's own diff
+        still treats as binary, since GitHub never sees any attribute source
+        outside the repository's tracked, committed tree. Anchoring a
+        comment to such a hunk would make GitHub's create-review API reject
+        the whole atomic review with a 422, so every anchor's blob is read
+        back by its content-addressed object id — a lookup no attribute
+        source can influence — and dropped unless that content actually
+        lacks a NUL byte.
+
         Returns:
-            The anchors, restricted to the snapshot's validated changed paths.
+            The anchors, restricted to the snapshot's validated changed
+            paths and confirmed non-binary by content.
 
         Raises:
             LooprError: The patch is not UTF-8.
@@ -1191,7 +1282,27 @@ class GitHubClient(_ImmutableGitMixin):
                 "bundle",
                 "patch is not UTF-8",
             ) from exc
-        return diff_anchors(text, frozenset(pull_request.changed_paths))
+        allowed_paths = frozenset(pull_request.changed_paths)
+        anchors = diff_anchors(text, allowed_paths)
+        shas = diff_blob_shas(text, allowed_paths)
+        binary_by_sha: dict[str, bool] = {}
+
+        def is_binary(sha: str) -> bool:
+            if sha == NULL_SHA:
+                return False
+            if sha not in binary_by_sha:
+                binary_by_sha[sha] = self.blob_is_binary(
+                    sha, max_output=MAX_ANCHOR_BLOB_BYTES
+                )
+            return binary_by_sha[sha]
+
+        return frozenset(
+            (path, side, line)
+            for path, side, line in anchors
+            if not is_binary(
+                shas.get(path, (NULL_SHA, NULL_SHA))[1 if side == "RIGHT" else 0]
+            )
+        )
 
     def tracked_paths(self, pull_request: PullRequest) -> tuple[str, ...]:
         """List every tracked UTF-8 path in the frozen head tree.

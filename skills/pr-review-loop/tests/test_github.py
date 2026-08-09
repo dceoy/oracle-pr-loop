@@ -18,6 +18,7 @@ from scripts.github import (
     GitHubClient,
     IssueClient,
     diff_anchors,
+    diff_blob_shas,
     resolve_issue_target,
     resolve_target,
 )
@@ -1331,6 +1332,129 @@ def test_client_diff_anchors_ignores_a_low_repository_local_rename_limit(
 
     assert {(path, side) for path, side, _line in anchors} == {
         ("moved1.py", "RIGHT"),
+    }
+
+
+def test_client_diff_anchors_drops_a_locally_attribute_forced_text_hunk(
+    tmp_path: Path,
+) -> None:
+    """A local `diff` attribute forcing a binary blob to text yields no anchor.
+
+    GitHub only ever resolves `.gitattributes` from the tracked commits it
+    diffs; it has no access to `$GIT_DIR/info/attributes`, so a local rule
+    such as `file.bin diff` can make `patch()` emit a textual hunk for
+    NUL-containing content that GitHub's own diff still renders as binary.
+    Anchoring a comment to such a hunk would make the create-review API
+    reject the whole atomic review with a 422, so `diff_anchors` must read
+    each anchor's blob back by its content-addressed object id and drop it
+    when that content is actually binary, regardless of what local
+    attribute forced a hunk. An ordinary modified file and a deleted file
+    changed in the same commit must both still keep their anchors: a
+    deletion's `index <sha>..0000000` line puts its one real blob id on the
+    old/LEFT side, the opposite side from an added file, so this also
+    guards against the filter checking the wrong side of that pair.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\n")
+    (repo / "gone.py").write_text("one\ntwo\n")
+    _git(git, ["add", "file.py", "gone.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("BRAVO\n")
+    (repo / "file.bin").write_bytes(b"bin\x00ary")
+    (repo / "gone.py").unlink()
+    _git(git, ["add", "file.py", "file.bin", "gone.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".git" / "info" / "attributes").write_text("file.bin diff\n")
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("file.py", "file.bin", "gone.py"))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors} == {
+        ("file.py", "LEFT"),
+        ("file.py", "RIGHT"),
+        ("gone.py", "LEFT"),
+    }
+
+
+def test_client_patch_ignores_a_default_global_attributes_file(
+    tmp_path: Path,
+) -> None:
+    """A default `$HOME/.config/git/attributes` rule cannot force a text hunk.
+
+    Git consults this file even with no `core.attributesFile` config
+    present anywhere, so `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` do not
+    redirect it away. `patch()` must pin `core.attributesFile=/dev/null`
+    directly so a `diff` attribute placed there cannot turn a binary blob
+    into a textual hunk the way `$GIT_DIR/info/attributes` still can
+    (covered instead by the content check in the test above, since no
+    config override reaches that file).
+    """
+    git = shutil.which("git")
+    assert git is not None
+    fake_home = tmp_path / "home"
+    (fake_home / ".config" / "git").mkdir(parents=True)
+    (fake_home / ".config" / "git" / "attributes").write_text("file.bin diff\n")
+    repo = tmp_path / "global-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("BRAVO\n")
+    (repo / "file.bin").write_bytes(b"bin\x00ary")
+    _git(git, ["add", "file.py", "file.bin"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    runner = CommandRunner({**os.environ, "HOME": str(fake_home)})
+    client = GitHubClient(runner, repo)
+    pull_request = _sample_pr(base, head, paths=("file.py", "file.bin"))
+
+    patch = client.patch(pull_request, max_output=1024 * 1024)
+
+    assert b"Binary files /dev/null and b/file.bin differ" in patch
+    anchors = client.diff_anchors(pull_request)
+    assert {(path, side) for path, side, _line in anchors} == {
+        ("file.py", "LEFT"),
+        ("file.py", "RIGHT"),
+    }
+
+
+def test_diff_blob_shas_maps_each_allowed_path_to_its_full_index_ids() -> None:
+    """`diff_blob_shas` reads the `--full-index` header, not any path lookup."""
+    patch = (
+        "diff --git a/file.py b/file.py\n"
+        f"index {'1' * 40}..{'2' * 40} 100644\n"
+        "--- a/file.py\n"
+        "+++ b/file.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "diff --git a/new.py b/new.py\n"
+        "new file mode 100644\n"
+        f"index {'0' * 40}..{'3' * 40}\n"
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+added\n"
+    )
+
+    shas = diff_blob_shas(patch, frozenset({"file.py", "new.py"}))
+
+    assert shas == {
+        "file.py": ("1" * 40, "2" * 40),
+        "new.py": ("0" * 40, "3" * 40),
     }
 
 
