@@ -536,16 +536,16 @@ def test_submit_command_survives_unparseable_oracle_config(
     assert status == 0
 
 
-def test_review_dispatch_surfaces_unparseable_oracle_config_as_structured_error(
+def test_review_dispatch_surfaces_malformed_oracle_config_as_structured_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Reading a broken Oracle config on the Oracle-only path stays structured."""
+    """Reading a malformed remote config on the Oracle-only path stays structured."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +5}',
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +}',
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(tmp_path))

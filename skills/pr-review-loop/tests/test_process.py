@@ -616,10 +616,26 @@ def test_oracle_config_unquoted_key_with_non_ascii_digit_fails_closed(
         _ = runner.oracle_config_remote_host
 
 
-def test_oracle_config_with_unsupported_json5_syntax_fails_closed_on_access(
+def test_oracle_config_with_newer_unicode_identifier_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """A config using JSON5 syntax beyond this module's subset fails closed."""
+    """A key Oracle rejects cannot make this module select remote mode."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remoteHost: '127.0.0.1:9473' }, \U00010d00: 1 }",
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_with_extended_json5_numbers_is_parsed(
+    tmp_path: Path,
+) -> None:
+    """A valid JSON5 number outside plain JSON does not block remote mode."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
@@ -629,11 +645,28 @@ def test_oracle_config_with_unsupported_json5_syntax_fails_closed_on_access(
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
+def test_oracle_config_with_excessive_nesting_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Deep malformed remote config raises a structured precondition error."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    nested = "[" * 500 + "0" + "]" * 500
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": ' + nested + "}",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
     with pytest.raises(LooprError, match="could not be parsed"):
         _ = runner.oracle_config_remote_host
 
 
-def test_oracle_config_with_unsupported_json5_syntax_does_not_break_construction(
+def test_oracle_config_with_extended_json5_syntax_does_not_break_construction(
     tmp_path: Path,
 ) -> None:
     """Construction must not raise, so commands that skip Oracle stay unaffected."""
@@ -650,7 +683,7 @@ def test_oracle_config_with_unsupported_json5_syntax_does_not_break_construction
     assert runner.redact("no secrets here") == "no secrets here"
 
 
-def test_oracle_config_with_unsupported_json5_syntax_and_no_remote_fields_is_ignored(
+def test_oracle_config_with_extended_json5_syntax_and_no_remote_fields_is_ignored(
     tmp_path: Path,
 ) -> None:
     """A local-settings-only config using exotic JSON5 syntax must not block Oracle."""
@@ -674,7 +707,7 @@ def test_oracle_config_with_unsupported_json5_syntax_and_no_remote_fields_is_ign
         '{ browser: { manualLogin: true }, extra: +5, note: "remoteToken" }',
     ],
 )
-def test_unsupported_json5_remote_name_decoys_do_not_block_local_config(
+def test_extended_json5_remote_name_decoys_do_not_block_local_config(
     tmp_path: Path,
     config_text: str,
 ) -> None:
@@ -706,10 +739,10 @@ def test_json5_standard_escapes_in_non_remote_keys_do_not_block_local_config(
     assert runner.contains_secret("anything") is False
 
 
-def test_oracle_config_with_unsupported_json5_syntax_naming_remote_token_fails_closed(
+def test_oracle_config_with_extended_json5_syntax_registers_remote_token(
     tmp_path: Path,
 ) -> None:
-    """An unparseable config naming only `remoteToken` still fails closed."""
+    """A remote token remains registered when unrelated JSON5 syntax is used."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
@@ -719,8 +752,8 @@ def test_oracle_config_with_unsupported_json5_syntax_naming_remote_token_fails_c
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
-    with pytest.raises(LooprError, match="could not be parsed"):
-        _ = runner.oracle_config_remote_host
+    assert runner.oracle_config_remote_host is None
+    assert runner.contains_secret("config-secret-token")
 
 
 def test_oracle_config_comment_stripping_is_string_aware(tmp_path: Path) -> None:
@@ -773,6 +806,10 @@ def test_oracle_config_line_comment_stops_at_u2029_paragraph_separator(
         "{ // comment\u2029  browser: { remoteHost: '10.0.0.9:9473' } }",
         encoding="utf-8",
     )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
 def test_oracle_config_treats_u2028_as_ordinary_whitespace(
@@ -879,15 +916,32 @@ def test_oracle_config_with_unterminated_string_fails_closed(tmp_path: Path) -> 
         _ = runner.oracle_config_remote_host
 
 
-def test_oracle_config_with_unicode_escaped_key_spelling_fails_closed(
+@pytest.mark.parametrize("remote_name", ["remoteHost", "remoteToken"])
+def test_oracle_config_recovers_remote_name_after_malformed_string(
+    tmp_path: Path,
+    remote_name: str,
+) -> None:
+    """A malformed earlier string cannot hide a later remote member."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ bad: '\\8', " + remote_name + ": 'remote-value' }",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_with_unicode_escaped_key_spelling_is_parsed(
     tmp_path: Path,
 ) -> None:
-    r"""A `\uXXXX`-escaped `IdentifierName` spelling still fails closed.
+    r"""A `\uXXXX`-escaped `IdentifierName` spelling is parsed correctly.
 
-    Oracle's `JSON5.parse` resolves `remoteHost` to `remoteHost`, so a
-    literal-text fallback check that misses the escaped spelling would let
-    a config-backed remote host bypass this module's precedence/secret
-    checks entirely.
+    Oracle's `JSON5.parse` resolves `remoteHost` to `remoteHost`, so the
+    dependency-free parser must do the same.
     """
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
@@ -898,20 +952,17 @@ def test_oracle_config_with_unicode_escaped_key_spelling_fails_closed(
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
-    with pytest.raises(LooprError, match="could not be parsed"):
-        _ = runner.oracle_config_remote_host
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
-def test_oracle_config_with_hex_escaped_key_spelling_fails_closed(
+def test_oracle_config_with_hex_escaped_key_spelling_is_parsed(
     tmp_path: Path,
 ) -> None:
-    r"""A `\xHH`-escaped quoted-string spelling still fails closed.
+    r"""A `\xHH`-escaped quoted-string spelling is parsed correctly.
 
     Oracle parses this file with the `json5` package, whose string parser
     accepts `\xHH` hex escapes, so `"remote\x48ost"` resolves to
-    `remoteHost`. A literal-text fallback check that only decodes
-    `\uXXXX` escapes would miss this spelling and let a config-backed
-    remote host bypass this module's precedence/secret checks entirely.
+    `remoteHost`.
     """
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
@@ -922,21 +973,17 @@ def test_oracle_config_with_hex_escaped_key_spelling_fails_closed(
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
-    with pytest.raises(LooprError, match="could not be parsed"):
-        _ = runner.oracle_config_remote_host
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
-def test_oracle_config_with_non_escape_character_key_spelling_fails_closed(
+def test_oracle_config_with_non_escape_character_key_spelling_is_parsed(
     tmp_path: Path,
 ) -> None:
-    r"""A `NonEscapeCharacter`-escaped quoted-string spelling still fails closed.
+    r"""A `NonEscapeCharacter`-escaped quoted-string spelling is parsed.
 
     JSON5's string grammar resolves a backslash before any character it
     does not otherwise recognize as an escape to that character verbatim,
-    so `"remote\Host"` also spells `remoteHost`. A fallback check that only
-    decodes `\uXXXX`/`\xHH` escapes would miss this spelling and let a
-    config-backed remote host bypass this module's precedence/secret
-    checks entirely.
+    so `"remote\Host"` also spells `remoteHost`.
     """
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
@@ -947,21 +994,18 @@ def test_oracle_config_with_non_escape_character_key_spelling_fails_closed(
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
-    with pytest.raises(LooprError, match="could not be parsed"):
-        _ = runner.oracle_config_remote_host
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
-def test_oracle_config_with_line_continuation_key_spelling_fails_closed(
+def test_oracle_config_with_line_continuation_key_spelling_is_parsed(
     tmp_path: Path,
 ) -> None:
-    r"""A line-continuation-escaped quoted-string spelling still fails closed.
+    r"""A line-continuation-escaped quoted-string spelling is parsed.
 
     JSON5's string grammar resolves a backslash immediately followed by a
     line terminator to nothing (a line continuation), so a quoted string
     spelling `remote`, backslash, newline, `Host` also spells `remoteHost`.
-    A fallback check that does not resolve this escape form would miss
-    this spelling and let a config-backed remote host bypass this
-    module's precedence/secret checks entirely.
+    The parser must resolve this escape form just as Oracle does.
     """
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
@@ -972,8 +1016,7 @@ def test_oracle_config_with_line_continuation_key_spelling_fails_closed(
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
-    with pytest.raises(LooprError, match="could not be parsed"):
-        _ = runner.oracle_config_remote_host
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:
