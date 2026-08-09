@@ -2,18 +2,62 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 from .artifacts import temporary_file_writer
 from .github import GitHubClient
 from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
-from .oracle import OracleClient
+from .oracle import (
+    MAX_ORACLE_ATTACHMENTS,
+    PROMPT,
+    build_review_bundle,
+    invoke_oracle,
+    parse_review,
+)
 from .process import CommandRunner
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .models import PullRequest
+    from .artifacts import TemporaryFileWriter
+    from .models import OracleReview, PullRequest
+
+
+def _generate_review(
+    command_runner: CommandRunner,
+    github: GitHubClient,
+    writer: TemporaryFileWriter,
+    pull_request: PullRequest,
+    thinking_time: str,
+) -> OracleReview:
+    """Build evidence, invoke Oracle once, and parse its review.
+
+    Returns:
+        The strictly validated Oracle review.
+    """
+    attachments = build_review_bundle(command_runner, github, writer, pull_request)
+    prompt = PROMPT.format(
+        repository=pull_request.repository,
+        pr_number=pull_request.number,
+        base_sha=pull_request.base_sha,
+        head_sha=pull_request.head_sha,
+    )
+    slug = (
+        f"loopr-review-{pull_request.number}-"
+        f"{pull_request.head_sha[:12]}-{uuid.uuid4().hex[:8]}"
+    )
+    raw = invoke_oracle(
+        command_runner,
+        writer,
+        github.repo_dir,
+        thinking_time,
+        prompt,
+        attachments,
+        slug,
+        max_attachments=MAX_ORACLE_ATTACHMENTS,
+    )
+    return parse_review(raw, pull_request)
 
 
 def execute_review(
@@ -41,8 +85,13 @@ def execute_review(
         command_runner,
         prefix=f"pr-review-loop-review-{initial.number}-{initial.head_sha[:12]}-",
     ) as writer:
-        oracle = OracleClient(command_runner, github, writer, thinking_time)
-        verdict = oracle.review(initial, oracle.build_bundle(initial))
+        verdict = _generate_review(
+            command_runner,
+            github,
+            writer,
+            initial,
+            thinking_time,
+        )
 
     before_post = github.snapshot()
     if not github.same_snapshot(initial, before_post):
