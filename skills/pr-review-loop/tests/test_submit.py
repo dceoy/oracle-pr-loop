@@ -164,6 +164,9 @@ def _fixture_repo(
     state: JsonObject = {
         "url": "https://github.com/acme/demo/pull/1",
         "number": 1,
+        "title": "Feature",
+        "body": "Feature body",
+        "author": {"login": "author"},
         "state": "OPEN",
         "isDraft": False,
         "baseRefName": "main",
@@ -172,6 +175,8 @@ def _fixture_repo(
         "headRefOid": head,
         "headRepository": {"nameWithOwner": "acme/demo", "name": "demo"},
         "headRepositoryOwner": {"login": "acme"},
+        "files": [{"path": "file.txt"}],
+        "changedFiles": 1,
     }
     return repo, remote, state, base, head
 
@@ -205,6 +210,28 @@ def test_success_commits_and_pushes_without_runtime_files(tmp_path: Path) -> Non
         == "apply reviewed changes"
     )
     assert not (repo / "artifacts").exists()
+
+
+def test_submit_succeeds_when_github_caps_changed_file_inventory(
+    tmp_path: Path,
+) -> None:
+    """Submit ignores review-only inventory capped at GitHub's 100-file limit."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    state["files"] = [{"path": f"file-{index}.txt"} for index in range(100)]
+    state["changedFiles"] = 101
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        runner=runner,
+    )
+
+    assert result.previous_head_sha == head
+    assert result.resulting_head_sha == result.commit_sha
+    assert _git(repo, "rev-parse", "HEAD^") == head
 
 
 class HookScenarioRunner(ScenarioRunner):

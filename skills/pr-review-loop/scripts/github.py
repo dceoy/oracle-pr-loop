@@ -19,6 +19,7 @@ from .models import (
     JsonValue,
     LooprError,
     PullRequest,
+    PullRequestIdentity,
 )
 from .process import CommandError
 
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 OWNER_REPO_PART_COUNT = 2
-PR_URL_PART_COUNT = 4
 LS_TREE_FIELD_COUNT = 4
 MIN_PRINTABLE_CODEPOINT = 32
 DEL_CODEPOINT = 127
@@ -39,6 +39,10 @@ MAX_ISSUE_BODY_BYTES = 200_000
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
     "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
+)
+PR_IDENTITY_FIELDS = (
+    "url,number,state,isDraft,baseRefName,baseRefOid,"
+    "headRefName,headRefOid,headRepository,headRepositoryOwner"
 )
 ISSUE_GRAPHQL_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $lastComments: Int!) {
@@ -73,15 +77,40 @@ def normalize_repo(remote: str) -> str:
     Raises:
         LooprError: remote is not an unambiguous github.com repository URL.
     """
-    value = remote.strip()
-    match = re.fullmatch(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?", value)
+    value = remote
+    if (
+        any(
+            character.isspace()
+            or ord(character) < MIN_PRINTABLE_CODEPOINT
+            or ord(character) == DEL_CODEPOINT
+            for character in value
+        )
+        or "?" in value
+        or "#" in value
+    ):
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "repository",
+            "origin must be an unambiguous github.com URL",
+        )
+    match = re.fullmatch(
+        r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?",
+        value,
+    )
     if match is not None:
         owner, name = match.groups()
     else:
-        parsed = urllib.parse.urlparse(value)
+        try:
+            parsed = urllib.parse.urlsplit(value)
+        except ValueError:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                "origin must be an unambiguous github.com URL",
+            ) from None
         if (
             parsed.scheme not in {"https", "ssh"}
-            or parsed.hostname != "github.com"
+            or parsed.netloc not in {"github.com", "git@github.com"}
             or parsed.query
             or parsed.fragment
         ):
@@ -90,14 +119,19 @@ def normalize_repo(remote: str) -> str:
                 "repository",
                 "origin must be an unambiguous github.com URL",
             )
-        parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) != OWNER_REPO_PART_COUNT:
+        parts = parsed.path.split("/")
+        if (
+            len(parts) != OWNER_REPO_PART_COUNT + 1
+            or parts[0]
+            or not parts[1]
+            or not parts[2]
+        ):
             raise LooprError(
                 EXIT_PRECONDITION,
                 "repository",
                 "origin must identify exactly one repository",
             )
-        owner, name = parts
+        _empty, owner, name = parts
         name = name.removesuffix(".git")
     if not PART_RE.fullmatch(owner) or not PART_RE.fullmatch(name):
         raise LooprError(
@@ -108,50 +142,84 @@ def normalize_repo(remote: str) -> str:
     return f"{owner}/{name}"
 
 
+def _resolve_target(
+    value: str,
+    origin_repo: str | None,
+    *,
+    route: str,
+    numeric_message: str,
+    invalid_message: str,
+    target_name: str,
+) -> tuple[str, int]:
+    """Resolve one strict numeric or canonical GitHub target.
+
+    Returns:
+        The repository and positive target number.
+
+    Raises:
+        LooprError: value is not a positive number or canonical GitHub URL,
+            or a numeric value is given without origin_repo.
+    """
+    ascii_number = re.fullmatch(r"[0-9]+", value)
+    if ascii_number is not None:
+        if origin_repo is None:
+            raise LooprError(EXIT_PRECONDITION, "input", numeric_message)
+        repository, number = origin_repo, int(value)
+    else:
+        if (
+            any(
+                character.isspace()
+                or ord(character) < MIN_PRINTABLE_CODEPOINT
+                or ord(character) == DEL_CODEPOINT
+                for character in value
+            )
+            or "?" in value
+            or "#" in value
+        ):
+            raise LooprError(EXIT_PRECONDITION, "input", invalid_message)
+        try:
+            parsed = urllib.parse.urlsplit(value)
+        except ValueError:
+            raise LooprError(EXIT_PRECONDITION, "input", invalid_message) from None
+        target = re.fullmatch(
+            rf"/([^/]+)/([^/]+)/{re.escape(route)}/([0-9]+)",
+            parsed.path,
+        )
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "github.com"
+            or parsed.query
+            or parsed.fragment
+            or target is None
+            or not PART_RE.fullmatch(target.group(1))
+            or not PART_RE.fullmatch(target.group(2))
+        ):
+            raise LooprError(EXIT_PRECONDITION, "input", invalid_message)
+        repository = f"{target.group(1)}/{target.group(2)}"
+        number = int(target.group(3))
+    if number <= 0:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "input",
+            f"{target_name} number must be positive",
+        )
+    return repository, number
+
+
 def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
     """Resolve a positive PR number or canonical GitHub pull URL.
 
     Returns:
         The repository, PR number, and canonical pull URL.
-
-    Raises:
-        LooprError: value is not a positive number or canonical GitHub pull
-            URL, a numeric value is given without origin_repo, or the
-            resolved PR number is not positive.
     """
-    if value.isdecimal():
-        if origin_repo is None:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "input",
-                "numeric --pr requires an unambiguous local origin",
-            )
-        repository, number = origin_repo, int(value)
-    else:
-        parsed = urllib.parse.urlparse(value)
-        parts = [part for part in parsed.path.split("/") if part]
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc.lower() != "github.com"
-            or parsed.query
-            or parsed.fragment
-            or len(parts) != PR_URL_PART_COUNT
-            or parts[2] != "pull"
-            or not parts[3].isdecimal()
-        ):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "input",
-                "--pr must be a positive number or canonical GitHub pull URL",
-            )
-        repository = f"{parts[0]}/{parts[1]}"
-        number = int(parts[3])
-    if number <= 0:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "input",
-            "pull request number must be positive",
-        )
+    repository, number = _resolve_target(
+        value,
+        origin_repo,
+        route="pull",
+        numeric_message="numeric --pr requires an unambiguous local origin",
+        invalid_message="--pr must be a positive number or canonical GitHub pull URL",
+        target_name="pull request",
+    )
     url = f"https://github.com/{repository}/pull/{number}"
     return repository, number, url
 
@@ -161,45 +229,17 @@ def resolve_issue_target(value: str, origin_repo: str | None) -> tuple[str, int,
 
     Returns:
         The repository, Issue number, and canonical issue URL.
-
-    Raises:
-        LooprError: value is not a positive number or canonical GitHub issue
-            URL, a numeric value is given without origin_repo, or the
-            resolved issue number is not positive.
     """
-    if value.isdecimal():
-        if origin_repo is None:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "input",
-                "numeric --issue requires an unambiguous local origin",
-            )
-        repository, number = origin_repo, int(value)
-    else:
-        parsed = urllib.parse.urlparse(value)
-        parts = [part for part in parsed.path.split("/") if part]
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc.lower() != "github.com"
-            or parsed.query
-            or parsed.fragment
-            or len(parts) != PR_URL_PART_COUNT
-            or parts[2] != "issues"
-            or not parts[3].isdecimal()
-        ):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "input",
-                "--issue must be a positive number or canonical GitHub issue URL",
-            )
-        repository = f"{parts[0]}/{parts[1]}"
-        number = int(parts[3])
-    if number <= 0:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "input",
-            "issue number must be positive",
-        )
+    repository, number = _resolve_target(
+        value,
+        origin_repo,
+        route="issues",
+        numeric_message="numeric --issue requires an unambiguous local origin",
+        invalid_message=(
+            "--issue must be a positive number or canonical GitHub issue URL"
+        ),
+        target_name="issue",
+    )
     url = f"https://github.com/{repository}/issues/{number}"
     return repository, number, url
 
@@ -330,6 +370,21 @@ def require_integer(value: JsonValue | None, *, field: str) -> int:
     return value
 
 
+def require_boolean(value: JsonValue | None, *, field: str) -> bool:
+    """Require a JSON Boolean field without coercing other falsey values.
+
+    Returns:
+        value.
+
+    Raises:
+        LooprError: value is not a JSON Boolean.
+    """
+    if not isinstance(value, bool):
+        message = f"GitHub field {field} must be a boolean"
+        raise LooprError(EXIT_GITHUB, "github_schema", message)
+    return value
+
+
 def _optional_author_login(value: JsonValue | None, *, field: str) -> str:
     """Return one Issue/comment author's login, or "" for a deleted account.
 
@@ -356,6 +411,137 @@ class _ImmutableGitMixin:
         """Initialize the shared immutable Git reader state."""
         self.runner = runner
         self.repo_dir = repo_dir
+
+    def _git_text(
+        self,
+        args: list[str],
+        *,
+        env: dict[str, str],
+        max_output: int = 1024 * 1024,
+    ) -> str:
+        """Run one bounded Git read.
+
+        Returns:
+            Strictly decoded stdout.
+
+        Raises:
+            LooprError: Git failed or returned invalid UTF-8.
+        """
+        try:
+            result = self.runner.run(
+                ["git", *args],
+                cwd=self.repo_dir,
+                env=env,
+                max_output=max_output,
+            )
+            return result.stdout.decode("utf-8", "strict")
+        except (CommandError, UnicodeError) as exc:
+            raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+
+    def _text(
+        self,
+        args: list[str],
+        *,
+        input_text: str | None = None,
+        max_output: int = 24 * 1024 * 1024,
+    ) -> str:
+        """Run one bounded GitHub CLI read.
+
+        Returns:
+            Strictly decoded stdout.
+
+        Raises:
+            LooprError: GitHub failed or returned invalid UTF-8.
+        """
+        try:
+            result = self.runner.run(
+                ["gh", *args],
+                cwd=self.repo_dir,
+                env=self.runner.gh_env(),
+                input_text=input_text,
+                max_output=max_output,
+            )
+            return result.stdout.decode("utf-8", "strict")
+        except (CommandError, UnicodeError) as exc:
+            raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
+
+    def _initialize_repository(
+        self,
+        *,
+        hardened: bool,
+        require_push_url: bool,
+    ) -> str:
+        """Resolve the repository root and one unambiguous origin.
+
+        Returns:
+            Normalized fetch repository.
+
+        Raises:
+            LooprError: The checkout or origin is invalid or ambiguous.
+        """
+        env = self._git_env() if hardened else self.runner.base_env()
+        try:
+            root = self._git_text(["rev-parse", "--show-toplevel"], env=env).strip()
+        except LooprError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                "cannot infer repository from local checkout",
+            ) from exc
+        if not root:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                "Git returned an empty repository root",
+            )
+        self.repo_dir = Path(root).resolve()
+        fetch_repo = self._origin_repo(env=env, push=False)
+        if require_push_url:
+            push_repo = self._origin_repo(env=env, push=True)
+            if fetch_repo.casefold() != push_repo.casefold():
+                raise LooprError(
+                    EXIT_PRECONDITION,
+                    "repository",
+                    "origin fetch and push URLs must identify the same repository",
+                )
+        return fetch_repo
+
+    def _origin_repo(self, *, env: dict[str, str], push: bool) -> str:
+        """Read exactly one normalized origin URL.
+
+        Returns:
+            Normalized repository identifier.
+
+        Raises:
+            LooprError: The origin is missing, ambiguous, or invalid.
+        """
+        kind = "push" if push else "fetch"
+        try:
+            urls = self._git_text(
+                [
+                    "remote",
+                    "get-url",
+                    *(["--push"] if push else []),
+                    "--all",
+                    "origin",
+                ],
+                env=env,
+            ).splitlines()
+        except LooprError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                "origin must have exactly one push URL"
+                if push
+                else "cannot infer repository from local checkout",
+            ) from exc
+        if len(urls) != 1 or not urls[0].strip():
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                f"origin must have exactly one {kind} URL",
+            )
+        return normalize_repo(urls[0])
 
     def _git_env(self) -> dict[str, str]:
         """Return a Git environment that cannot redirect immutable object reads."""
@@ -385,6 +571,27 @@ class _ImmutableGitMixin:
             ).stdout
         except CommandError as exc:
             raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+
+    def git_text(self, args: list[str], *, max_output: int) -> str:
+        """Read one immutable Git response as UTF-8 text.
+
+        Returns:
+            Strictly decoded stdout.
+
+        Raises:
+            LooprError: Git failed or returned invalid UTF-8.
+        """
+        try:
+            return self.git_bytes(args, max_output=max_output).decode(
+                "utf-8",
+                "strict",
+            )
+        except UnicodeError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned non-UTF-8 output",
+            ) from exc
 
     def ensure_commit_object(self, sha: str) -> None:
         """Require sha to name a local commit object.
@@ -530,33 +737,6 @@ class GitHubClient(_ImmutableGitMixin):
         self.url = ""
         self.authenticated_login = ""
 
-    def _text(
-        self,
-        args: list[str],
-        *,
-        input_text: str | None = None,
-        max_output: int = 24 * 1024 * 1024,
-    ) -> str:
-        """Run a GitHub CLI command and decode strict UTF-8 output.
-
-        Returns:
-            The command's decoded stdout.
-
-        Raises:
-            LooprError: The command failed or its output was not UTF-8.
-        """
-        try:
-            result = self.runner.run(
-                ["gh", *args],
-                cwd=self.repo_dir,
-                env=self.runner.gh_env(),
-                input_text=input_text,
-                max_output=max_output,
-            )
-            return result.stdout.decode("utf-8", "strict")
-        except (CommandError, UnicodeError) as exc:
-            raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
-
     def initialize(self, pr_value: str) -> None:
         """Resolve the local repository and target PR.
 
@@ -564,37 +744,11 @@ class GitHubClient(_ImmutableGitMixin):
             LooprError: The repository or PR could not be resolved or is
                 inconsistent.
         """
-        origin_repo: str | None = None
-        try:
-            root = self.runner.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=self.repo_dir,
-                env=self._git_env(),
-            ).stdout.decode("utf-8", "strict")
-            self.repo_dir = Path(root.strip()).resolve()
-            origin = self.runner.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=self.repo_dir,
-                env=self._git_env(),
-            ).stdout.decode("utf-8", "strict")
-            origin_repo = normalize_repo(origin)
-        except (CommandError, UnicodeError):
-            if pr_value.isdecimal():
-                raise LooprError(
-                    EXIT_PRECONDITION,
-                    "repository",
-                    "cannot infer repository from local checkout",
-                ) from None
-        self.repository, self.number, self.url = resolve_target(
-            pr_value,
-            origin_repo,
+        origin_repo = self._initialize_repository(
+            hardened=True,
+            require_push_url=False,
         )
-        if origin_repo is not None and origin_repo.lower() != self.repository.lower():
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "local origin does not match pull request repository",
-            )
+        self._set_target(pr_value, origin_repo)
         self.authenticated_login = self._text(
             ["api", "--hostname", "github.com", "user", "--jq", ".login"],
         ).strip()
@@ -605,23 +759,49 @@ class GitHubClient(_ImmutableGitMixin):
                 "authenticated GitHub login was empty",
             )
 
-    def snapshot(self) -> PullRequest:
+    def initialize_for_submit(self, pr_value: str) -> None:
+        """Resolve a submit target without performing reviewer identity lookup.
+
+        Submit uses ordinary Git credentials for repository identity and push
+        URL reads, while all PR schema and snapshot validation stays canonical
+        in this client.
+        """
+        origin_repo = self._initialize_repository(
+            hardened=False,
+            require_push_url=True,
+        )
+        self._set_target(pr_value, origin_repo)
+
+    def _set_target(self, pr_value: str, origin_repo: str) -> None:
+        """Resolve and bind one PR target to the local origin repository.
+
+        Raises:
+            LooprError: The target is invalid or does not match origin_repo.
+        """
+        self.repository, self.number, self.url = resolve_target(
+            pr_value,
+            origin_repo,
+        )
+        if origin_repo.casefold() != self.repository.casefold():
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "repository",
+                "local origin does not match pull request repository",
+            )
+
+    def snapshot(self, *, require_open: bool = True) -> PullRequest:
         """Collect and validate one complete PR snapshot.
 
         Returns:
-            The validated pull-request snapshot.
+            The validated pull-request snapshot. When require_open is false,
+                closed or draft state is permitted for post-push confirmation.
 
         Raises:
             LooprError: GitHub's response was malformed, inconsistent, or
                 failed identity validation.
         """
-        data = parse_json_object(
-            self._text(
-                ["pr", "view", self.url, "--json", PR_FIELDS],
-                max_output=8 * 1024 * 1024,
-            ),
-            category="github_schema",
-        )
+        data = self._pull_request_data(PR_FIELDS)
+        identity = self._parse_identity(data, require_open=require_open)
         files_value = data.get("files")
         if not isinstance(files_value, list):
             raise LooprError(
@@ -656,6 +836,77 @@ class GitHubClient(_ImmutableGitMixin):
                 "duplicate changed paths",
             )
 
+        author = require_object(data.get("author"), field="author")
+        author_login = require_string(author.get("login"), field="author.login")
+        if not author_login:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "identity",
+                "pull request author was empty",
+            )
+        pull_request = PullRequest(
+            repository=identity.repository,
+            number=identity.number,
+            url=identity.url,
+            title=require_string(data.get("title"), field="title", allow_empty=True),
+            body=require_string(data.get("body"), field="body", allow_empty=True),
+            author=author_login,
+            state=identity.state,
+            is_draft=identity.is_draft,
+            base_ref=identity.base_ref,
+            base_sha=identity.base_sha,
+            head_ref=identity.head_ref,
+            head_sha=identity.head_sha,
+            head_repository=identity.head_repository,
+            changed_paths=tuple(sorted(paths)),
+            raw=data,
+        )
+        return pull_request
+
+    def identity_snapshot(
+        self,
+        *,
+        require_open: bool = True,
+    ) -> PullRequestIdentity:
+        """Collect and validate PR identity, state, and ref fields only.
+
+        Submit uses this smaller snapshot because GitHub CLI caps the
+        `files` field at 100 entries, while review requires the complete
+        changed-file inventory.
+
+        Returns:
+            The validated pull-request identity and ref snapshot.
+        """
+        return self._parse_identity(
+            self._pull_request_data(PR_IDENTITY_FIELDS),
+            require_open=require_open,
+        )
+
+    def _pull_request_data(self, fields: str) -> JsonObject:
+        """Fetch one bounded GitHub pull-request response.
+
+        Returns:
+            The parsed GitHub pull-request response.
+        """
+        return parse_json_object(
+            self._text(
+                ["pr", "view", self.url, "--json", fields],
+                max_output=8 * 1024 * 1024,
+            ),
+            category="github_schema",
+        )
+
+    def _parse_identity(
+        self,
+        data: JsonObject,
+        *,
+        require_open: bool,
+    ) -> PullRequestIdentity:
+        """Parse and validate the shared PR identity fields.
+
+        Returns:
+            The validated pull-request identity and ref snapshot.
+        """
         head_repository = require_object(
             data.get("headRepository"),
             field="headRepository",
@@ -664,9 +915,11 @@ class GitHubClient(_ImmutableGitMixin):
             data.get("headRepositoryOwner"),
             field="headRepositoryOwner",
         )
-        name_with_owner = head_repository.get("nameWithOwner")
-        if isinstance(name_with_owner, str) and name_with_owner:
-            head_repo = name_with_owner
+        if "nameWithOwner" in head_repository:
+            head_repo = require_string(
+                head_repository.get("nameWithOwner"),
+                field="headRepository.nameWithOwner",
+            )
         else:
             owner = require_string(
                 head_owner.get("login"), field="headRepositoryOwner.login"
@@ -675,28 +928,28 @@ class GitHubClient(_ImmutableGitMixin):
                 head_repository.get("name"), field="headRepository.name"
             )
             head_repo = f"{owner}/{name}"
-        author = require_object(data.get("author"), field="author")
-        pull_request = PullRequest(
+        identity = PullRequestIdentity(
             repository=self.repository,
             number=require_integer(data.get("number"), field="number"),
             url=require_string(data.get("url"), field="url"),
-            title=require_string(data.get("title"), field="title", allow_empty=True),
-            body=require_string(data.get("body") or "", field="body", allow_empty=True),
-            author=require_string(author.get("login"), field="author.login"),
             state=require_string(data.get("state"), field="state"),
-            is_draft=bool(data.get("isDraft")),
+            is_draft=require_boolean(data.get("isDraft"), field="isDraft"),
             base_ref=require_string(data.get("baseRefName"), field="baseRefName"),
             base_sha=require_string(data.get("baseRefOid"), field="baseRefOid"),
             head_ref=require_string(data.get("headRefName"), field="headRefName"),
             head_sha=require_string(data.get("headRefOid"), field="headRefOid"),
             head_repository=head_repo,
-            changed_paths=tuple(sorted(paths)),
             raw=data,
         )
-        self._validate_snapshot_identity(pull_request)
-        return pull_request
+        self._validate_snapshot_identity(identity, require_open=require_open)
+        return identity
 
-    def _validate_snapshot_identity(self, pull_request: PullRequest) -> None:
+    def _validate_snapshot_identity(
+        self,
+        pull_request: PullRequestIdentity,
+        *,
+        require_open: bool,
+    ) -> None:
         """Validate state, repository identity, refs, and commit IDs.
 
         Raises:
@@ -711,7 +964,7 @@ class GitHubClient(_ImmutableGitMixin):
                 "identity",
                 "ambiguous pull request identity",
             )
-        if pull_request.state != "OPEN" or pull_request.is_draft:
+        if require_open and (pull_request.state != "OPEN" or pull_request.is_draft):
             raise LooprError(
                 EXIT_PRECONDITION,
                 "state",
@@ -722,12 +975,6 @@ class GitHubClient(_ImmutableGitMixin):
                 EXIT_PRECONDITION,
                 "repository",
                 "fork pull requests are not supported",
-            )
-        if not pull_request.author:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "identity",
-                "pull request author was empty",
             )
         if not SHA_RE.fullmatch(pull_request.base_sha) or not SHA_RE.fullmatch(
             pull_request.head_sha
@@ -967,9 +1214,7 @@ def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
             )
         parsed.append((
             _optional_author_login(item.get("author"), field="comments.author"),
-            require_string(
-                item.get("body") or "", field="comments.body", allow_empty=True
-            ),
+            require_string(item.get("body"), field="comments.body", allow_empty=True),
             require_string(item.get("createdAt"), field="comments.createdAt"),
         ))
     parsed.sort(key=operator.itemgetter(2))
@@ -1006,26 +1251,6 @@ class IssueClient(_ImmutableGitMixin):
         self.number = 0
         self.url = ""
 
-    def _text(self, args: list[str], *, max_output: int = 24 * 1024 * 1024) -> str:
-        """Run a GitHub CLI command with ordinary credentials.
-
-        Returns:
-            The command's decoded stdout.
-
-        Raises:
-            LooprError: The command failed or its output was not UTF-8.
-        """
-        try:
-            result = self.runner.run(
-                ["gh", *args],
-                cwd=self.repo_dir,
-                env=self.runner.gh_env(),
-                max_output=max_output,
-            )
-            return result.stdout.decode("utf-8", "strict")
-        except (CommandError, UnicodeError) as exc:
-            raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
-
     def initialize(self, issue_value: str) -> None:
         """Resolve the local repository and target Issue.
 
@@ -1039,25 +1264,10 @@ class IssueClient(_ImmutableGitMixin):
             LooprError: The repository or Issue could not be resolved or is
                 inconsistent with the local checkout.
         """
-        try:
-            root = self.runner.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=self.repo_dir,
-                env=self._git_env(),
-            ).stdout.decode("utf-8", "strict")
-            self.repo_dir = Path(root.strip()).resolve()
-            origin = self.runner.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=self.repo_dir,
-                env=self._git_env(),
-            ).stdout.decode("utf-8", "strict")
-            origin_repo = normalize_repo(origin)
-        except (CommandError, UnicodeError) as exc:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "cannot infer repository from local checkout",
-            ) from exc
+        origin_repo = self._initialize_repository(
+            hardened=True,
+            require_push_url=False,
+        )
         self.repository, self.number, self.url = resolve_issue_target(
             issue_value,
             origin_repo,
@@ -1118,7 +1328,7 @@ class IssueClient(_ImmutableGitMixin):
                 "github_schema",
                 "GitHub field comments.nodes must be an array",
             )
-        body = require_string(data.get("body") or "", field="body", allow_empty=True)
+        body = require_string(data.get("body"), field="body", allow_empty=True)
         if len(body.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:
             raise LooprError(
                 EXIT_PRECONDITION,
