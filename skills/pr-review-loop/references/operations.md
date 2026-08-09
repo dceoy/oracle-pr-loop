@@ -41,6 +41,8 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
+GitHub connector use is opportunistic: Oracle's browser engine has no CLI flag or documented mechanism to select, activate, or verify that a GitHub connector/app is available to a given ChatGPT turn, unlike its dedicated Deep Research tool-menu activation. `review` cannot detect, require, or confirm connector use, so treat the prompt's connector permission as advisory only. To manually spot-check that a connected ChatGPT account is actually using it, run `review` on a PR whose correct assessment depends on repository context outside the attached snapshot (for example, a caller of a changed function that lives outside the diff) and confirm the returned `review_body` or `non_blocking_notes` reflects that outside context; treat an unconfirmed check as inconclusive, not as a failure, since the unchanged deterministic path is always correct on its own.
+
 ## Recovery
 
 Oracle inputs and outputs are private command-scoped temporary files; GitHub and Git remain the source of truth.

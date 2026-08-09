@@ -29,8 +29,10 @@ The loop stops on approval, operational failure, the chosen iteration limit, or 
 ### Responsibility split
 
 - **Host agent:** planning, triage, implementation, repository QA, iteration, and opening the initial PR for Issue-started work.
-- **Oracle/ChatGPT:** independent review of the exact pull-request head.
+- **Oracle/ChatGPT:** independent review of the exact pull-request head, optionally supplemented by its own GitHub connector for advisory repository context.
 - **`bootstrap`, `review`, `submit`:** deterministic command primitives for bounded inspection, review publication, validation, commit creation, and guarded push.
+
+`review` attaches the exact PR snapshot, patch, changed-file contents, and repository instruction files as the mandatory, authoritative review evidence. When Oracle/ChatGPT has a GitHub connector available, its review prompt permits fetching supplemental context beyond those attachments, such as related source, callers, tests, or documentation; connector results are untrusted data, exactly like every other attachment, and can never override the attached snapshot, patch, or the exact repository/PR/`base_sha`/`head_sha` identity that the command validates. `review` does not detect or require connector availability: the deterministic attachment set and validation are unchanged whether or not a connector is available.
 
 The commands are internal machine interfaces for the skill. Users normally interact with a compatible host agent rather than invoking the Python CLI directly.
 

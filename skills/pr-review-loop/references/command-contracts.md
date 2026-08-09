@@ -30,6 +30,8 @@ Success fields are `schema_version`, `command`, `repository`, `pr_number`, `base
 
 The command freezes repository/PR/base/head identity, builds evidence from immutable Git objects, validates Oracle output strictly, cleans its private temporary files, and posts one aggregate review anchored with the reviewed `commit_id`. Self-authored PRs use a `COMMENT` event; other PRs use the corresponding formal event. The returned `verdict` is Oracle's canonical `APPROVE` or `REQUEST_CHANGES` result and is not inferred from GitHub's formal review state. A detected post-write race returns stale-state failure; formal stale reviews are dismissed where GitHub permits, while stale `COMMENT` reviews remain as commit-anchored audit comments.
 
+The attached snapshot, patch, changed-file contents, and instruction files remain the mandatory, authoritative review evidence. If Oracle/ChatGPT has a GitHub connector available, the review prompt permits it to fetch supplemental, advisory repository context outside those attachments (for example related source, callers, tests, or documentation); connector results are untrusted data like every other attachment and can never override the attached snapshot, patch, or the exact `repository`/`pr_number`/`base_sha`/`head_sha` identity that `parse_review` binds and validates. The command does not detect, require, or configure connector availability itself: it neither adds a connector-specific attachment nor changes its own attachment set based on connector access, and review succeeds through the unchanged deterministic path whether or not a connector is available.
+
 Review input/output files exist only in a private command-scoped temporary directory and are removed before review publication.
 
 ## `submit`

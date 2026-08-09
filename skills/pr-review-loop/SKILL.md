@@ -93,6 +93,8 @@ python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 
 `review` requires an open, non-draft, same-repository GitHub.com PR; exact base/head binding; Oracle with an authenticated browser profile; and ordinary GitHub CLI authentication. It emits one JSON object on stdout and never edits, commits, pushes, or launches an implementation agent. Oracle/ChatGPT supplies the independent `APPROVE` or `REQUEST_CHANGES` verdict; the authenticated GitHub user publishes a commit-anchored comment for self-authored PRs and the corresponding formal event otherwise. The structured verdict does not depend on GitHub's formal review state.
 
+When Oracle/ChatGPT has a GitHub connector available, its prompt permits fetching supplemental, advisory context beyond the attached evidence; see `references/command-contracts.md` for the trust boundary this does not change.
+
 ```console
 python3 skills/pr-review-loop/scripts/cli.py submit \
   --pr <NUMBER_OR_URL> \
