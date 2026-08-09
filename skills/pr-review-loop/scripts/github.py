@@ -1313,6 +1313,17 @@ class GitHubClient(_ImmutableGitMixin):
         file have no equivalent config override, so `diff_anchors`
         additionally verifies every anchor's blob by content, independently
         of any attribute.
+        `-c core.quotePath=false` pins Git's own default of emitting a raw
+        `a/`/`b/` header even for a non-ASCII path; a repository-local
+        `core.quotePath=true` would otherwise C-quote that header (wrapping
+        it in double quotes and octal-escaping each non-ASCII byte), which
+        `_header_path()` cannot parse as a prefixed path, and so drops every
+        anchor for that file to the aggregate body.
+        `-c diff.suppressBlankEmpty=false` pins Git's own default of a lone
+        space on an empty context line; a repository-local
+        `diff.suppressBlankEmpty=true` would otherwise emit that line with no
+        leading character at all, which `diff_anchors` cannot distinguish
+        from the end of the hunk and so drops every anchor that follows it.
 
         Returns:
             The patch's raw bytes.
@@ -1321,6 +1332,10 @@ class GitHubClient(_ImmutableGitMixin):
             [
                 "-c",
                 "core.attributesFile=/dev/null",
+                "-c",
+                "core.quotePath=false",
+                "-c",
+                "diff.suppressBlankEmpty=false",
                 "diff",
                 "--no-color",
                 "--no-ext-diff",

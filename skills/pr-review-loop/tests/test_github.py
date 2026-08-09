@@ -1335,6 +1335,79 @@ def test_client_diff_anchors_ignores_a_low_repository_local_rename_limit(
     }
 
 
+def test_client_diff_anchors_reads_a_quoted_non_ascii_path(tmp_path: Path) -> None:
+    """A repository-local `core.quotePath=true` must not hide a UTF-8 path.
+
+    With that setting, Git C-quotes a non-ASCII path in the `---`/`+++`
+    headers (wrapping it in double quotes and octal-escaping each non-ASCII
+    byte), which `_header_path()` cannot parse as a `a/`/`b/`-prefixed path.
+    Left unpinned, that would silently drop every anchor for the file to the
+    aggregate body instead of the safe fallback the design intends only for
+    genuinely unsafe paths.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "quoted-path-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    path = "日本語.py"
+    (repo / path).write_text("line1\nline2\n")
+    _git(git, ["add", path], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / path).write_text("line1\nCHANGED\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "core.quotePath", "true"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=(path,))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert (path, "RIGHT", 2) in anchors
+
+
+def test_client_diff_anchors_keeps_anchors_after_a_suppressed_blank_context_line(
+    tmp_path: Path,
+) -> None:
+    """A repository-local `diff.suppressBlankEmpty=true` must not truncate a hunk.
+
+    With that setting, Git emits an empty context line with no leading
+    space instead of a lone space, which `diff_anchors` cannot distinguish
+    from the hunk's end. Left unpinned, that would silently drop every
+    anchor after the blank line, including the actually-changed line the
+    hunk exists to report.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "blank-context-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    lines = [f"line{index}" for index in range(1, 13)]
+    lines[2] = ""
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    lines[5] = "CHANGED"
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "diff.suppressBlankEmpty", "true"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, line) for path, _side, line in anchors} == {
+        ("file.py", line) for line in range(3, 10)
+    }
+
+
 def test_client_diff_anchors_drops_a_locally_attribute_forced_text_hunk(
     tmp_path: Path,
 ) -> None:
