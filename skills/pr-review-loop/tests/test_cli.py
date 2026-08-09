@@ -179,7 +179,8 @@ class AcceptanceGitHubClient(GitHubClient):
     def review_event(self, pull_request: PullRequest, verdict: str) -> str:
         return "COMMENT" if pull_request.author == self.authenticated_login else verdict
 
-    def snapshot(self) -> PullRequest:
+    def snapshot(self, *, require_open: bool = True) -> PullRequest:
+        del require_open
         if not self._snapshots:
             msg = "acceptance GitHub snapshot sequence was exhausted"
             raise AssertionError(msg)
