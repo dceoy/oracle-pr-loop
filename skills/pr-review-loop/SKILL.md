@@ -160,8 +160,7 @@ python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
 browser model; supplying it selects that opaque model value. Omitting effort
 does not pass a thinking-time override, allowing Oracle to inherit its existing
 configuration. Supported effort values are `light`, `standard`, `extended`,
-`extra-high`, `pro`, and `heavy`; model discovery and capability detection stay
-inside Oracle.
+and `heavy`; model discovery and capability detection stay inside Oracle.
 
 ```console
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>

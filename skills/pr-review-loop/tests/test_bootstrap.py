@@ -242,9 +242,9 @@ def test_execute_bootstrap_forwards_oracle_overrides(
 
     monkeypatch.setattr(bootstrap_module, "invoke_oracle", record_oracle)
 
-    _execute(tmp_path, thinking_time="extra-high", model="gpt-5.6-sol")
+    _execute(tmp_path, thinking_time="extended", model="gpt-5.6-sol")
 
-    assert calls == [("extra-high", "gpt-5.6-sol")]
+    assert calls == [("extended", "gpt-5.6-sol")]
 
 
 def test_execute_bootstrap_rejects_stale_issue_update(

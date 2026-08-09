@@ -623,10 +623,10 @@ class _FakeOracleRunner(CommandRunner):
         (None, "extended", "current", (), ("--browser-thinking-time", "extended")),
         (
             "gpt-5.6-sol",
-            "extra-high",
+            "heavy",
             "select",
             ("--model", "gpt-5.6-sol"),
-            ("--browser-thinking-time", "extra-high"),
+            ("--browser-thinking-time", "heavy"),
         ),
     ],
 )

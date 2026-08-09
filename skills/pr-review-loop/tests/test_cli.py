@@ -496,16 +496,16 @@ def test_argument_failure_uses_structured_error_schema(
     [
         ((), None, None),
         (("--oracle-model", "gpt-5.6-sol"), "gpt-5.6-sol", None),
-        (("--oracle-thinking-time", "extra-high"), None, "extra-high"),
+        (("--oracle-thinking-time", "extended"), None, "extended"),
         (
             (
                 "--oracle-model",
                 "gpt-5.6-sol",
                 "--oracle-thinking-time",
-                "pro",
+                "heavy",
             ),
             "gpt-5.6-sol",
-            "pro",
+            "heavy",
         ),
     ],
 )
@@ -556,7 +556,7 @@ def test_cli_propagates_oracle_overrides_consistently(
 
 @pytest.mark.parametrize(
     "effort",
-    ["light", "standard", "extended", "extra-high", "pro", "heavy"],
+    ["light", "standard", "extended", "heavy"],
 )
 def test_cli_accepts_all_oracle_thinking_time_values(effort: str) -> None:
     """The CLI accepts every browser effort value delegated to Oracle."""
@@ -571,11 +571,13 @@ def test_cli_accepts_all_oracle_thinking_time_values(effort: str) -> None:
     assert args.oracle_thinking_time == effort
 
 
+@pytest.mark.parametrize("effort", ["extra-high", "pro", "unsupported"])
 def test_cli_rejects_invalid_oracle_thinking_time(
     capsys: pytest.CaptureFixture[str],
+    effort: str,
 ) -> None:
     """Invalid effort remains a structured input error before dispatch."""
-    status = cli.main(["review", "--pr", "1", "--oracle-thinking-time", "unsupported"])
+    status = cli.main(["review", "--pr", "1", "--oracle-thinking-time", effort])
     payload = _stdout_json(capsys)
     error = cast("dict[str, object]", payload["error"])
 

@@ -97,7 +97,7 @@ def parser() -> argparse.ArgumentParser:
         )
         command.add_argument(
             "--oracle-thinking-time",
-            choices=("light", "standard", "extended", "extra-high", "pro", "heavy"),
+            choices=("light", "standard", "extended", "heavy"),
             metavar="EFFORT",
             help="override Oracle browser effort; omitted means inherit",
         )

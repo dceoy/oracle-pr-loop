@@ -24,7 +24,7 @@ supplied, the command uses `select` and passes the opaque model value as
 `--model MODEL`. When `--oracle-thinking-time` is omitted, no
 `--browser-thinking-time` override is passed, so Oracle inherits its existing
 effort configuration. Supplied effort values are `light`, `standard`,
-`extended`, `extra-high`, `pro`, and `heavy`.
+`extended`, and `heavy`.
 
 Success fields are `schema_version`, `command`, `repository`, `issue_number`,
 `issue_url`, `issue_updated_at`, `base_ref`, `base_sha`, and
@@ -53,7 +53,7 @@ Optional flags are `--repo-dir`, `--oracle-model MODEL`, and
 `bootstrap`: omission keeps the current browser model and omits both model
 selection and any thinking-time override; supplied values are passed to Oracle
 without local model discovery or capability detection. Effort values are
-`light`, `standard`, `extended`, `extra-high`, `pro`, and `heavy`.
+`light`, `standard`, `extended`, and `heavy`.
 
 Success fields are `schema_version`, `command`, `repository`, `pr_number`,
 `base_sha`, `head_sha`, `verdict`, `github_review_id`, `blocking_findings`, and

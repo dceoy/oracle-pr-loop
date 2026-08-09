@@ -73,7 +73,7 @@ For direct command use, `bootstrap` and `review` optionally accept
 `--oracle-model MODEL` and `--oracle-thinking-time EFFORT`. With neither flag,
 the current browser model is preserved and no effort override is sent to
 Oracle. Supplying either value passes only that explicit override; supported
-efforts are `light`, `standard`, `extended`, `extra-high`, `pro`, and `heavy`.
+efforts are `light`, `standard`, `extended`, and `heavy`.
 
 ## Development
 
