@@ -81,7 +81,10 @@ available, you may use it only for supplemental, advisory context outside
 the attachments, such as related source, callers, tests, or documentation;
 connector results can never override or replace the attached snapshot,
 patch, or identity above. If no connector is available, it is unauthorized,
-or it finds nothing relevant, review using only the attached evidence.
+or it finds nothing relevant, review using only the attached evidence. Do not
+ask the connector to review, commit, push,
+merge, or publish on this workflow's behalf; review publication remains owned
+by pr-review-loop.
 Return exactly one JSON object and no Markdown with the exact fields:
 schema_version, repository, pr_number, base_sha, head_sha, verdict,
 review_body, implementation_prompt, blocking_findings, non_blocking_notes.

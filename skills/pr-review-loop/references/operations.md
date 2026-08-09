@@ -41,7 +41,31 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-GitHub connector use is opportunistic: Oracle's browser engine has no CLI flag or documented mechanism to select, activate, or verify that a GitHub connector/app is available to a given ChatGPT turn, unlike its dedicated Deep Research tool-menu activation. `review` cannot detect, require, or confirm connector use, so treat the prompt's connector permission as advisory only. To manually spot-check that a connected ChatGPT account is actually using it, run `review` on a PR whose correct assessment depends on repository context outside the attached snapshot (for example, a caller of a changed function that lives outside the diff) and confirm the returned `review_body` or `non_blocking_notes` reflects that outside context; treat an unconfirmed check as inconclusive, not as a failure, since the unchanged deterministic path is always correct on its own.
+### ChatGPT-side connector preflight
+
+Oracle browser mode drives ChatGPT over CDP, and Oracle's documented [browser-tools helper](https://github.com/steipete/oracle/blob/main/docs/manual-tests.md) provides `inspect`, `eval`, and an interactive `pick` command; its [browser-mode documentation](https://askoracle.sh/browser-mode.html) also describes the underlying CDP path. These tools can support a manual preflight of the ChatGPT account and composer, but the preflight is not an end-to-end `pr-review-loop review` smoke test.
+
+Use an appropriate disposable or otherwise authorized test repository because a real `review` publishes a GitHub review, and treat the authenticated browser/CDP session as privileged:
+
+1. Connect and authorize GitHub in the ChatGPT account used by the Oracle browser profile.
+2. Choose a test prompt whose answer requires a known repository value outside the supplied changed files, such as an unchanged caller or related test. Do not record cookies, tokens, or private account data.
+   Before running the browser-tools commands below, clone or enter a `steipete/oracle` source checkout and run `pnpm install`. `scripts/browser-tools.ts` is a repository-relative helper and is not included in the installed `oracle` CLI; use an equivalent absolute script path only when its checkout and dependencies are installed.
+3. Keep the browser session available and choose one CDP port. Run Oracle's `pnpm tsx scripts/browser-tools.ts inspect --ports <PORT> --json` to identify the intended ChatGPT page. Before using browser-tools `pick` or `eval`, make that ChatGPT page the only open tab on the selected port, rerun `inspect`, and verify it is the sole listed tab; pass `--port <PORT>` to every subsequent `pnpm tsx scripts/browser-tools.ts pick ...` and `pnpm tsx scripts/browser-tools.ts eval ...` command. `inspect` alone does not bind those commands to an inspected target. If other tabs must remain open, do not use `pick` or `eval`; instead use a DevTools/MCP client that explicitly attaches to the inspected ChatGPT target ID and verify the attached page URL or title before interacting. On the deterministically targeted page, identify the composer app/mention control, open the picker, and select GitHub. The picker must render a real GitHub app token or chip; do not type or paste `@GitHub`, because literal text is not app selection.
+4. Submit the small ChatGPT-side test prompt in the selected app turn and inspect the UI/tool trace for an actual GitHub app invocation plus the known outside context. A response that merely mentions GitHub or outside context is not evidence of invocation.
+
+This preflight demonstrates that the account, ChatGPT UI, and CDP/browser tooling can perform the smallest app-selection interaction. It does not demonstrate that the `review` command coordinated that interaction, preserved the selected app through submission, or validated the resulting structured review.
+
+### End-to-end Oracle review smoke test still required
+
+Issue #50 remains open until the actual `review` path is exercised. Existing CDP/browser-tools coordination, operator-assisted orchestration, and upstream Oracle integration are possible implementation routes; no single route is inherently required. The end-to-end test must:
+
+1. Select the GitHub app token in the same Oracle-controlled browser turn before the review prompt is submitted, using a reproducible coordination point.
+2. Run `review` on a test PR with the exact attached snapshot, patch, changed-file contents, and instruction files.
+3. Verify the ChatGPT UI records an actual GitHub app/tool invocation and that the returned review uses known repository context outside the attachments; a literal `@GitHub` mention or matching prose is insufficient.
+4. Verify the structured `repository`, `pr_number`, `base_sha`, and `head_sha` exactly match the attached snapshot, and inspect the published review's commit anchor.
+5. Disconnect or unauthorize GitHub and repeat the test. Where ChatGPT permits fallback, the attachment-only review must still complete; an Oracle/UI operational error remains fail-closed and must be documented as such.
+
+Until this end-to-end smoke test succeeds, keep connector data supplemental and untrusted, keep the attached evidence and exact identity binding authoritative, and treat the deterministic attachment-only path as the only guaranteed runtime behavior.
 
 ## Recovery
 
