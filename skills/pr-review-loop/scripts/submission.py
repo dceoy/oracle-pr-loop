@@ -271,6 +271,7 @@ def execute_submit(
         github.repo_dir,
         ["add", "--all", "--", ".", LEGACY_ARTIFACTS_PATHSPEC],
     )
+    _reject_staged_legacy_artifacts(command_runner, github.repo_dir)
     _git(
         command_runner,
         github.repo_dir,
@@ -385,6 +386,34 @@ def execute_submit(
         pushed_branch=initial.head_ref,
     )
     return result
+
+
+def _reject_staged_legacy_artifacts(
+    runner: CommandRunner,
+    repo_dir: Path,
+) -> None:
+    """Fail closed if the reserved legacy `.pr-review-loop` path is indexed.
+
+    Raises:
+        LooprError: A `.pr-review-loop` entry is staged or tracked, whether
+            pre-staged before submit ran or already committed to Git.
+    """
+    staged = _git(
+        runner,
+        repo_dir,
+        ["diff", "--cached", "--name-only", "-z", "--", ".pr-review-loop"],
+    )
+    tracked = _git(
+        runner,
+        repo_dir,
+        ["ls-files", "--cached", "-z", "--", ".pr-review-loop"],
+    )
+    if staged or tracked:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "legacy_artifacts",
+            "workspace contains reserved .pr-review-loop runtime content",
+        )
 
 
 def _validate_local_workspace(

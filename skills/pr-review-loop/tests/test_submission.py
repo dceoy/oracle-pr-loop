@@ -233,6 +233,57 @@ def test_legacy_runtime_artifacts_are_never_staged(tmp_path: Path) -> None:
     assert status.strip().startswith("??")
 
 
+def test_pre_staged_legacy_artifact_fails_before_commit(tmp_path: Path) -> None:
+    """A legacy artifact staged before submit runs cannot be committed."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    legacy_dir = repo / ".pr-review-loop" / "runs"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "leftover.txt"
+    legacy_file.write_text("stale audit artifact\n", encoding="utf-8")
+    _git(repo, "add", "--", ".pr-review-loop")
+    runner = ScenarioRunner(repo, remote, state)
+
+    with pytest.raises(LooprError) as captured:
+        execute_submit(
+            pr_value="1",
+            expected_head=head,
+            repo_dir=repo,
+            runner=runner,
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "legacy_artifacts"
+    assert _git(repo, "rev-parse", "HEAD") == head
+
+
+def test_tracked_legacy_artifact_fails_before_commit(tmp_path: Path) -> None:
+    """A .pr-review-loop path already tracked in history blocks submission."""
+    repo, remote, state, _base, _head = _fixture_repo(tmp_path)
+    tracked_dir = repo / ".pr-review-loop"
+    tracked_dir.mkdir()
+    (tracked_dir / "tracked.txt").write_text("was committed\n", encoding="utf-8")
+    _git(repo, "add", "--", ".pr-review-loop")
+    _git(repo, "commit", "-m", "accidentally track legacy artifact")
+    tracked_head = _git(repo, "rev-parse", "HEAD")
+    state["headRefOid"] = tracked_head
+    _git(repo, "push", "origin", "feature")
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+
+    with pytest.raises(LooprError) as captured:
+        execute_submit(
+            pr_value="1",
+            expected_head=tracked_head,
+            repo_dir=repo,
+            runner=runner,
+        )
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "legacy_artifacts"
+    assert _git(repo, "rev-parse", "HEAD") == tracked_head
+
+
 def test_empty_workspace_fails_without_commit(tmp_path: Path) -> None:
     """An unchanged workspace cannot create an empty commit."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
