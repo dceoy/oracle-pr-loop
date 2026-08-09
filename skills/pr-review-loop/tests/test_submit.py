@@ -164,6 +164,9 @@ def _fixture_repo(
     state: JsonObject = {
         "url": "https://github.com/acme/demo/pull/1",
         "number": 1,
+        "title": "Feature",
+        "body": "Feature body",
+        "author": {"login": "author"},
         "state": "OPEN",
         "isDraft": False,
         "baseRefName": "main",
@@ -172,6 +175,8 @@ def _fixture_repo(
         "headRefOid": head,
         "headRepository": {"nameWithOwner": "acme/demo", "name": "demo"},
         "headRepositoryOwner": {"login": "acme"},
+        "files": [{"path": "file.txt"}],
+        "changedFiles": 1,
     }
     return repo, remote, state, base, head
 
