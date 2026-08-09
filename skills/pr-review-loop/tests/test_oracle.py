@@ -806,7 +806,7 @@ def test_parse_review_accepts_a_validated_finding_location() -> None:
 def test_parse_review_preserves_a_location_path_with_surrounding_whitespace() -> None:
     """A path is never stripped, so it cannot be normalized onto a different file."""
     parsed = parse_review(
-        _review_payload({"path": " file.py", "line": 7, "side": "RIGHT"}),
+        _finding_review_payload({"path": " file.py", "line": 7, "side": "RIGHT"}),
         _sample_pr(),
     )
 
