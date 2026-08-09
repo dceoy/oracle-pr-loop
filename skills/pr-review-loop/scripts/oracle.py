@@ -846,6 +846,8 @@ def _oracle_command(
     prompt: str,
     attachments: tuple[Path, ...],
     slug: str,
+    *,
+    manual_login: bool,
 ) -> list[str]:
     """Build the bounded Oracle argv for one browser invocation.
 
@@ -856,10 +858,13 @@ def _oracle_command(
         "oracle",
         "--engine",
         "browser",
-        "--browser-manual-login",
+    ]
+    if manual_login:
+        command.append("--browser-manual-login")
+    command.extend((
         "--browser-model-strategy",
         "select" if model is not None else "current",
-    ]
+    ))
     if model is not None:
         command.extend(("--model", model))
     if thinking_time is not None:
@@ -917,6 +922,7 @@ def invoke_oracle(
         prompt,
         attachments,
         slug,
+        manual_login=False,
     )
     _validate_oracle_command(command)
     environment = runner.oracle_env()

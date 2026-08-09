@@ -67,6 +67,17 @@ def test_oracle_env_preserves_remote_transport_configuration() -> None:
     assert runner.redact("remote-token-value") == "[REDACTED]"
 
 
+def test_oracle_remote_token_is_redacted_as_a_known_secret() -> None:
+    """`ORACLE_REMOTE_TOKEN` is covered by the existing credential redaction."""
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "ORACLE_REMOTE_TOKEN": "remote-secret-token",
+    })
+
+    assert runner.contains_secret("remote-secret-token")
+    assert runner.redact("token=remote-secret-token") == "token=[REDACTED]"
+
+
 def test_command_error_keeps_bounded_redacted_completed_output(tmp_path: Path) -> None:
     """Retry classifiers can inspect failed streams without exposing secrets."""
     runner = CommandRunner({

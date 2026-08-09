@@ -1270,3 +1270,21 @@ def test_review_prompt_requires_anchored_findings_without_body_duplication() -> 
     assert "LEFT" in PROMPT
     assert "RIGHT" in PROMPT
     assert "never restate an individual" in PROMPT
+
+
+def test_oracle_invocation_does_not_force_local_login(tmp_path: Path) -> None:
+    """Oracle argv never hard-codes local-login flags that block remote transport."""
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload)
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+    assert "--engine" in oracle_argv
+    assert "browser" in oracle_argv

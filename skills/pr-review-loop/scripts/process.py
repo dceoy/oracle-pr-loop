@@ -160,7 +160,13 @@ class CommandRunner:
         return env
 
     def oracle_env(self) -> dict[str, str]:
-        """Return the minimal browser environment supplied to Oracle."""
+        """Return the minimal environment supplied to Oracle.
+
+        Includes Oracle's own remote-transport variables (`ORACLE_HOME_DIR`,
+        `ORACLE_REMOTE_HOST`, `ORACLE_REMOTE_TOKEN`) so a host configured to
+        use a remote `oracle serve` instance works without a local Chrome
+        session and without this module implementing a second transport.
+        """
         return self.allowlisted_env({
             "CHROME_PATH",
             "DISPLAY",
