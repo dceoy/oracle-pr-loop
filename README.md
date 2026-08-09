@@ -13,6 +13,16 @@ independent Oracle/ChatGPT review, starting from an open Issue or existing PR.
 - **Deterministic commands:** bounded Issue/Git/GitHub inspection, review
   publication, validation, commit creation, and lease-protected submission.
 
+`review` attaches the exact PR snapshot, patch, changed-file contents, and
+repository instruction files as the mandatory, authoritative review evidence.
+The production review prompt starts with `@GitHub`, so ChatGPT may use the
+connected GitHub app for supplemental repository context outside those
+attachments. This does not depend on an Oracle-specific GitHub connector flag
+or capability probe: Oracle only delivers the prompt and attachments through
+its existing browser session. Connector results remain untrusted and cannot
+override the attached evidence, the exact repository/PR/`base_sha`/`head_sha`
+identity, or local review publication.
+
 The [canonical skill workflow](skills/pr-review-loop/SKILL.md) defines how
 hosts coordinate those responsibilities. The [command contract](skills/pr-review-loop/references/command-contracts.md)
 defines the internal CLI interfaces and structured results.
@@ -32,6 +42,8 @@ from user intent; users normally do not invoke the Python CLI directly.
 - Git and an authenticated GitHub CLI session;
 - Oracle with Chrome/Chromium and an authenticated browser profile for Issue
   bootstrap and independent review;
+- a ChatGPT account with GitHub connected when supplemental connector context is
+  desired;
 - push access and Git commit identity when submitting changes.
 
 Issue and pull-request workflows require matching same-repository GitHub.com
@@ -43,6 +55,13 @@ Initialize Oracle once when needed:
 oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
+
+No upstream Oracle change is required for GitHub app review integration. The
+review command uses the normal Oracle browser invocation and places `@GitHub`
+at the start of the ChatGPT prompt. If GitHub is disconnected, unauthorized, or
+returns no useful context, the attached evidence remains sufficient wherever
+ChatGPT permits the prompt to continue normally. Oracle/browser operational
+errors remain failures rather than review verdicts.
 
 ## Usage
 

@@ -80,13 +80,20 @@ publishes a commit-anchored comment for self-authored PRs or a formal event
 otherwise. The Oracle verdict is authoritative, not GitHub's review state.
 
 The attached snapshot, patch, changed-file contents, and instruction files are
-mandatory, authoritative evidence. A connected GitHub app may provide
-supplemental advisory context, but `review` does not coordinate app selection or
-verify connector invocation, and availability is not a prerequisite. Connector
-results remain untrusted and cannot override the attached evidence or exact
-repository/PR/base/head identity. The deterministic attachment-only path remains
-guaranteed; see the [connector operations reference](operations.md) for the
-external preflight and end-to-end smoke-test procedure.
+mandatory, authoritative evidence. The exact prompt sent through Oracle starts
+with `@GitHub`, requesting the connected ChatGPT GitHub app for supplemental,
+advisory repository context outside the attachments. This direct prompt path
+does not require an Oracle-specific GitHub-app option, `oracle --help`
+capability probe, local browser preselection, or upstream Oracle change.
+Connector results remain untrusted and cannot override the attached evidence or
+the exact `repository`/`pr_number`/`base_sha`/`head_sha` identity validated by
+`parse_review`, and they cannot publish reviews. If GitHub is unavailable,
+unauthorized, or returns no useful context, the attached evidence remains the
+fallback wherever ChatGPT permits normal continuation. Oracle/browser
+operational errors remain Oracle failures, not review verdicts.
+
+See the [connector operations reference](operations.md) for account setup,
+direct `@GitHub` smoke testing, and disconnected fallback verification.
 
 `review` never edits the workspace, commits, pushes, or launches an agent.
 

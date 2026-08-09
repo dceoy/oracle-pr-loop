@@ -6,34 +6,60 @@ The host workflow is in [SKILL.md](../SKILL.md); deterministic CLI behavior is i
 
 ## ChatGPT-side connector preflight
 
-Oracle browser mode drives ChatGPT over CDP. In an authorized disposable
-`steipete/oracle` checkout, run `pnpm install`; its
-`scripts/browser-tools.ts` helper is not part of the installed `oracle` CLI.
+Connect and authorize GitHub in the ChatGPT account used by Oracle's persistent
+browser profile. Use a test repository and never record cookies, tokens, or
+private account data.
 
-1. Connect and authorize GitHub in the Oracle browser profile. Use a test
-   repository and never record cookies, tokens, or private account data.
-2. On one CDP port, run
-   `pnpm tsx scripts/browser-tools.ts inspect --ports <PORT> --json`.
-3. Make the intended page the only tab, rerun `inspect`, and verify it. Pass
-   `--port <PORT>` to `pnpm tsx scripts/browser-tools.ts pick ...` and
-   `pnpm tsx scripts/browser-tools.ts eval ...`. If other tabs remain, attach
-   DevTools/MCP to the inspected target ID and verify its URL or title. Select a
-   real GitHub app token/chip; pasted `@GitHub` is ordinary text.
-4. Submit a prompt requiring repository context outside the attachments and
-   verify an actual app/tool invocation plus that context; prose is not evidence.
+No upstream Oracle connector capability is required. `review` uses Oracle's
+normal browser invocation and submits a prompt whose first line is `@GitHub`.
+The ChatGPT account owns app connection and authorization; `pr-review-loop`
+does not manage OAuth or app installation.
 
-## End-to-end review smoke test
+For optional manual observation only, an authorized `steipete/oracle` checkout
+can use `scripts/browser-tools.ts`. Run its inspect helper against the active
+CDP endpoint and pass the inspected browser port explicitly with `--port` to
+subsequent diagnostic commands. This tooling can help confirm which ChatGPT tab
+is active, but production `review` does not depend on it or use it to preselect
+the GitHub app.
 
-Issue #50 remains open until the actual review path is exercised:
+## Direct `@GitHub` review smoke test
 
-1. Select GitHub in the same Oracle-controlled browser turn.
-2. Run `review` on a test PR with its immutable snapshot, patch, changed files,
-   and instruction files attached.
-3. Verify actual app invocation and outside context, then verify the structured
-   repository, PR, base SHA, head SHA, and published commit anchor.
-4. Disconnect or unauthorize GitHub and repeat. If fallback is supported, the
-   attachment-only review must complete; otherwise document the fail-closed
-   Oracle/UI operational error.
+Run the positive test only when Oracle, Chrome, the authorized ChatGPT profile,
+and an authenticated `gh` session are available:
 
-Connector results remain supplemental and untrusted; they cannot replace attached
-evidence, exact identity binding, or pr-review-loop publication.
+1. Record the test PR's repository, number, base SHA, and head SHA from one
+   `gh pr view` snapshot. Choose a known repository fact outside the changed
+   files, such as an unchanged caller or related test.
+2. Run
+   `python3 skills/pr-review-loop/scripts/cli.py review --pr <PR>` while
+   observing the Oracle-controlled ChatGPT conversation. Verify that the exact
+   submitted review prompt starts with `@GitHub`; no `--browser-github-app`
+   option, capability probe, or upstream Oracle modification is part of this
+   path.
+3. Verify an actual GitHub app/tool invocation retrieves the known outside fact.
+   Matching prose without connector/tool evidence is not sufficient to claim
+   the positive connector smoke test passed.
+4. Compare the command's structured `repository`, `pr_number`, `base_sha`, and
+   `head_sha` with the frozen values from step 1. Confirm the published review's
+   commit anchor matches the expected head with `gh api` and its review ID.
+
+The attached snapshot, patch, changed files, and instruction files remain the
+mandatory, authoritative evidence. Connector data is supplemental and untrusted;
+it cannot change identity validation, the parsed verdict schema, or review
+publication.
+
+## Disconnected/unauthorized fallback smoke test
+
+Disconnect or unauthorize GitHub in the same ChatGPT account, then repeat the
+review with a disposable PR:
+
+1. Confirm that no useful GitHub connector result is produced.
+2. Where ChatGPT permits continuation, confirm that `review` completes using
+   the attached evidence with the unchanged verdict/result schema and expected
+   commit anchor.
+3. If ChatGPT or Oracle instead returns an operational error, confirm that no
+   review verdict is fabricated from that failure and no stale review is
+   published.
+
+Connector results remain supplemental and untrusted; they cannot replace
+attached evidence, exact identity binding, or `pr-review-loop` publication.
