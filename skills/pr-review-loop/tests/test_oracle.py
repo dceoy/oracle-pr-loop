@@ -1345,6 +1345,32 @@ def test_oracle_invocation_uses_config_only_remote_host_as_remote(
     assert "--browser-manual-login" not in oracle_argv
 
 
+def test_oracle_invocation_uses_unquoted_key_config_remote_host_as_remote(
+    tmp_path: Path,
+) -> None:
+    """Oracle's documented unquoted-key config style also selects remote mode."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remoteHost: '10.0.0.9:9473' } }",
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+
+
 def test_oracle_invocation_allows_config_remote_host_matching_exported_env(
     tmp_path: Path,
 ) -> None:

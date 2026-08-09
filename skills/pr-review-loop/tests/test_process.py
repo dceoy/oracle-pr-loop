@@ -223,14 +223,66 @@ def test_oracle_config_with_block_comment_is_parsed(tmp_path: Path) -> None:
     assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
-def test_oracle_config_with_unsupported_json5_syntax_fails_closed_on_access(
+def test_oracle_config_with_unquoted_keys_and_single_quoted_strings_is_parsed(
     tmp_path: Path,
 ) -> None:
-    """A config relying on JSON5 syntax beyond comments/trailing commas fails closed."""
+    """Oracle's documented unquoted-key, single-quoted-string style parses."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{browser: {"remoteHost": "10.0.0.9:9473"}}',
+        "{ browser: { remoteHost: '127.0.0.1:9473',\n"
+        "  remoteToken: 'remote-secret-token' } }",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "127.0.0.1:9473"
+    assert runner.contains_secret("remote-secret-token")
+
+
+def test_oracle_config_single_quoted_string_may_contain_a_double_quote(
+    tmp_path: Path,
+) -> None:
+    """A literal `"` inside a single-quoted value survives requoting."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        """{ browser: { remoteHost: '10.0.0.9:9473', remoteToken: 'say "hi"' } }""",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret('say "hi"')
+
+
+def test_oracle_config_with_unquoted_keys_and_no_remote_fields_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A local-settings-only config using unquoted keys must not block Oracle."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{browser: {manualLogin: true}}",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
+    assert runner.contains_secret("anything") is False
+
+
+def test_oracle_config_with_unsupported_json5_syntax_fails_closed_on_access(
+    tmp_path: Path,
+) -> None:
+    """A config using JSON5 syntax beyond this module's subset fails closed."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +5}',
         encoding="utf-8",
     )
 
@@ -247,7 +299,7 @@ def test_oracle_config_with_unsupported_json5_syntax_does_not_break_construction
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{browser: {"remoteHost": "10.0.0.9:9473"}}',
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +5}',
         encoding="utf-8",
     )
 
@@ -264,7 +316,7 @@ def test_oracle_config_with_unsupported_json5_syntax_and_no_remote_fields_is_ign
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        "{browser: {manualLogin: true}}",
+        "{browser: {manualLogin: true}, extra: +5}",
         encoding="utf-8",
     )
 
@@ -281,7 +333,7 @@ def test_oracle_config_with_unsupported_json5_syntax_naming_remote_token_fails_c
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{browser: {"remoteToken": "config-secret-token"}}',
+        '{"browser": {"remoteToken": "config-secret-token"}, "extra": +5}',
         encoding="utf-8",
     )
 

@@ -40,11 +40,147 @@ def normalize_oracle_remote_value(value: object) -> str | None:
     return stripped or None
 
 
-def _strip_json_comments(text: str) -> str:
+def _strip_json5_comments(text: str) -> str:
     """Remove `//` and `/* */` comments that are outside string literals.
+
+    Both `"`- and `'`-delimited strings (JSON5 permits single-quoted
+    strings) are honored as literal spans, so a `//`/`/*` inside either
+    quote style is not mistaken for the start of a comment.
 
     Returns:
         text with every such comment removed.
+    """
+    result: list[str] = []
+    length = len(text)
+    index = 0
+    string_quote: str | None = None
+    while index < length:
+        char = text[index]
+        if string_quote is not None:
+            result.append(char)
+            if char == "\\" and index + 1 < length:
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if char == string_quote:
+                string_quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            string_quote = char
+            result.append(char)
+            index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "/":
+            index += 2
+            while index < length and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "*":
+            index += 2
+            while index + 1 < length and text[index : index + 2] != "*/":
+                index += 1
+            index += 2
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _requote_json5_single_quoted_body(text: str, start: int) -> tuple[list[str], int]:
+    r"""Convert one `'`-delimited string body, starting just past the `'`.
+
+    An unescaped `"` inside the string is escaped, an escaped `\'` is
+    unescaped (it needs no escaping once re-delimited by double quotes),
+    and every other escape sequence (`\\`, `\n`, `\uXXXX`, ...) is passed
+    through unchanged since JSON already supports it.
+
+    Returns:
+        The double-quoted-string characters (including both delimiters)
+        and the index just past the closing `'` (or end of text, if the
+        string is unterminated).
+    """
+    length = len(text)
+    index = start
+    body: list[str] = ['"']
+    while index < length and text[index] != "'":
+        next_char = text[index + 1] if index + 1 < length else ""
+        if text[index] == "\\" and next_char == "'":
+            body.append("'")
+            index += 2
+        elif text[index] == "\\" and index + 1 < length:
+            body.extend((text[index], next_char))
+            index += 2
+        elif text[index] == '"':
+            body.append('\\"')
+            index += 1
+        else:
+            body.append(text[index])
+            index += 1
+    body.append('"')
+    return body, index + 1
+
+
+def _convert_json5_single_quoted_strings(text: str) -> str:
+    """Rewrite `'`-delimited JSON5 strings as `"`-delimited JSON strings.
+
+    Must run on comment-free text.
+
+    Returns:
+        text with every single-quoted string rewritten as a double-quoted
+        one; double-quoted strings are left untouched.
+    """
+    result: list[str] = []
+    length = len(text)
+    index = 0
+    in_double_string = False
+    while index < length:
+        char = text[index]
+        if in_double_string:
+            result.append(char)
+            if char == "\\" and index + 1 < length:
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_double_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_double_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == "'":
+            body, index = _requote_json5_single_quoted_body(text, index + 1)
+            result.extend(body)
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _is_json5_identifier_start(char: str) -> bool:
+    """Return whether `char` can start a bare JSON5 identifier key."""
+    return char in "_$" or char.isalpha()
+
+
+def _is_json5_identifier_continue(char: str) -> bool:
+    """Return whether `char` can continue a bare JSON5 identifier key."""
+    return _is_json5_identifier_start(char) or char.isdigit()
+
+
+def _quote_json5_unquoted_keys(text: str) -> str:
+    """Wrap a bare JSON5 identifier object key in double quotes.
+
+    Must run after single-quoted strings have already been converted to
+    double-quoted ones, so only double-quoted spans need to be treated as
+    literal. An identifier is only treated as a key -- as opposed to a
+    bare value such as `true`/`false`/`null` -- when it is immediately
+    followed (ignoring whitespace) by `:`.
+
+    Returns:
+        text with every such bare key wrapped in double quotes.
     """
     result: list[str] = []
     length = len(text)
@@ -67,16 +203,19 @@ def _strip_json_comments(text: str) -> str:
             result.append(char)
             index += 1
             continue
-        if char == "/" and index + 1 < length and text[index + 1] == "/":
-            index += 2
-            while index < length and text[index] not in "\r\n":
+        if _is_json5_identifier_start(char):
+            start = index
+            index += 1
+            while index < length and _is_json5_identifier_continue(text[index]):
                 index += 1
-            continue
-        if char == "/" and index + 1 < length and text[index + 1] == "*":
-            index += 2
-            while index + 1 < length and text[index : index + 2] != "*/":
-                index += 1
-            index += 2
+            identifier = text[start:index]
+            lookahead = index
+            while lookahead < length and text[lookahead] in " \t\r\n":
+                lookahead += 1
+            if lookahead < length and text[lookahead] == ":":
+                result.extend(('"', identifier, '"'))
+            else:
+                result.append(identifier)
             continue
         result.append(char)
         index += 1
@@ -126,21 +265,25 @@ def _strip_json_trailing_commas(text: str) -> str:
 
 
 def _loads_json5_subset(text: str) -> object:
-    """Parse JSON, tolerating Oracle's comment and trailing-comma syntax.
+    """Parse JSON, tolerating a subset of Oracle's JSON5 config syntax.
 
-    Oracle parses its config file as JSON5 (comments, trailing commas,
-    unquoted keys, and more). This project has no JSON5 dependency, so
-    this only strips comments and trailing commas -- the two JSON5
-    features Oracle's own documented config examples rely on -- before
-    delegating to `json.loads`; a config using other JSON5-only syntax
-    still fails to parse here and is treated as unparseable, raising
-    `ValueError` (propagated from `json.loads`) rather than silently
-    yielding an incomplete result.
+    Oracle parses its config file as JSON5. This project has no JSON5
+    dependency, so this only supports the JSON5 features Oracle's own
+    documented config examples rely on -- `//`/`/* */` comments, trailing
+    commas, unquoted identifier keys, and single-quoted strings -- via a
+    sequence of text-level rewrites before delegating to `json.loads`; a
+    config using other JSON5-only syntax (a leading `+` on a number,
+    hexadecimal literals, `Infinity`/`NaN`, ...) still fails to parse here
+    and is treated as unparseable, raising `ValueError` (propagated from
+    `json.loads`) rather than silently yielding an incomplete result.
 
     Returns:
         The parsed JSON value.
     """
-    return json.loads(_strip_json_trailing_commas(_strip_json_comments(text)))
+    without_comments = _strip_json5_comments(text)
+    with_double_quoted_strings = _convert_json5_single_quoted_strings(without_comments)
+    with_quoted_keys = _quote_json5_unquoted_keys(with_double_quoted_strings)
+    return json.loads(_strip_json_trailing_commas(with_quoted_keys))
 
 
 @dataclass(frozen=True)
@@ -269,11 +412,12 @@ class CommandRunner:
                 return (None, None)
             message = (
                 f"Oracle's config file at {config_path} could not be parsed "
-                "even after stripping comments and trailing commas (Oracle's "
-                "own config format is JSON5, which also allows syntax such "
-                "as unquoted keys or single-quoted strings that this module "
-                "does not support), and it contains 'remoteHost' or "
-                "'remoteToken'; a config-declared browser.remoteHost or "
+                "even after tolerating comments, trailing commas, unquoted "
+                "keys, and single-quoted strings (Oracle's own config format "
+                "is JSON5, which also allows syntax such as a leading '+' on "
+                "a number, hexadecimal literals, or 'Infinity'/'NaN' that "
+                "this module does not support), and it contains 'remoteHost' "
+                "or 'remoteToken'; a config-declared browser.remoteHost or "
                 "browser.remoteToken cannot be ruled out, so refusing to "
                 "proceed. Convert the config to plain JSON or remove the "
                 "config-backed remote-transport fields."

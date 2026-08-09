@@ -513,7 +513,7 @@ def test_submit_command_survives_unparseable_oracle_config(
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{browser: {"remoteHost": "10.0.0.9:9473"}}',
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +5}',
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -545,7 +545,7 @@ def test_review_dispatch_surfaces_unparseable_oracle_config_as_structured_error(
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{browser: {"remoteHost": "10.0.0.9:9473"}}',
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +5}',
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -575,6 +575,42 @@ def test_review_dispatch_survives_common_json5_oracle_config(
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
         '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def touch_oracle_config(**kwargs: object) -> ReviewResult:
+        host = cast("CommandRunner", kwargs["runner"]).oracle_config_remote_host
+        assert host == "10.0.0.9:9473"
+        return ReviewResult(
+            repository="octo/repo",
+            pr_number=1,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            verdict="APPROVE",
+            github_review_id=42,
+            blocking_findings=(),
+            implementation_prompt=None,
+        )
+
+    monkeypatch.setattr(cli, "execute_review", touch_oracle_config)
+
+    status = cli.main(["review", "--pr", "1"])
+    payload = _stdout_json(capsys)
+
+    assert status == 0
+    assert payload["verdict"] == "APPROVE"
+
+def test_review_dispatch_survives_unquoted_key_json5_oracle_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A config using Oracle's documented unquoted-key style must not block `review`."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remoteHost: '10.0.0.9:9473' } }",
         encoding="utf-8",
     )
     monkeypatch.setenv("HOME", str(tmp_path))
