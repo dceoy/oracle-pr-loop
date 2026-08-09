@@ -46,7 +46,7 @@ REMOTE_BUSY_MAX_DELAY_SECONDS = 30.0
 REMOTE_BUSY_MAX_RETRIES = 6
 REMOTE_BUSY_JITTER_MIN = 0.75
 REMOTE_BUSY_JITTER_MAX = 1.0
-REMOTE_HOST_ENV = "ORACLE_REMOTE_HOST"
+REMOTE_ROUTING_PREFIX = "Routing browser automation to remote host "
 BOOTSTRAP_CORE_BUNDLE_FILES = 2
 MAX_BOOTSTRAP_ATTACHMENTS = MAX_INSTRUCTION_FILES + BOOTSTRAP_CORE_BUNDLE_FILES
 TOP_KEYS = {
@@ -446,23 +446,45 @@ def _validate_oracle_command(command: list[str]) -> None:
         )
 
 
-def _is_remote_busy(error: CommandError, environment: Mapping[str, str]) -> bool:
+def _last_nonblank_line(output: str) -> str | None:
+    """Return the last nonblank line from one independently captured stream."""
+    for line in reversed(output.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _has_remote_routing(output: str) -> bool:
+    """Return whether Oracle confirmed that it selected remote transport."""
+    return any(
+        (line := raw_line.strip()).startswith(REMOTE_ROUTING_PREFIX)
+        and bool(line[len(REMOTE_ROUTING_PREFIX) :].strip())
+        for raw_line in output.splitlines()
+    )
+
+
+def _is_remote_busy(error: CommandError) -> bool:
     """Recognize Oracle's pre-acceptance remote-service busy failure.
 
     The Oracle remote client turns the server's ``409 {"error":"busy"}``
-    response into the session log line ``ERROR: busy``. Requiring the remote
-    host configuration as well as that exact terminal line prevents local
-    browser errors, unrelated 4xx responses, and ambiguous transport failures
-    from entering the retry loop.
+    response into the session log line ``ERROR: busy`` and reports the selected
+    remote host in its routing diagnostic. Requiring that runtime diagnostic as
+    well as an exact terminal line in one captured stream prevents local browser
+    errors, unrelated 4xx responses, and ambiguous transport failures from
+    entering the retry loop.
 
     Returns:
         Whether error is the narrowly retryable remote contention failure.
     """
-    if error.returncode is None or not environment.get(REMOTE_HOST_ENV, "").strip():
+    if error.returncode is None or error.returncode == 0:
         return False
-    output = "\n".join(part for part in (error.stdout, error.stderr) if part)
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    return bool(lines and lines[-1] == "ERROR: busy")
+    if not _has_remote_routing(error.stdout):
+        return False
+    return (
+        _last_nonblank_line(error.stdout) == "ERROR: busy"
+        or _last_nonblank_line(error.stderr) == "ERROR: busy"
+    )
 
 
 def _remote_busy_delay(
@@ -525,7 +547,7 @@ def _run_oracle_with_retries(
                 watch_path=raw_path,
             )
         except CommandError as exc:
-            if not _is_remote_busy(exc, environment):
+            if not _is_remote_busy(exc):
                 raise LooprError(EXIT_ORACLE, "oracle", str(exc)) from exc
             if busy_retries >= REMOTE_BUSY_MAX_RETRIES:
                 message = (

@@ -22,6 +22,7 @@ from scripts.oracle import (
     REMOTE_BUSY_JITTER_MIN,
     REMOTE_BUSY_MAX_DELAY_SECONDS,
     REMOTE_BUSY_MAX_RETRIES,
+    REMOTE_ROUTING_PREFIX,
     _remote_busy_delay,
     build_bootstrap_bundle,
     build_review_bundle,
@@ -684,12 +685,70 @@ class _SequenceOracleRunner(CommandRunner):
         return CommandResult(argv, 0, b"", "")
 
 
-def _remote_busy_failure(output: str = "ERROR: busy\n") -> CommandError:
+class _ConfigOracleRunner(CommandRunner):
+    """Fake Oracle whose remote-routing diagnostic comes from user config."""
+
+    def __init__(self, home_dir: Path) -> None:
+        """Initialize one config-backed remote transport sequence."""
+        super().__init__({"ORACLE_HOME_DIR": str(home_dir)})
+        self.commands: list[tuple[str, ...]] = []
+        self.environments: list[dict[str, str]] = []
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Read Oracle's config and return busy once, then a valid response."""
+        del cwd, timeout, input_text, check, max_output
+        argv = tuple(str(value) for value in args)
+        self.commands.append(argv)
+        self.environments.append(dict(env))
+        if watch_path is None:
+            pytest.fail("Oracle invocation must provide a watched output path")
+        if "ORACLE_REMOTE_HOST" in env:
+            pytest.fail("config-backed routing must not require ORACLE_REMOTE_HOST")
+
+        config_path = Path(env["ORACLE_HOME_DIR"]) / "config.json"
+        raw_config: object = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_config, dict):
+            pytest.fail("Oracle config must be an object")
+        config = cast("dict[str, object]", raw_config)
+        raw_browser = config.get("browser")
+        if not isinstance(raw_browser, dict):
+            pytest.fail("Oracle config must contain browser.remoteHost")
+        browser = cast("dict[str, object]", raw_browser)
+        remote_host = browser.get("remoteHost")
+        if not isinstance(remote_host, str):
+            pytest.fail("Oracle config must contain browser.remoteHost")
+        if len(self.commands) == 1:
+            busy_output = f"{REMOTE_ROUTING_PREFIX}{remote_host}\nERROR: busy\n"
+            busy_error = _remote_busy_failure(busy_output)
+            raise busy_error
+        watch_path.write_text("raw", encoding="utf-8")
+        return CommandResult(argv, 0, b"", "")
+
+
+def _remote_busy_failure(
+    output: str | None = None,
+    *,
+    stderr: str = "",
+) -> CommandError:
     """Return one completed Oracle subprocess failure for remote contention."""
+    if output is None:
+        output = f"{REMOTE_ROUTING_PREFIX}oracle.example:9473\nERROR: busy\n"
     return CommandError(
         "command failed (1): oracle: ERROR: busy",
         returncode=1,
         stdout=output,
+        stderr=stderr,
     )
 
 
@@ -779,16 +838,109 @@ def test_remote_busy_budget_exhaustion_is_bounded(tmp_path: Path) -> None:
     assert len(delays) == REMOTE_BUSY_MAX_RETRIES
 
 
+def test_configured_remote_mode_retries_without_remote_host_environment(
+    tmp_path: Path,
+) -> None:
+    """Oracle config under ORACLE_HOME_DIR can select remote retries by itself."""
+    home_dir = tmp_path / "oracle-home"
+    home_dir.mkdir()
+    (home_dir / "config.json").write_text(
+        json.dumps({"browser": {"remoteHost": "oracle.example:9473"}}),
+        encoding="utf-8",
+    )
+    runner = _ConfigOracleRunner(home_dir)
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    delays: list[float] = []
+
+    assert (
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (),
+            MAX_ORACLE_ATTACHMENTS,
+            _sleep=delays.append,
+            _random_value=lambda: 0.0,
+        )
+        == "raw"
+    )
+
+    assert len(runner.commands) == 2
+    assert delays == pytest.approx([0.75])
+    assert all("ORACLE_HOME_DIR" in environment for environment in runner.environments)
+    assert all(
+        "ORACLE_REMOTE_HOST" not in environment for environment in runner.environments
+    )
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [
+        pytest.param(
+            f"{REMOTE_ROUTING_PREFIX}oracle.example:9473\nERROR: busy\n",
+            "configuration warning\n",
+            id="stdout-busy-stderr-warning",
+        ),
+        pytest.param(
+            f"{REMOTE_ROUTING_PREFIX}oracle.example:9473\n",
+            "configuration warning\nERROR: busy\n",
+            id="stderr-busy",
+        ),
+    ],
+)
+def test_remote_busy_inspects_each_stream_independently(
+    stdout: str,
+    stderr: str,
+    tmp_path: Path,
+) -> None:
+    """A warning in one stream cannot mask an exact busy terminal line in the other."""
+    runner = _SequenceOracleRunner(
+        [_remote_busy_failure(stdout, stderr=stderr), "raw"],
+        {},
+    )
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    delays: list[float] = []
+
+    assert (
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (),
+            MAX_ORACLE_ATTACHMENTS,
+            _sleep=delays.append,
+            _random_value=lambda: 0.0,
+        )
+        == "raw"
+    )
+
+    assert len(runner.commands) == 2
+    assert delays == pytest.approx([0.75])
+
+
 @pytest.mark.parametrize(
     ("environment", "output"),
     [
-        pytest.param(_remote_environment(), "ERROR: unauthorized\n", id="unauthorized"),
         pytest.param(
             _remote_environment(),
-            "ERROR: busy while the browser is running\n",
+            f"{REMOTE_ROUTING_PREFIX}oracle.example:9473\nERROR: unauthorized\n",
+            id="unauthorized",
+        ),
+        pytest.param(
+            _remote_environment(),
+            (
+                f"{REMOTE_ROUTING_PREFIX}oracle.example:9473\n"
+                "ERROR: busy while the browser is running\n"
+            ),
             id="accepted-run-error",
         ),
-        pytest.param({"NOT_REMOTE": "1"}, "ERROR: busy\n", id="local-busy"),
+        pytest.param(
+            _remote_environment(),
+            "ERROR: busy\n",
+            id="missing-routing-diagnostic",
+        ),
     ],
 )
 def test_only_remote_busy_is_retryable(
