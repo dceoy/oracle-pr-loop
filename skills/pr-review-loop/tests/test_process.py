@@ -423,13 +423,33 @@ def test_oracle_config_with_line_comments_and_trailing_commas_is_parsed(
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473",},\n}',
         encoding="utf-8",
     )
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
     assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
+@pytest.mark.parametrize("invalid_container", ["[,]", "{,}"])
+def test_oracle_config_with_comma_only_container_fails_closed(
+    tmp_path: Path,
+    invalid_container: str,
+) -> None:
+    """Invalid comma-only JSON5 containers cannot activate remote mode."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remoteHost: '127.0.0.1:9473' }, extra: "
+        f"{invalid_container} }}",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
 
 
 def test_oracle_config_with_block_comment_is_parsed(tmp_path: Path) -> None:

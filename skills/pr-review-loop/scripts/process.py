@@ -317,18 +317,22 @@ def _quote_json5_unquoted_keys(text: str) -> str:
 
 
 def _strip_json_trailing_commas(text: str) -> str:
-    """Remove commas outside strings that only precede a closing `}`/`]`.
+    """Remove valid trailing commas outside strings.
 
     Must run on comment-free text, so a plain whitespace lookahead is
-    enough to find the next structural character.
+    enough to find the next structural character. A comma in an empty or
+    otherwise incomplete container is retained so `json.loads` rejects the
+    same malformed structure Oracle's JSON5 parser rejects.
 
     Returns:
-        text with every such trailing comma removed.
+        text with supported trailing commas removed.
     """
     result: list[str] = []
     length = len(text)
     index = 0
     in_string = False
+    previous_significant: str | None = None
+    value_terminators = frozenset(']}"0123456789el')
     while index < length:
         char = text[index]
         if in_string:
@@ -339,6 +343,7 @@ def _strip_json_trailing_commas(text: str) -> str:
                 continue
             if char == '"':
                 in_string = False
+                previous_significant = char
             index += 1
             continue
         if char == '"':
@@ -350,10 +355,16 @@ def _strip_json_trailing_commas(text: str) -> str:
             lookahead = index + 1
             while lookahead < length and text[lookahead] in " \t\r\n":
                 lookahead += 1
-            if lookahead < length and text[lookahead] in "}]":
+            if (
+                lookahead < length
+                and text[lookahead] in "}]"
+                and previous_significant in value_terminators
+            ):
                 index += 1
                 continue
         result.append(char)
+        if char not in " \t\r\n":
+            previous_significant = char
         index += 1
     return "".join(result)
 
