@@ -11,12 +11,19 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from scripts.artifacts import TemporaryFileWriter
 from scripts.github import (
+    MAX_ANCHOR_PATCH_BYTES,
+    MAX_GITHUB_DIFF_BYTES,
+    MAX_GITHUB_DIFF_LINES,
+    MAX_GITHUB_FILE_DIFF_BYTES,
+    MAX_GITHUB_FILE_DIFF_LINES,
     MAX_ISSUE_BODY_BYTES,
     MAX_ISSUE_COMMENT_BYTES,
     MAX_ISSUE_COMMENTS,
     MAX_ISSUE_COMMENTS_TOTAL_BYTES,
     GitHubClient,
     IssueClient,
+    _diff_sections,
+    _diff_size_safe_paths,
     diff_anchors,
     diff_base_paths,
     diff_blob_shas,
@@ -80,6 +87,58 @@ def _sample_pr(
         head_repository="owner/repository",
         changed_paths=paths,
         raw={},
+    )
+
+
+def _repo_with_added_files(
+    tmp_path: Path,
+    contents: dict[str, bytes],
+) -> tuple[str, Path, str, str]:
+    """Create a repository whose head adds the supplied exact file bytes."""
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "added-files-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    _git(git, ["commit", "--allow-empty", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    for path, content in contents.items():
+        file_path = repo / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(content)
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    return git, repo, base, head
+
+
+def _synthetic_diff_header(path: str, line_count: int = 1) -> bytes:
+    """Build one synthetic diff header with a controllable hunk size."""
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "new file mode 100644\n"
+        "index 0000000000000000000000000000000000000000.."
+        "1111111111111111111111111111111111111111\n"
+        "--- /dev/null\n"
+        f"+++ b/{path}\n"
+        f"@@ -0,0 +{line_count} @@\n"
+    ).encode()
+
+
+def _synthetic_diff_section(path: str, payload_bytes: int) -> bytes:
+    """Build one small-text diff section with a controllable byte size."""
+    return _synthetic_diff_header(path) + b"+" + (b"x" * payload_bytes) + b"\n"
+
+
+def _synthetic_diff_section_with_lines(
+    path: str,
+    body_lines: tuple[bytes, ...],
+) -> bytes:
+    """Build one synthetic added-file section from exact body lines."""
+    return _synthetic_diff_header(path, len(body_lines)) + b"".join(
+        b"+" + line + b"\n" for line in body_lines
     )
 
 
@@ -1210,6 +1269,127 @@ def test_diff_anchors_reads_a_header_path_containing_a_space() -> None:
     })
 
 
+def test_diff_size_safe_paths_treats_file_limit_equality_as_unsafe() -> None:
+    """A file exactly at GitHub's byte limit cannot receive an inline anchor."""
+    path = "file.py"
+    empty_section = _synthetic_diff_section(path, 0)
+    below = _synthetic_diff_section(
+        path,
+        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section) - 1,
+    )
+    at_limit = _synthetic_diff_section(
+        path,
+        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section),
+    )
+
+    assert len(below) == MAX_GITHUB_FILE_DIFF_BYTES - 1
+    assert len(at_limit) == MAX_GITHUB_FILE_DIFF_BYTES
+    assert _diff_size_safe_paths(
+        below,
+        below.decode(),
+        frozenset({path}),
+    ) == frozenset({path})
+    assert (
+        _diff_size_safe_paths(
+            at_limit,
+            at_limit.decode(),
+            frozenset({path}),
+        )
+        == frozenset()
+    )
+
+
+def test_diff_size_safe_paths_preserves_nonfinal_section_separator_bytes() -> None:
+    """A non-final section at the byte limit remains ineligible."""
+    large_path = "large.py"
+    small_path = "small.py"
+    empty_section = _synthetic_diff_section(large_path, 0)
+    large_section = _synthetic_diff_section(
+        large_path,
+        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section),
+    )
+    small_section = _synthetic_diff_section(small_path, 0)
+    patch = large_section + small_section
+    sections = _diff_sections(patch, patch.decode())
+
+    assert len(sections) == 2
+    assert sections[0][0] == large_path
+    assert len(sections[0][1]) == MAX_GITHUB_FILE_DIFF_BYTES
+    assert _diff_size_safe_paths(
+        patch,
+        patch.decode(),
+        frozenset({large_path, small_path}),
+    ) == frozenset({small_path})
+
+
+def test_diff_size_safe_paths_treats_aggregate_limit_equality_as_unsafe() -> None:
+    """An aggregate patch at the byte limit cannot receive inline anchors."""
+    paths = ("one.py", "two.py", "three.py")
+    empty_sections = tuple(_synthetic_diff_section(path, 0) for path in paths)
+    target_lengths = (
+        MAX_GITHUB_DIFF_BYTES // 3,
+        MAX_GITHUB_DIFF_BYTES // 3,
+        MAX_GITHUB_DIFF_BYTES - 2 * (MAX_GITHUB_DIFF_BYTES // 3),
+    )
+    at_limit = b"".join(
+        _synthetic_diff_section(path, target - len(empty_section))
+        for path, target, empty_section in zip(
+            paths,
+            target_lengths,
+            empty_sections,
+            strict=True,
+        )
+    )
+    below_limit = at_limit[:-1]
+
+    assert len(at_limit) == MAX_GITHUB_DIFF_BYTES
+    assert len(below_limit) == MAX_GITHUB_DIFF_BYTES - 1
+    assert at_limit.count(b"\n") < MAX_GITHUB_DIFF_LINES
+    assert all(
+        len(section) < MAX_GITHUB_FILE_DIFF_BYTES
+        for _path, section in _diff_sections(at_limit, at_limit.decode())
+    )
+    assert all(
+        section.count(b"\n") < MAX_GITHUB_FILE_DIFF_LINES
+        for _path, section in _diff_sections(at_limit, at_limit.decode())
+    )
+    assert _diff_size_safe_paths(
+        below_limit,
+        below_limit.decode(),
+        frozenset(paths),
+    ) == frozenset(paths)
+    assert (
+        _diff_size_safe_paths(
+            at_limit,
+            at_limit.decode(),
+            frozenset(paths),
+        )
+        == frozenset()
+    )
+
+
+def test_diff_size_safe_paths_ignores_header_like_lines_inside_hunks() -> None:
+    """Hunk content cannot relabel an oversized diff section's path."""
+    large_path = "large.py"
+    small_path = "small.py"
+    large_section = _synthetic_diff_section_with_lines(
+        large_path,
+        (
+            b"x" * MAX_GITHUB_FILE_DIFF_BYTES,
+            b"++ b/small.py",
+        ),
+    )
+    patch = large_section + _synthetic_diff_section(small_path, 0)
+
+    sections = _diff_sections(patch, patch.decode())
+    assert sections[0][0] == large_path
+    assert _diff_size_safe_paths(
+        patch,
+        patch.decode(),
+        frozenset({large_path, small_path}),
+    ) == frozenset({small_path})
+
+
 def test_client_diff_anchors_reads_the_frozen_base_to_head_diff(
     tmp_path: Path,
 ) -> None:
@@ -1222,6 +1402,85 @@ def test_client_diff_anchors_reads_the_frozen_base_to_head_diff(
         ("file.py", "LEFT", 1),
         ("file.py", "RIGHT", 1),
     })
+
+
+def test_client_diff_anchors_drops_only_a_file_over_github_file_byte_limit(
+    tmp_path: Path,
+) -> None:
+    """A large file loses inline anchors while a small file remains eligible."""
+    _git_exe, repo, base, head = _repo_with_added_files(
+        tmp_path,
+        {
+            "large.txt": b"x" * (MAX_GITHUB_FILE_DIFF_BYTES + 1) + b"\n",
+            "small.py": b"safe\n",
+        },
+    )
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("large.txt", "small.py"))
+    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+    text = patch.decode()
+    section_sizes = {
+        path: len(section)
+        for path, section in _diff_sections(patch, text)
+        if path is not None
+    }
+
+    assert len(patch) < MAX_GITHUB_DIFF_BYTES
+    assert patch.count(b"\n") < MAX_GITHUB_DIFF_LINES
+    assert section_sizes["large.txt"] >= MAX_GITHUB_FILE_DIFF_BYTES
+    assert section_sizes["small.py"] < MAX_GITHUB_FILE_DIFF_BYTES
+    anchors = client.diff_anchors(pull_request)
+    assert ("small.py", "RIGHT", 1) in anchors
+    assert not any(path == "large.txt" for path, _side, _line in anchors)
+
+
+def test_client_diff_anchors_drops_all_files_when_aggregate_bytes_are_unsafe(
+    tmp_path: Path,
+) -> None:
+    """Several individually eligible files lose anchors past the aggregate cap."""
+    content = b"x" * (MAX_GITHUB_FILE_DIFF_BYTES - 2048) + b"\n"
+    paths = tuple(f"large-{index}.txt" for index in range(1, 4))
+    _git_exe, repo, base, head = _repo_with_added_files(
+        tmp_path,
+        dict.fromkeys(paths, content),
+    )
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=paths)
+    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+    text = patch.decode()
+    sections = _diff_sections(patch, text)
+
+    assert len(patch) >= MAX_GITHUB_DIFF_BYTES
+    assert len(patch) < MAX_ANCHOR_PATCH_BYTES
+    assert patch.count(b"\n") < MAX_GITHUB_DIFF_LINES
+    assert all(len(section) < MAX_GITHUB_FILE_DIFF_BYTES for _path, section in sections)
+    assert client.diff_anchors(pull_request) == frozenset()
+
+
+def test_client_diff_anchors_drops_all_files_when_aggregate_lines_are_unsafe(
+    tmp_path: Path,
+) -> None:
+    """Several small files lose anchors past the aggregate line cap."""
+    line_count = MAX_GITHUB_DIFF_LINES // 2
+    paths = ("many-one.txt", "many-two.txt")
+    _git_exe, repo, base, head = _repo_with_added_files(
+        tmp_path,
+        dict.fromkeys(paths, b"x\n" * line_count),
+    )
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=paths)
+    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+    text = patch.decode()
+    sections = _diff_sections(patch, text)
+
+    assert len(patch) < MAX_GITHUB_DIFF_BYTES
+    assert patch.count(b"\n") >= MAX_GITHUB_DIFF_LINES
+    assert all(
+        len(section) < MAX_GITHUB_FILE_DIFF_BYTES
+        and section.count(b"\n") < MAX_GITHUB_FILE_DIFF_LINES
+        for _path, section in sections
+    )
+    assert client.diff_anchors(pull_request) == frozenset()
 
 
 def test_client_diff_anchors_rejects_a_context_line_as_left(tmp_path: Path) -> None:

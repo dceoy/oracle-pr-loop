@@ -44,6 +44,10 @@ MAX_ISSUE_BODY_BYTES = 200_000
 MAX_ANCHOR_PATCH_BYTES = 2 * 1024 * 1024
 MAX_ANCHOR_BLOB_BYTES = 2 * 1024 * 1024
 MAX_ANCHOR_ATTR_BYTES = 2 * 1024 * 1024
+MAX_GITHUB_DIFF_BYTES = 1 * 1024 * 1024
+MAX_GITHUB_DIFF_LINES = 20_000
+MAX_GITHUB_FILE_DIFF_BYTES = 500 * 1024
+MAX_GITHUB_FILE_DIFF_LINES = 20_000
 NULL_SHA = "0" * 40
 BODY_MARKERS = frozenset({" ", "+", "-", "\\"})
 PR_FIELDS = (
@@ -426,6 +430,128 @@ def diff_base_paths(patch: str, allowed_paths: frozenset[str]) -> dict[str, str]
             if head_path is not None and head_path in allowed_paths:
                 base_paths[head_path] = old_path or head_path
     return base_paths
+
+
+def _physical_line_count(value: bytes) -> int:
+    """Count LF-delimited physical lines in one exact byte sequence.
+
+    Returns:
+        The number of physical lines in ``value``.
+    """
+    return value.count(b"\n") + int(bool(value and not value.endswith(b"\n")))
+
+
+def _diff_section_bytes(raw_lines: list[bytes], start: int, end: int) -> bytes:
+    """Return one section, retaining its separator before the next one.
+
+    Returns:
+        The exact bytes belonging to the section.
+    """
+    value = b"\n".join(raw_lines[start:end])
+    if end < len(raw_lines):
+        value += b"\n"
+    return value
+
+
+def _advance_diff_section_state(
+    line: str,
+    old_path: str | None,
+    head_path: str | None,
+    in_hunk: bool,
+) -> tuple[str | None, str | None, bool]:
+    """Update one section's paths and hunk state from one diff line.
+
+    Returns:
+        The updated base path, head path, and hunk-state flag.
+    """
+    if in_hunk:
+        if line[:1] in BODY_MARKERS:
+            return old_path, head_path, True
+        in_hunk = False
+    if line.startswith("--- "):
+        old_path = _header_path(line.removeprefix("--- "), "a/")
+    elif line.startswith("+++ "):
+        head_path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+    elif HUNK_RE.match(line) is not None:
+        in_hunk = True
+    return old_path, head_path, in_hunk
+
+
+def _diff_sections(
+    patch: bytes,
+    text: str,
+) -> tuple[tuple[str | None, bytes], ...]:
+    """Return each canonical diff section with its head-side path and bytes.
+
+    The text and byte views are split on LF together so the section sizes are
+    measured from the exact bytes Git emitted, while the existing safe header
+    parser determines the same head-side path used by ``diff_anchors``.
+    """
+    raw_lines = patch.split(b"\n")
+    text_lines = text.split("\n")
+    if len(raw_lines) != len(text_lines):
+        return ()
+
+    sections: list[tuple[str | None, bytes]] = []
+    section_start: int | None = None
+    old_path: str | None = None
+    head_path: str | None = None
+    in_hunk = False
+    for index, line in enumerate(text_lines):
+        if line.startswith("diff --git "):
+            if section_start is not None:
+                sections.append((
+                    head_path,
+                    _diff_section_bytes(raw_lines, section_start, index),
+                ))
+            section_start = index
+            old_path = None
+            head_path = None
+            in_hunk = False
+            continue
+        if section_start is None:
+            continue
+        old_path, head_path, in_hunk = _advance_diff_section_state(
+            line,
+            old_path,
+            head_path,
+            in_hunk,
+        )
+
+    if section_start is not None:
+        sections.append((
+            head_path,
+            _diff_section_bytes(raw_lines, section_start, len(raw_lines)),
+        ))
+    return tuple(sections)
+
+
+def _diff_size_safe_paths(
+    patch: bytes,
+    text: str,
+    allowed_paths: frozenset[str],
+) -> frozenset[str]:
+    """Return changed paths whose local diff remains fully GitHub-visible.
+
+    GitHub can omit portions of a pull-request diff once the aggregate or a
+    single file reaches its byte or line limit. Inline comments for those
+    paths are therefore rejected before publication; the aggregate review
+    body remains responsible for their findings. Equality with any limit is
+    treated as unsafe because the server may truncate at that boundary.
+    """
+    if len(patch) >= MAX_GITHUB_DIFF_BYTES or _physical_line_count(patch) >= (
+        MAX_GITHUB_DIFF_LINES
+    ):
+        return frozenset()
+
+    oversized_paths: set[str] = set()
+    for path, section in _diff_sections(patch, text):
+        if path in allowed_paths and (
+            len(section) >= MAX_GITHUB_FILE_DIFF_BYTES
+            or _physical_line_count(section) >= MAX_GITHUB_FILE_DIFF_LINES
+        ):
+            oversized_paths.add(path)
+    return frozenset(path for path in allowed_paths if path not in oversized_paths)
 
 
 def diff_blob_shas(
@@ -1482,8 +1608,11 @@ class GitHubClient(_ImmutableGitMixin):
                 "patch is not UTF-8",
             ) from exc
         allowed_paths = frozenset(pull_request.changed_paths)
-        anchors = diff_anchors(text, allowed_paths)
-        shas = diff_blob_shas(text, allowed_paths)
+        size_safe_paths = _diff_size_safe_paths(patch, text, allowed_paths)
+        if not size_safe_paths:
+            return frozenset()
+        anchors = diff_anchors(text, size_safe_paths)
+        shas = diff_blob_shas(text, size_safe_paths)
         binary_by_sha: dict[str, bool] = {}
 
         def is_binary(sha: str) -> bool:
