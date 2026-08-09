@@ -42,6 +42,7 @@ MAX_ISSUE_COMMENTS_TOTAL_BYTES = 300_000
 MAX_ISSUE_BODY_BYTES = 200_000
 MAX_ANCHOR_PATCH_BYTES = 2 * 1024 * 1024
 MAX_ANCHOR_BLOB_BYTES = 2 * 1024 * 1024
+MAX_ANCHOR_ATTR_BYTES = 2 * 1024 * 1024
 NULL_SHA = "0" * 40
 BODY_MARKERS = frozenset({" ", "+", "-", "\\"})
 PR_FIELDS = (
@@ -693,7 +694,13 @@ class _ImmutableGitMixin:
         })
         return env
 
-    def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
+    def git_bytes(
+        self,
+        args: list[str],
+        *,
+        max_output: int,
+        input_text: str | None = None,
+    ) -> bytes:
         """Read immutable Git data with a strict output bound.
 
         Returns:
@@ -708,6 +715,7 @@ class _ImmutableGitMixin:
                 cwd=self.repo_dir,
                 env=self._git_env(),
                 max_output=max_output,
+                input_text=input_text,
             ).stdout
         except CommandError as exc:
             raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
@@ -885,6 +893,75 @@ class _ImmutableGitMixin:
         except LooprError:
             return True
         return b"\0" in data
+
+    def paths_with_diff_unset(
+        self, sha: str, paths: frozenset[str], *, max_output: int
+    ) -> frozenset[str]:
+        """Return every path whose `diff` attribute is `unset` in the tree at sha.
+
+        `--source=sha` resolves tracked `.gitattributes` blobs from the
+        frozen commit tree itself, not the ambient worktree, so a checkout
+        left on an unrelated ref (for example, still on the PR's base while
+        its head declares `<path> -diff`) cannot hide an attribute the
+        reviewed tree actually declares. `-c core.attributesFile=/dev/null`
+        closes the same default-global-attributes gap `patch()` closes,
+        since `check-attr` consults that config key regardless of
+        `--source`. `$GIT_DIR/info/attributes` has no equivalent override
+        and still applies on top of `--source`, so a local rule there can
+        make this report `unset` for a path neither tree actually marks
+        that way; that only ever drops an anchor GitHub would have
+        accepted, never keeps one it would reject, so it stays on the safe
+        side of the same trade-off `blob_is_binary` already makes. A path
+        this reports `unset` for is one GitHub's own diff can render as
+        binary/non-diffable, independent of whatever textual hunk
+        `patch()` produced under the worktree's own attributes.
+
+        Returns:
+            The subset of paths whose `diff` attribute resolves to `unset`
+            at sha.
+
+        Raises:
+            LooprError: `check-attr` returned a malformed or non-UTF-8
+                `-z` record.
+        """
+        if not paths:
+            return frozenset()
+        output = self.git_bytes(
+            [
+                "-c",
+                "core.attributesFile=/dev/null",
+                "check-attr",
+                "--source",
+                sha,
+                "-z",
+                "--stdin",
+                "diff",
+            ],
+            max_output=max_output,
+            input_text="".join(f"{path}\0" for path in paths),
+        )
+        fields = output.split(b"\0")
+        if fields and fields[-1] == b"":
+            fields = fields[:-1]
+        if len(fields) % 3 != 0:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "git check-attr returned a malformed -z record",
+            )
+        unset: set[str] = set()
+        for index in range(0, len(fields), 3):
+            path_bytes, _attribute, value = fields[index : index + 3]
+            if value == b"unset":
+                try:
+                    unset.add(path_bytes.decode("utf-8", "strict"))
+                except UnicodeDecodeError as exc:
+                    raise LooprError(
+                        EXIT_PRECONDITION,
+                        "git",
+                        "git check-attr returned a non-UTF-8 path",
+                    ) from exc
+        return frozenset(unset)
 
 
 class GitHubClient(_ImmutableGitMixin):
@@ -1266,9 +1343,21 @@ class GitHubClient(_ImmutableGitMixin):
         source can influence — and dropped unless that content actually
         lacks a NUL byte.
 
+        That content check alone is not enough: a tracked `.gitattributes`
+        edit committed at base or head, but not checked out in the ambient
+        worktree `patch()` ran against, can mark a path `-diff` in the
+        reviewed tree while leaving it looking like ordinary text both in
+        `patch()`'s hunk and in the blob's own bytes. GitHub resolves that
+        same tracked attribute from base and head directly, so it would
+        still refuse to anchor a comment there. Every candidate path is
+        therefore also checked against the base and head trees themselves,
+        independently of the worktree, and dropped whenever either tree
+        marks it `-diff`.
+
         Returns:
             The anchors, restricted to the snapshot's validated changed
-            paths and confirmed non-binary by content.
+            paths, confirmed non-binary by content, and not marked `-diff`
+            in either the base or head tree.
 
         Raises:
             LooprError: The patch is not UTF-8.
@@ -1296,10 +1385,22 @@ class GitHubClient(_ImmutableGitMixin):
                 )
             return binary_by_sha[sha]
 
+        candidate_paths = frozenset(path for path, _side, _line in anchors)
+        attribute_forced = self.paths_with_diff_unset(
+            pull_request.base_sha,
+            candidate_paths,
+            max_output=MAX_ANCHOR_ATTR_BYTES,
+        ) | self.paths_with_diff_unset(
+            pull_request.head_sha,
+            candidate_paths,
+            max_output=MAX_ANCHOR_ATTR_BYTES,
+        )
+
         return frozenset(
             (path, side, line)
             for path, side, line in anchors
-            if not is_binary(
+            if path not in attribute_forced
+            and not is_binary(
                 shas.get(path, (NULL_SHA, NULL_SHA))[1 if side == "RIGHT" else 0]
             )
         )

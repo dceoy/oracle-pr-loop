@@ -1385,6 +1385,55 @@ def test_client_diff_anchors_drops_a_locally_attribute_forced_text_hunk(
     }
 
 
+def test_client_diff_anchors_drops_a_head_tree_attribute_off_the_worktree(
+    tmp_path: Path,
+) -> None:
+    """A `-diff` attribute committed at head drops anchors, off the worktree.
+
+    `patch()` resolves `.gitattributes` from whatever ref the local
+    worktree happens to have checked out, not from the base or head commit
+    it diffs. A PR whose head commit adds `file.txt -diff` while the
+    worktree stays checked out at base therefore still renders `file.txt`
+    as an ordinary textual hunk — the content itself has no NUL byte, so
+    the content check alone would accept it — even though GitHub resolves
+    that same tracked attribute from head and would refuse to anchor a
+    comment there. `diff_anchors` must check the base and head trees
+    themselves, independently of the checked-out worktree, and drop every
+    anchor for such a path while keeping anchors for an ordinary file
+    changed in the same commit.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "tree-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.txt").write_text("line1\nline2\nline3\n")
+    (repo / "other.py").write_text("alpha\n")
+    _git(git, ["add", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".gitattributes").write_text("file.txt -diff\n")
+    (repo / "file.txt").write_text("line1\nCHANGED\nline3\n")
+    (repo / "other.py").write_text("BRAVO\n")
+    _git(git, ["add", ".gitattributes", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["checkout", "-q", base], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(
+        base, head, paths=("file.txt", "other.py", ".gitattributes")
+    )
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors if path == "file.txt"} == (
+        set()
+    )
+    assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
+
+
 def test_client_patch_ignores_a_default_global_attributes_file(
     tmp_path: Path,
 ) -> None:
