@@ -82,7 +82,7 @@ def execute_review(
         LooprError: The pull request, bundle, or Oracle verdict violated a
             precondition, or the posted review could not be verified fresh.
     """
-    command_runner = runner or CommandRunner()
+    command_runner = runner if runner is not None else CommandRunner(repo_dir=repo_dir)
     github = GitHubClient(command_runner, repo_dir)
     github.initialize(pr_value)
     initial = github.snapshot()

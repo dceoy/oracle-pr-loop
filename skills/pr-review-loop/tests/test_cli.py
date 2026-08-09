@@ -565,6 +565,77 @@ def test_review_dispatch_surfaces_unparseable_oracle_config_as_structured_error(
     assert error["category"] == "bundle"
     assert "could not be parsed" in cast("str", error["message"])
 
+def test_review_cli_binds_runner_config_inspection_to_repo_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The parsed repo directory selects the same config Oracle will read."""
+    launcher_dir = tmp_path / "launcher"
+    launcher_home = launcher_dir / ".oracle-home"
+    launcher_home.mkdir(parents=True)
+    (launcher_home / "config.json").write_text(
+        '{"browser": {"remoteHost": "192.0.2.1:9473", '
+        '"remoteToken": "launcher-decoy-secret"}}',
+        encoding="utf-8",
+    )
+    repo_dir = tmp_path / "repo"
+    repo_home = repo_dir / ".oracle-home"
+    repo_home.mkdir(parents=True)
+    (repo_home / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", '
+        '"remoteToken": "repo-secret-token"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(launcher_dir)
+    monkeypatch.setenv("ORACLE_HOME_DIR", ".oracle-home")
+
+    created_runners: list[CommandRunner] = []
+
+    def make_runner(*, repo_dir: Path | None = None) -> CommandRunner:
+        runner = (
+            CommandRunner(repo_dir=repo_dir)
+            if repo_dir is not None
+            else CommandRunner()
+        )
+        created_runners.append(runner)
+        return runner
+
+    monkeypatch.setattr(cli, "CommandRunner", make_runner)
+    expected = ReviewResult(
+        repository="octo/repo",
+        pr_number=1,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        verdict="APPROVE",
+        github_review_id=42,
+        blocking_findings=(),
+        implementation_prompt=None,
+    )
+
+    def fake_review(**kwargs: object) -> ReviewResult:
+        runner = cast("CommandRunner", kwargs["runner"])
+        assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+        assert runner.contains_secret("repo-secret-token")
+        assert not runner.contains_secret("launcher-decoy-secret")
+        return expected
+
+    monkeypatch.setattr(cli, "execute_review", fake_review)
+
+    status = cli.main([
+        "review",
+        "--pr",
+        "1",
+        "--repo-dir",
+        str(repo_dir),
+    ])
+    payload = _stdout_json(capsys)
+
+    assert status == 0
+    assert payload == expected.as_json()
+    assert len(created_runners) == 2
+
+
 def test_review_dispatch_survives_common_json5_oracle_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -458,9 +458,23 @@ class CommandError(RuntimeError):
 class CommandRunner:
     """Run trusted executables with bounded input, output, and lifetime."""
 
-    def __init__(self, source_env: Mapping[str, str] | None = None) -> None:
-        """Capture the source environment and known secret values."""
+    def __init__(
+        self,
+        source_env: Mapping[str, str] | None = None,
+        *,
+        repo_dir: Path | None = None,
+    ) -> None:
+        """Capture the source environment and known secret values.
+
+        `repo_dir` must be the directory Oracle itself is launched with
+        (`_invoke_oracle`'s `cwd=repo_dir`): a relative `ORACLE_HOME_DIR` is
+        resolved against it, not against this process's own current
+        directory, so a relative value names the same config file Oracle's
+        subprocess actually reads. Defaults to this process's own current
+        directory for callers, such as `submit`, that never invoke Oracle.
+        """
         self.source_env = dict(source_env or os.environ)
+        self._repo_dir = Path() if repo_dir is None else repo_dir
         self.secrets = {
             value
             for key, value in self.source_env.items()
@@ -533,6 +547,15 @@ class CommandRunner:
         whitespace-padded config value cannot desync from what Oracle
         actually uses for transport selection and secret redaction.
 
+        A relative `ORACLE_HOME_DIR` is resolved against `self._repo_dir`
+        (Oracle's own launch cwd), not this process's own current
+        directory, so this module and the Oracle subprocess it later
+        launches with `cwd=repo_dir` always agree on which config file is
+        being inspected. Oracle's `getOracleHomeDir()` returns
+        `ORACLE_HOME_DIR` via `??`, so an explicitly empty value is still
+        "set" -- unlike Python truthiness -- and must not fall back to
+        `~/.oracle/config.json`.
+
         Returns:
             The config-declared (remote host, remote token); each is None if
             unset or blank, or if the config file is absent, unreadable, or
@@ -546,8 +569,8 @@ class CommandRunner:
                 host or token cannot be ruled out.
         """
         oracle_home_dir = self.source_env.get("ORACLE_HOME_DIR")
-        if oracle_home_dir:
-            config_path = Path(oracle_home_dir) / "config.json"
+        if oracle_home_dir is not None:
+            config_path = self._repo_dir / oracle_home_dir / "config.json"
         else:
             home = self.source_env.get("HOME")
             if not home:

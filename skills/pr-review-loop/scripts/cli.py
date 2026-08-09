@@ -115,11 +115,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         The process exit code.
     """
-    runner = CommandRunner()
     command = _requested_command(argv)
+    # Fallback runner for a LooprError raised by argument parsing itself,
+    # before `--repo-dir` is known; replaced below once parsing succeeds so
+    # Oracle's config-file inspection resolves a relative `ORACLE_HOME_DIR`
+    # against the same cwd Oracle itself will be launched with.
+    runner = CommandRunner()
     try:
         args = parser().parse_args(argv)
         command = args.command
+        runner = CommandRunner(repo_dir=Path(args.repo_dir))
         result = _dispatch(command, args, runner)
     except LooprError as exc:
         message = runner.redact(str(exc))

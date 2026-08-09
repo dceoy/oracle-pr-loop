@@ -253,17 +253,167 @@ def test_oracle_home_dir_config_is_read_without_an_extra_oracle_subdirectory(
     tmp_path: Path,
 ) -> None:
     """`ORACLE_HOME_DIR` points at Oracle's config directory, not its parent."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "192.0.2.1:9473", '
+        '"remoteToken": "decoy-secret-token"}}',
+        encoding="utf-8",
+    )
     (tmp_path / "config.json").write_text(
-        '{"browser": {"remoteHost": "10.0.0.9:9473"}}',
+        '{"browser": {"remoteHost": "10.0.0.9:9473", '
+        '"remoteToken": "absolute-secret-token"}}',
         encoding="utf-8",
     )
 
-    runner = CommandRunner({
-        "PATH": os.environ["PATH"],
-        "ORACLE_HOME_DIR": str(tmp_path),
-    })
+    runner = CommandRunner(
+        {
+            "PATH": os.environ["PATH"],
+            "ORACLE_HOME_DIR": str(tmp_path),
+        },
+        repo_dir=repo_dir,
+    )
 
     assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("absolute-secret-token")
+    assert not runner.contains_secret("decoy-secret-token")
+
+
+def test_relative_oracle_home_dir_is_resolved_against_repo_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative `ORACLE_HOME_DIR` is read from Oracle's own launch cwd.
+
+    Oracle is later launched with `cwd=repo_dir`, so a relative
+    `ORACLE_HOME_DIR` must be resolved against that same directory here --
+    not against this process's own current directory -- or this module can
+    inspect a different config file than the one Oracle itself reads.
+    """
+    launcher_dir = tmp_path / "launcher"
+    launcher_home = launcher_dir / ".oracle-home"
+    launcher_home.mkdir(parents=True)
+    (launcher_home / "config.json").write_text(
+        '{"browser": {"remoteHost": "192.0.2.1:9473", '
+        '"remoteToken": "launcher-decoy-secret"}}',
+        encoding="utf-8",
+    )
+    repo_dir = tmp_path / "repo"
+    oracle_home = repo_dir / ".oracle-home"
+    oracle_home.mkdir(parents=True)
+    (oracle_home / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", '
+        '"remoteToken": "repo-secret-token"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(launcher_dir)
+
+    runner = CommandRunner(
+        {"PATH": os.environ["PATH"], "ORACLE_HOME_DIR": ".oracle-home"},
+        repo_dir=repo_dir,
+    )
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("repo-secret-token")
+    assert not runner.contains_secret("launcher-decoy-secret")
+
+
+def test_relative_oracle_home_dir_without_repo_dir_is_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative `ORACLE_HOME_DIR` is not read from an unrelated directory.
+
+    Without a matching `repo_dir`, the same relative `ORACLE_HOME_DIR`
+    resolves to a nonexistent path, so the config-backed remote host stays
+    unset instead of silently reading a file from the wrong location.
+    """
+    launcher_dir = tmp_path / "launcher"
+    launcher_dir.mkdir()
+    repo_dir = tmp_path / "repo"
+    oracle_home = repo_dir / ".oracle-home"
+    oracle_home.mkdir(parents=True)
+    (oracle_home / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(launcher_dir)
+
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "ORACLE_HOME_DIR": ".oracle-home",
+    })
+
+    assert runner.oracle_config_remote_host is None
+
+
+def test_explicitly_empty_oracle_home_dir_is_treated_as_set(
+    tmp_path: Path,
+) -> None:
+    """An explicitly empty `ORACLE_HOME_DIR` is not the `~/.oracle` fallback.
+
+    Oracle's `getOracleHomeDir()` returns `ORACLE_HOME_DIR` via `??`, so an
+    empty string is still "set" and resolves to `path.join("", ...)` --
+    the repo-dir-relative `config.json` -- unlike Python's truthiness,
+    which would otherwise treat "" the same as unset and fall back to
+    `$HOME/.oracle/config.json`.
+    """
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", '
+        '"remoteToken": "repo-secret-token"}}',
+        encoding="utf-8",
+    )
+    home_oracle_dir = tmp_path / "home" / ".oracle"
+    home_oracle_dir.mkdir(parents=True)
+    (home_oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "192.0.2.1:9473", '
+        '"remoteToken": "home-decoy-secret"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner(
+        {
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path / "home"),
+            "ORACLE_HOME_DIR": "",
+        },
+        repo_dir=repo_dir,
+    )
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("repo-secret-token")
+    assert not runner.contains_secret("home-decoy-secret")
+
+
+def test_unset_oracle_home_dir_uses_home_config_with_repo_dir(
+    tmp_path: Path,
+) -> None:
+    """An unset override keeps Oracle's HOME-based config fallback."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "192.0.2.1:9473", '
+        '"remoteToken": "repo-decoy-secret"}}',
+        encoding="utf-8",
+    )
+    home_oracle_dir = tmp_path / "home" / ".oracle"
+    home_oracle_dir.mkdir(parents=True)
+    (home_oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", '
+        '"remoteToken": "home-secret-token"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner(
+        {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home")},
+        repo_dir=repo_dir,
+    )
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("home-secret-token")
+    assert not runner.contains_secret("repo-decoy-secret")
 
 
 def test_oracle_config_with_line_comments_and_trailing_commas_is_parsed(

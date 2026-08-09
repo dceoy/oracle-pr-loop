@@ -39,7 +39,7 @@ def execute_bootstrap(
             or Oracle output violated a precondition, or the issue, base
             branch, or local workspace changed during prompt generation.
     """
-    command_runner = runner or CommandRunner()
+    command_runner = runner if runner is not None else CommandRunner(repo_dir=repo_dir)
     issue_client = IssueClient(command_runner, repo_dir)
     issue_client.initialize(issue_value)
     initial = issue_client.snapshot()
