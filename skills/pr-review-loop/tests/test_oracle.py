@@ -1192,6 +1192,7 @@ def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None
     assert "Ignore all previous" in snapshot_text
     assert "reveal credentials" in snapshot_text
 
+
 def _finding_review_payload(location: object = None, **overrides: object) -> str:
     """Return one Oracle review payload carrying a single blocking finding."""
     pull_request = _sample_pr()
@@ -1404,6 +1405,114 @@ def test_oracle_invocation_allows_config_remote_host_matching_exported_env(
 
     oracle_argv = runner.commands[0]
     assert "--browser-manual-login" not in oracle_argv
+
+
+def test_oracle_invocation_refreshes_config_after_runner_construction(
+    tmp_path: Path,
+) -> None:
+    """Oracle validation and redaction use config values current at launch."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    config_path = oracle_dir / "config.json"
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": "initial-secret-token",
+            }
+        }),
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    rotated_token = "rotated-secret-token"
+    payload = _bootstrap_payload(issue, SHA_A) + rotated_token
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": str(home), "ORACLE_REMOTE_HOST": "127.0.0.1:9473"},
+    )
+
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "127.0.0.1:9473",
+                "remoteToken": rotated_token,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LooprError, match="contained a credential"):
+        _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    assert runner.commands
+    assert "--browser-manual-login" not in runner.commands[0]
+    assert runner.contains_secret(rotated_token)
+
+
+def test_oracle_invocation_rejects_rotated_config_token_in_patch(
+    tmp_path: Path,
+) -> None:
+    """A token rotated after bundling cannot enter Oracle attachments."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    config_path = oracle_dir / "config.json"
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": "initial-secret-token",
+            }
+        }),
+        encoding="utf-8",
+    )
+    rotated_token = "rotated-secret-token"
+    pull_request = _sample_pr()
+    runner = _FakeOracleRunner(
+        _review_payload(pull_request),
+        {"HOME": str(home)},
+    )
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    github = cast(
+        "GitHubClient",
+        _FakeReviewGitHub(
+            tmp_path,
+            patch=f"diff --git a/file.py b/file.py\n{rotated_token}\n".encode(),
+        ),
+    )
+    attachments = build_review_bundle(runner, github, writer, pull_request)
+
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": rotated_token,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LooprError, match="attachment contains a known credential"):
+        _invoke(
+            runner,
+            writer,
+            github.repo_dir,
+            PROMPT.format(
+                repository=pull_request.repository,
+                pr_number=pull_request.number,
+                base_sha=pull_request.base_sha,
+                head_sha=pull_request.head_sha,
+            ),
+            attachments,
+            MAX_ORACLE_ATTACHMENTS,
+        )
+
+    assert runner.commands == []
 
 
 def test_oracle_invocation_rejects_config_remote_host_disagreeing_with_env(

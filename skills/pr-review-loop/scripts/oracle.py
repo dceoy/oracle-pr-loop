@@ -565,6 +565,38 @@ def _run_oracle_with_retries(
             return
 
 
+def _reject_credentials_in_attachments(
+    runner: CommandRunner,
+    attachments: tuple[Path, ...],
+) -> None:
+    """Reject credentials that became known after bundle construction.
+
+    The Oracle config is refreshed immediately before invocation. Re-checking
+    every private bundle artifact after that refresh closes the gap where a
+    config-only token rotates after the source patch or instruction files were
+    initially validated.
+
+    Raises:
+        LooprError: An attachment cannot be inspected or contains a known
+            credential.
+    """
+    for attachment in attachments:
+        try:
+            data = attachment.read_bytes()
+        except OSError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "failed to inspect an Oracle attachment",
+            ) from exc
+        if runner.contains_secret(data):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "Oracle attachment contains a known credential",
+            )
+
+
 def _snapshot(pull_request: PullRequest) -> JsonObject:
     """Return the stable pull-request metadata snapshot.
 
@@ -962,6 +994,7 @@ def invoke_oracle(
         manual_login=not bool(remote_host),
     )
     _validate_oracle_command(command)
+    _reject_credentials_in_attachments(runner, attachments)
     environment = env
     sleep = time.sleep if _sleep is None else _sleep
     random_value = SystemRandom().random if _random_value is None else _random_value

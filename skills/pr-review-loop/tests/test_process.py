@@ -144,6 +144,7 @@ def test_oracle_remote_token_only_in_config_file_is_still_redacted(
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
     config_only_token = "config-file-only-secret-token"
 
+    assert runner.oracle_config_remote_host is None
     assert runner.contains_secret(config_only_token)
     assert runner.redact(f"token={config_only_token}") == "token=[REDACTED]"
 
@@ -162,6 +163,7 @@ def test_short_oracle_remote_config_tokens_are_redacted(
     )
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
+    assert runner.oracle_config_remote_host is None
     assert runner.contains_secret(token)
     assert runner.contains_secret(token.encode())
     assert runner.redact(f"token={token}") == "token=[REDACTED]"
@@ -206,8 +208,35 @@ def test_oracle_config_remote_token_is_trimmed_before_registration(
     )
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
+    assert runner.oracle_config_remote_host is None
     assert runner.contains_secret("config-file-only-secret-token")
     assert runner.redact("token=config-file-only-secret-token") == "token=[REDACTED]"
+
+
+def test_oracle_config_remote_values_are_refreshed_on_access(tmp_path: Path) -> None:
+    """Config host and token changes are observed after runner construction."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    config_path = oracle_dir / "config.json"
+    config_path.write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", '
+        '"remoteToken": "initial-secret-token"}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("initial-secret-token")
+
+    config_path.write_text(
+        '{"browser": {"remoteHost": "127.0.0.1:9473", '
+        '"remoteToken": "rotated-secret-token"}}',
+        encoding="utf-8",
+    )
+
+    assert runner.oracle_config_remote_host == "127.0.0.1:9473"
+    assert runner.contains_secret("rotated-secret-token")
+    assert runner.contains_secret("initial-secret-token")
 
 
 def test_oracle_config_remote_host_is_trimmed(tmp_path: Path) -> None:
@@ -267,6 +296,7 @@ def test_oracle_config_remote_token_bom_padded_is_trimmed_before_registration(
     )
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
+    assert runner.oracle_config_remote_host is None
     assert runner.contains_secret("config-secret-token")
     assert runner.redact("token=config-secret-token") == "token=[REDACTED]"
 

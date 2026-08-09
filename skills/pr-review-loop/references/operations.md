@@ -64,20 +64,6 @@ review with a disposable PR:
 Connector results remain supplemental and untrusted; they cannot replace
 attached evidence, exact identity binding, or `pr-review-loop` publication.
 
-`bootstrap --issue <NUMBER_OR_URL>` is an optional entry point for work that has no pull request yet; see `SKILL.md` for the full bootstrap-to-review handoff diagram. It uses ordinary GitHub CLI authentication and the same configured Oracle CLI as `review` (see "Review setup" below). Once the host has implemented the change and opened a pull request, proceed with the common flow above unchanged.
-
-## Codex CLI smoke test
-
-Confirm `.agents/skills/pr-review-loop` resolves to the canonical skill and execute the common flow without adding Codex-specific runtime code.
-
-## Claude Code smoke test
-
-Confirm `.claude/skills/pr-review-loop` resolves to the canonical skill and execute the same common flow without a Claude-specific wrapper.
-
-## Cursor CLI smoke test
-
-Use `.agents/skills/pr-review-loop` and execute the same common flow. Repository instructions may point to this skill but must not duplicate it.
-
 ## Review setup
 
 `review` requires a configured Oracle CLI and the ordinary authenticated GitHub CLI session. It publishes Oracle's canonical verdict as a commit-anchored comment for self-authored PRs and as the corresponding formal event for other PRs. `pr-review-loop` only ever invokes the local `oracle` CLI (`--engine browser`, a thinking-time budget, and the output contract); it never adds a custom transport, and where Oracle's browser work actually runs is entirely Oracle's own configuration, in one of two supported ways.
@@ -112,18 +98,6 @@ export ORACLE_REMOTE_TOKEN='...'  # token printed by `oracle serve`; it rotates 
 oracle --engine browser --prompt "Reply with ready"
 ```
 
-`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` to every Oracle invocation, and treats either an exported `ORACLE_REMOTE_HOST` or a config-declared `browser.remoteHost` as its supported signal for remote transport; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. Export both variables in the environment `pr-review-loop` runs in for the SSH-tunnel setup above, or rely on Oracle's config file alone. `pr-review-loop` also reads `$ORACLE_HOME_DIR/config.json` when `ORACLE_HOME_DIR` is set, otherwise `$HOME/.oracle/config.json` — the same file Oracle itself consults ahead of these environment variables — so a config-declared `browser.remoteToken` is registered for redaction/rejection, and a config-only `browser.remoteHost` selects remote mode just as it does for Oracle itself; `bootstrap`/`review` refuse to run only when both the config and the exported `ORACLE_REMOTE_HOST` declare a host and they disagree, rather than silently letting one override the other. A config file that cannot be parsed even after tolerating comments, trailing commas, unquoted keys, and single-quoted strings, and that spells out `remoteHost` or `remoteToken` (directly, or through a Unicode-escaped identifier), also refuses to run rather than risk missing a config-declared remote host or token; see "Recovery" below.
-
-## Recovery
-
-Oracle inputs and outputs are private command-scoped temporary files; GitHub and Git remain the source of truth.
-
-- `stale_head`, other stale-state failures, or lease loss: refresh the checkout and PR state, run a new review, and use the newly reviewed head.
-- `empty_patch`: return to the review result; do not create an empty commit.
-- authentication failure: verify that the ordinary `gh` session is logged in and can publish pull-request reviews.
-- Oracle/schema failure: restore the browser/session or reviewer output; do not weaken schema validation.
-- repository/origin mismatch: stop rather than redirect the patch.
-- `bootstrap`'s `workspace` precondition (local `HEAD` is not the returned `base_sha`, or the checkout has uncommitted tracked or untracked changes): the current checkout already holds implementation work from a prior `bootstrap`/implement cycle, or has unrelated local changes or stray untracked files. Set those aside (commit, stash, discard, or switch away), return to a clean checkout at the repository's current default-branch tip, and rerun `bootstrap`; do not point it at an in-progress implementation branch.
-- Oracle config parse failure (`bundle` category, `EXIT_PRECONDITION`): the config file at `$ORACLE_HOME_DIR/config.json` (or `$HOME/.oracle/config.json`) declares `remoteHost`/`remoteToken` but uses JSON5 syntax beyond comments, trailing commas, unquoted keys, and single-quoted strings (for example a leading `+` on a number, hexadecimal literals, `Infinity`/`NaN`, or an unterminated comment/string); convert those fields to plain JSON, fix the malformed syntax, or remove the config-backed remote-transport fields, so `pr-review-loop` can safely inspect the config before invoking Oracle.
+`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` to every Oracle invocation, and treats either an exported `ORACLE_REMOTE_HOST` or a config-declared `browser.remoteHost` as its supported signal for remote transport; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. Export both variables in the environment `pr-review-loop` runs in for the SSH-tunnel setup above, or rely on Oracle's config file alone. `pr-review-loop` also reads `$ORACLE_HOME_DIR/config.json` when `ORACLE_HOME_DIR` is set, otherwise `$HOME/.oracle/config.json` — the same file Oracle itself consults ahead of these environment variables — so a config-declared `browser.remoteToken` is registered for redaction/rejection, and a config-only `browser.remoteHost` selects remote mode just as it does for Oracle itself; `bootstrap`/`review` refuse to run only when both the config and the exported `ORACLE_REMOTE_HOST` declare a host and they disagree, rather than silently letting one override the other. A config file that cannot be parsed even after tolerating comments, trailing commas, unquoted keys, and single-quoted strings, and that spells out `remoteHost` or `remoteToken` (directly, or through a Unicode-escaped identifier), also refuses to run rather than risk missing a config-declared remote host or token.
 
 GitHub.com same-repository PRs only. Forks and GitHub Enterprise are unsupported; CI status is not an approval gate.

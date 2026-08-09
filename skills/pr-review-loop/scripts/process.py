@@ -659,32 +659,21 @@ class CommandRunner:
         )
         if normalized_remote_token:
             self.secrets.add(normalized_remote_token)
-        self._oracle_config_remote_error: LooprError | None = None
-        self._oracle_config_remote_host: str | None = None
-        try:
-            config_remote_host, config_remote_token = self._read_oracle_config_remote()
-        except LooprError as exc:
-            # Defer raising to first access of the `oracle_config_remote_host`
-            # property (the Oracle-only call path), so a config file Oracle
-            # itself accepts (JSON5) but this module cannot parse does not
-            # break commands, such as `submit`, that never invoke Oracle.
-            self._oracle_config_remote_error = exc
-        else:
-            self._oracle_config_remote_host = config_remote_host
-            if config_remote_token:
-                self.secrets.add(config_remote_token)
 
     @property
     def oracle_config_remote_host(self) -> str | None:
         """Oracle's config-declared `browser.remoteHost`, or None if unset.
 
-        Deferred from construction to this first access, on the Oracle-only
-        call path, so a config file this module cannot parse never breaks
-        commands that never invoke Oracle.
+        Read the config on every access so the host and token used for
+        validation and redaction come from the same current snapshot that
+        Oracle will read when it is launched. This is intentionally deferred
+        from construction so a config file this module cannot parse never
+        breaks commands that never invoke Oracle.
         """
-        if self._oracle_config_remote_error is not None:
-            raise self._oracle_config_remote_error
-        return self._oracle_config_remote_host
+        config_remote_host, config_remote_token = self._read_oracle_config_remote()
+        if config_remote_token:
+            self.secrets.add(config_remote_token)
+        return config_remote_host
 
     def _read_oracle_config_remote(self) -> tuple[str | None, str | None]:
         r"""Read Oracle's own remote-transport fields from its config file.
