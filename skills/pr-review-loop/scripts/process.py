@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- this module is the sole, argv-validated, shell=False subprocess boundary
 import tempfile
@@ -40,6 +41,25 @@ def normalize_oracle_remote_value(value: object) -> str | None:
     return stripped or None
 
 
+def _skip_json5_block_comment(text: str, start: int, length: int) -> int:
+    """Return the index just past a `/* */` block comment starting at `start`.
+
+    Returns:
+        The index of the first character after the comment's closing `*/`.
+
+    Raises:
+        ValueError: text ends before the comment is closed, which Oracle's
+            own `JSON5.parse` also rejects rather than tolerating.
+    """
+    index = start + 2
+    while index < length and text[index : index + 2] != "*/":
+        index += 1
+    if index >= length:
+        message = "Unterminated JSON5 block comment."
+        raise ValueError(message)
+    return index + 2
+
+
 def _strip_json5_comments(text: str) -> str:
     """Remove `//` and `/* */` comments that are outside string literals.
 
@@ -49,6 +69,12 @@ def _strip_json5_comments(text: str) -> str:
 
     Returns:
         text with every such comment removed.
+
+    Raises:
+        ValueError: text ends inside an unterminated `'`/`"`-delimited
+            string or an unterminated `/* */` block comment. Silently
+            tolerating either would let this module accept a file that
+            Oracle's own `JSON5.parse` rejects outright.
     """
     result: list[str] = []
     length = len(text)
@@ -77,13 +103,13 @@ def _strip_json5_comments(text: str) -> str:
                 index += 1
             continue
         if char == "/" and index + 1 < length and text[index + 1] == "*":
-            index += 2
-            while index + 1 < length and text[index : index + 2] != "*/":
-                index += 1
-            index += 2
+            index = _skip_json5_block_comment(text, index, length)
             continue
         result.append(char)
         index += 1
+    if string_quote is not None:
+        message = "Unterminated JSON5 string literal."
+        raise ValueError(message)
     return "".join(result)
 
 
@@ -93,12 +119,13 @@ def _requote_json5_single_quoted_body(text: str, start: int) -> tuple[list[str],
     An unescaped `"` inside the string is escaped, an escaped `\'` is
     unescaped (it needs no escaping once re-delimited by double quotes),
     and every other escape sequence (`\\`, `\n`, `\uXXXX`, ...) is passed
-    through unchanged since JSON already supports it.
+    through unchanged since JSON already supports it. Callers only ever
+    reach this on text `_strip_json5_comments` has already accepted, which
+    guarantees the `'`-delimited string starting at `start` is terminated.
 
     Returns:
         The double-quoted-string characters (including both delimiters)
-        and the index just past the closing `'` (or end of text, if the
-        string is unterminated).
+        and the index just past the closing `'`.
     """
     length = len(text)
     index = start
@@ -271,11 +298,14 @@ def _loads_json5_subset(text: str) -> object:
     dependency, so this only supports the JSON5 features Oracle's own
     documented config examples rely on -- `//`/`/* */` comments, trailing
     commas, unquoted identifier keys, and single-quoted strings -- via a
-    sequence of text-level rewrites before delegating to `json.loads`; a
+    sequence of text-level rewrites before delegating to `json.loads`. A
     config using other JSON5-only syntax (a leading `+` on a number,
-    hexadecimal literals, `Infinity`/`NaN`, ...) still fails to parse here
-    and is treated as unparseable, raising `ValueError` (propagated from
-    `json.loads`) rather than silently yielding an incomplete result.
+    hexadecimal literals, `Infinity`/`NaN`, ...), or one whose own
+    comment/string syntax is malformed (an unterminated `/* */` comment or
+    `'`/`"`-delimited string), still fails to parse here and is treated as
+    unparseable, raising `ValueError` (propagated from `json.loads` or
+    from `_strip_json5_comments`) rather than silently yielding an
+    incomplete or truncated result.
 
     Returns:
         The parsed JSON value.
@@ -284,6 +314,30 @@ def _loads_json5_subset(text: str) -> object:
     with_double_quoted_strings = _convert_json5_single_quoted_strings(without_comments)
     with_quoted_keys = _quote_json5_unquoted_keys(with_double_quoted_strings)
     return json.loads(_strip_json_trailing_commas(with_quoted_keys))
+
+
+_JSON5_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def _decode_json5_unicode_escapes(text: str) -> str:
+    r"""Resolve `\uXXXX` escapes so an escaped identifier spelling is visible.
+
+    JSON5 object keys may be ECMAScript `IdentifierName`s, which can spell
+    any character via a `\uXXXX` escape, code point `0x0048` being `H`; a
+    key spelled `remote`, backslash, `u0048ost` therefore names
+    `remoteHost`. Oracle's own `JSON5.parse` resolves that escape, so a
+    literal substring search on the raw config text can miss a field name
+    it would still recognize. This is deliberately over-inclusive: it also
+    decodes `\uXXXX` sequences that happen to appear inside comments or
+    ordinary string bodies, but an extra match there only makes a
+    fail-closed check that relies on this function trigger more often, not
+    less.
+
+    Returns:
+        text with every well-formed `\uXXXX` escape replaced by the
+        character it encodes.
+    """
+    return _JSON5_UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), text)
 
 
 @dataclass(frozen=True)
@@ -367,7 +421,7 @@ class CommandRunner:
         return self._oracle_config_remote_host
 
     def _read_oracle_config_remote(self) -> tuple[str | None, str | None]:
-        """Read Oracle's own remote-transport fields from its config file.
+        r"""Read Oracle's own remote-transport fields from its config file.
 
         Oracle resolves `browser.remoteHost`/`browser.remoteToken` from its
         config file (`$ORACLE_HOME_DIR/config.json`, or `~/.oracle/config.json`
@@ -381,12 +435,14 @@ class CommandRunner:
         Returns:
             The config-declared (remote host, remote token); each is None if
             unset or blank, or if the config file is absent, unreadable, or
-            unparseable but does not mention either field name.
+            unparseable while spelling out neither field name, directly or
+            via a `\uXXXX`-escaped `IdentifierName`.
 
         Raises:
-            LooprError: the config file cannot be parsed and contains the
-                literal text `remoteHost` or `remoteToken`, so a
-                config-declared remote host or token cannot be ruled out.
+            LooprError: the config file cannot be parsed and spells out
+                `remoteHost` or `remoteToken`, directly or via a
+                `\uXXXX`-escaped `IdentifierName`, so a config-declared
+                remote host or token cannot be ruled out.
         """
         oracle_home_dir = self.source_env.get("ORACLE_HOME_DIR")
         if oracle_home_dir:
@@ -403,12 +459,14 @@ class CommandRunner:
         try:
             raw_config: object = _loads_json5_subset(raw_text)
         except ValueError as exc:
-            if "remoteHost" not in raw_text and "remoteToken" not in raw_text:
+            spelled_out = _decode_json5_unicode_escapes(raw_text)
+            if "remoteHost" not in spelled_out and "remoteToken" not in spelled_out:
                 # Oracle's JSON5 syntax (unquoted keys, single-quoted
                 # strings, ...) beyond comments/trailing commas is not
-                # supported here, but neither field spelling appears
-                # anywhere in the file, so it cannot declare either one;
-                # a purely local-settings config must not block Oracle.
+                # supported here, but neither field spelling -- after
+                # resolving any `\uXXXX`-escaped identifier characters --
+                # appears anywhere in the file, so it cannot declare either
+                # one; a purely local-settings config must not block Oracle.
                 return (None, None)
             message = (
                 f"Oracle's config file at {config_path} could not be parsed "
@@ -416,11 +474,12 @@ class CommandRunner:
                 "keys, and single-quoted strings (Oracle's own config format "
                 "is JSON5, which also allows syntax such as a leading '+' on "
                 "a number, hexadecimal literals, or 'Infinity'/'NaN' that "
-                "this module does not support), and it contains 'remoteHost' "
-                "or 'remoteToken'; a config-declared browser.remoteHost or "
-                "browser.remoteToken cannot be ruled out, so refusing to "
-                "proceed. Convert the config to plain JSON or remove the "
-                "config-backed remote-transport fields."
+                "this module does not support), and it spells out "
+                "'remoteHost' or 'remoteToken', including via a "
+                "Unicode-escaped identifier; a config-declared "
+                "browser.remoteHost or browser.remoteToken cannot be ruled "
+                "out, so refusing to proceed. Convert the config to plain "
+                "JSON or remove the config-backed remote-transport fields."
             )
             raise LooprError(EXIT_PRECONDITION, "bundle", message) from exc
         if not isinstance(raw_config, dict):

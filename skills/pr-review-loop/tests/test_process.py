@@ -358,6 +358,88 @@ def test_oracle_config_comment_stripping_is_string_aware(tmp_path: Path) -> None
     assert runner.oracle_config_remote_host == "https://10.0.0.9:9473"
 
 
+def test_oracle_config_with_unterminated_block_comment_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """An unterminated block comment must not be silently deleted.
+
+    Oracle's own `JSON5.parse` rejects this file outright, so treating the
+    otherwise-complete object ahead of it as the whole config would let
+    pr-review-loop see a `remoteHost` that Oracle itself never loads.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}} /*',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_with_unterminated_block_comment_and_no_remote_fields_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """An unterminated block comment in a local-only config must not block Oracle."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{browser: {manualLogin: true}} /*",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
+    assert runner.contains_secret("anything") is False
+
+
+def test_oracle_config_with_unterminated_string_fails_closed(tmp_path: Path) -> None:
+    """An unterminated quoted string must not be silently auto-closed.
+
+    Oracle's own `JSON5.parse` rejects this file outright, so accepting a
+    truncated value here would let pr-review-loop see a `remoteHost` that
+    Oracle itself never loads.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remoteHost: '10.0.0.9:9473 } }",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_with_unicode_escaped_key_spelling_fails_closed(
+    tmp_path: Path,
+) -> None:
+    r"""A `\uXXXX`-escaped `IdentifierName` spelling still fails closed.
+
+    Oracle's `JSON5.parse` resolves `remoteHost` to `remoteHost`, so a
+    literal-text fallback check that misses the escaped spelling would let
+    a config-backed remote host bypass this module's precedence/secret
+    checks entirely.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{browser: {remote\\u0048ost: "10.0.0.9:9473"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:
     """Output growth past the configured bound terminates the command."""
     runner = CommandRunner({"PATH": os.environ["PATH"]})
