@@ -18,8 +18,15 @@ from scripts.github import (
     GitHubClient,
     IssueClient,
     resolve_issue_target,
+    resolve_target,
 )
-from scripts.models import EXIT_PRECONDITION, JsonObject, LooprError, PullRequest
+from scripts.models import (
+    EXIT_PRECONDITION,
+    JsonObject,
+    JsonValue,
+    LooprError,
+    PullRequest,
+)
 from scripts.oracle import OracleClient
 from scripts.process import CommandResult, CommandRunner
 
@@ -312,6 +319,217 @@ def _repo_with_origin(tmp_path: Path, origin_url: str) -> Path:
     _git(git, ["init", "-q"], cwd=repo)
     _git(git, ["remote", "add", "origin", origin_url], cwd=repo)
     return repo
+
+
+def _pr_payload(
+    *,
+    state: str = "OPEN",
+    is_draft: JsonValue = False,
+    body: JsonValue = "Body",
+    name_with_owner: JsonValue = "owner/repository",
+) -> JsonObject:
+    """Return one complete GitHub CLI PR response payload."""
+    return {
+        "url": "https://github.com/owner/repository/pull/21",
+        "number": 21,
+        "title": "Title",
+        "body": body,
+        "author": {"login": "author"},
+        "state": state,
+        "isDraft": is_draft,
+        "baseRefName": "main",
+        "baseRefOid": "a" * 40,
+        "headRefName": "feature",
+        "headRefOid": "b" * 40,
+        "headRepository": {
+            "nameWithOwner": name_with_owner,
+            "name": "repository",
+        },
+        "headRepositoryOwner": {"login": "owner"},
+        "files": [{"path": "file.py"}],
+        "changedFiles": 1,
+    }
+
+
+class FakePrGh(CommandRunner):
+    """Fake PR responses while running real local Git setup commands."""
+
+    def __init__(self, pull_request: JsonObject) -> None:
+        """Initialize one fake PR transport."""
+        super().__init__()
+        self.pull_request = pull_request
+        self.gh_calls: list[tuple[str, ...]] = []
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout: int = 120,
+        input_text: str | None = None,
+        check: bool = True,
+        max_output: int = 24 * 1024 * 1024,
+        watch_path: Path | None = None,
+    ) -> CommandResult:
+        """Fake `gh` reads and delegate every other command to real Git."""
+        argv = tuple(str(value) for value in args)
+        if argv and argv[0] == "gh":
+            self.gh_calls.append(argv)
+            if argv[1] == "api" and "user" in argv:
+                return CommandResult(argv, 0, b"author\n", "")
+            if argv[1] == "pr":
+                return CommandResult(
+                    argv,
+                    0,
+                    json.dumps(self.pull_request).encode(),
+                    "",
+                )
+        return super().run(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            input_text=input_text,
+            check=check,
+            max_output=max_output,
+            watch_path=watch_path,
+        )
+
+
+def test_resolve_target_reuses_strict_canonical_url_rules() -> None:
+    """PR target parsing rejects URL forms with ambiguous interpretations."""
+    malformed = (
+        "https://github.com/owner/repository//pull/21",
+        "https://github.com/owner/repository/pull/21/",
+        "https://user@github.com/owner/repository/pull/21",
+        "https://github.com:443/owner/repository/pull/21",
+        "https://github.com:/owner/repository/pull/21",
+        "https://github.com/owner/repository/pull/\uff12\uff11",
+        " https://github.com/owner/repository/pull/21",
+        "\nhttps://github.com/owner/repository/pull/21",
+        "https://github.com/owner/repository/pull/21?",
+        "https://github.com/owner/repository/pull/21#",
+        "https://github.com/owner/repository/pull/21?ref=head",
+    )
+    for value in malformed:
+        with pytest.raises(LooprError) as captured:
+            resolve_target(value, None)
+        assert captured.value.category == "input"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://github.com/owner/repository//issues/21",
+        "https://github.com:/owner/repository/issues/21",
+        " https://github.com/owner/repository/issues/21",
+        "\nhttps://github.com/owner/repository/issues/21",
+        "https://github.com/owner/repository/issues/21?",
+        "https://github.com/owner/repository/issues/21#",
+    ],
+)
+def test_resolve_issue_target_rejects_lossy_url_forms(value: str) -> None:
+    """Issue target parsing applies the same raw URL rejection rules."""
+    with pytest.raises(LooprError) as captured:
+        resolve_issue_target(value, None)
+    assert captured.value.category == "input"
+
+
+@pytest.mark.parametrize(
+    "origin_url",
+    [
+        " https://github.com/owner/repository.git",
+        "https://github.com/owner/repository.git ",
+    ],
+)
+def test_origin_repo_rejects_whitespace_before_url_parsing(
+    tmp_path: Path,
+    origin_url: str,
+) -> None:
+    """Origin normalization does not accept whitespace stripped by urlsplit."""
+    repo = _repo_with_origin(tmp_path, origin_url)
+    client = GitHubClient(CommandRunner(), repo)
+
+    with pytest.raises(LooprError) as captured:
+        client.initialize("21")
+    assert captured.value.category == "repository"
+
+
+def test_github_client_snapshot_maps_canonical_full_pr_fields(tmp_path: Path) -> None:
+    """The canonical client maps the complete PR schema used by submit."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
+    runner = FakePrGh(_pr_payload())
+    client = GitHubClient(runner, repo)
+
+    client.initialize("21")
+    snapshot = client.snapshot()
+
+    assert snapshot.repository == "owner/repository"
+    assert snapshot.number == 21
+    assert snapshot.title == "Title"
+    assert snapshot.body == "Body"
+    assert snapshot.author == "author"
+    assert snapshot.changed_paths == ("file.py",)
+    assert snapshot.is_draft is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("isDraft", 0),
+        ("isDraft", "false"),
+        ("body", None),
+        ("headRepository.nameWithOwner", 0),
+    ],
+)
+def test_github_client_rejects_falsey_or_wrong_pr_field_types(
+    tmp_path: Path,
+    field: str,
+    value: JsonValue,
+) -> None:
+    """PR schema parsing fails closed instead of coercing falsey values."""
+    if field == "isDraft":
+        payload = _pr_payload(is_draft=value)
+    elif field == "body":
+        payload = _pr_payload(body=value)
+    else:
+        payload = _pr_payload(name_with_owner=value)
+    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
+    runner = FakePrGh(payload)
+    client = GitHubClient(runner, repo)
+    client.initialize("21")
+
+    with pytest.raises(LooprError) as captured:
+        client.snapshot()
+
+    assert captured.value.category == "github_schema"
+
+
+def test_github_client_allows_closed_snapshot_only_after_push(tmp_path: Path) -> None:
+    """Post-push validation can accept closure without weakening pre-write checks."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
+    runner = FakePrGh(_pr_payload(state="CLOSED"))
+    client = GitHubClient(runner, repo)
+    client.initialize("21")
+
+    with pytest.raises(LooprError, match="must be open"):
+        client.snapshot()
+
+    assert client.snapshot(require_open=False).state == "CLOSED"
+
+
+def test_submit_initialization_does_not_lookup_reviewer_identity(
+    tmp_path: Path,
+) -> None:
+    """Submit reuses PR setup without requiring the review actor lookup."""
+    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
+    runner = FakePrGh(_pr_payload())
+    client = GitHubClient(runner, repo)
+
+    client.initialize_for_submit("21")
+
+    assert not any("user" in call for call in runner.gh_calls)
 
 
 def _issue_payload(
