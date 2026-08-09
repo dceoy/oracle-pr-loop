@@ -198,6 +198,10 @@ def test_success_commits_and_pushes_without_runtime_files(tmp_path: Path) -> Non
         "refs/heads/feature",
     ).split()[0]
     assert remote_head == result.commit_sha
+    assert (
+        _git(repo, "show", "-s", "--format=%s", result.commit_sha)
+        == "apply reviewed changes"
+    )
     assert not (repo / "artifacts").exists()
 
 
