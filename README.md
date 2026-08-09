@@ -3,6 +3,8 @@
 `pr-review-loop` is a vendor-neutral agent skill for taking GitHub work through
 independent Oracle/ChatGPT review, starting from an open Issue or existing PR.
 
+[![CI/CD](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml)
+
 ## Responsibilities
 
 - **Host agent:** planning, implementation, repository QA, triage, iteration,
