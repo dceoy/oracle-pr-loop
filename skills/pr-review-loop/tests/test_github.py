@@ -45,6 +45,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
+
 
 def _git(
     git: str,
@@ -157,7 +159,7 @@ def test_review_event_uses_comment_only_for_self_authored_prs(tmp_path: Path) ->
 
 
 def test_verify_posted_checks_actor_commit_and_body_without_formal_state(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """Publication verification ignores formal state but binds all other data."""
@@ -176,14 +178,14 @@ def test_verify_posted_checks_actor_commit_and_body_without_formal_state(
     def fake_text(_args: list[str], **_kwargs: object) -> str:
         return json.dumps(response)
 
-    monkeypatch.setattr(client, "_text", fake_text)
+    mocker.patch.object(client, "_text", fake_text)
 
     assert client.verify_posted(pull_request, 123, body) == response
 
 
 @pytest.mark.parametrize("mismatch", ["id", "actor", "commit_id", "body"])
 def test_verify_posted_rejects_each_identity_mismatch(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
     mismatch: str,
 ) -> None:
@@ -211,14 +213,14 @@ def test_verify_posted_rejects_each_identity_mismatch(
     def fake_text(_args: list[str], **_kwargs: object) -> str:
         return json.dumps(response)
 
-    monkeypatch.setattr(client, "_text", fake_text)
+    mocker.patch.object(client, "_text", fake_text)
 
     with pytest.raises(LooprError, match="posted review revalidation failed"):
         client.verify_posted(pull_request, 123, body)
 
 
 def test_post_review_publishes_selected_event_and_exact_head(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """The GitHub payload carries the selected event and frozen review body."""
@@ -237,7 +239,7 @@ def test_post_review_publishes_selected_event_and_exact_head(
         captured["payload"] = json.loads(input_text)
         return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
 
-    monkeypatch.setattr(client, "_text", fake_text)
+    mocker.patch.object(client, "_text", fake_text)
 
     review_id, _posted = client.post_review(pull_request, "COMMENT", body)
 
@@ -455,9 +457,9 @@ class FakePrGh(CommandRunner):
         )
 
 
-def test_resolve_target_reuses_strict_canonical_url_rules() -> None:
-    """PR target parsing rejects URL forms with ambiguous interpretations."""
-    malformed = (
+@pytest.mark.parametrize(
+    "value",
+    [
         "https://github.com/owner/repository//pull/21",
         "https://github.com/owner/repository/pull/21/",
         "https://user@github.com/owner/repository/pull/21",
@@ -469,11 +471,26 @@ def test_resolve_target_reuses_strict_canonical_url_rules() -> None:
         "https://github.com/owner/repository/pull/21?",
         "https://github.com/owner/repository/pull/21#",
         "https://github.com/owner/repository/pull/21?ref=head",
-    )
-    for value in malformed:
-        with pytest.raises(LooprError) as captured:
-            resolve_target(value, None)
-        assert captured.value.category == "input"
+    ],
+    ids=[
+        "double-slash",
+        "trailing-slash",
+        "userinfo",
+        "explicit-port",
+        "empty-port",
+        "unicode-number",
+        "leading-space",
+        "leading-newline",
+        "empty-query",
+        "empty-fragment",
+        "query",
+    ],
+)
+def test_resolve_target_reuses_strict_canonical_url_rules(value: str) -> None:
+    """PR target parsing rejects URL forms with ambiguous interpretations."""
+    with pytest.raises(LooprError) as captured:
+        resolve_target(value, None)
+    assert captured.value.category == "input"
 
 
 @pytest.mark.parametrize(
@@ -724,51 +741,51 @@ class FakeIssueGh(CommandRunner):
         )
 
 
-def test_resolve_issue_target_accepts_numeric_with_origin() -> None:
-    """A numeric target resolves against the unambiguous local origin."""
-    repository, number, url = resolve_issue_target("42", "acme/demo")
+@pytest.mark.parametrize(
+    ("target", "origin", "expected"),
+    [
+        pytest.param(
+            "42",
+            "acme/demo",
+            ("acme/demo", 42, "https://github.com/acme/demo/issues/42"),
+            id="numeric-with-origin",
+        ),
+        pytest.param(
+            "https://github.com/acme/demo/issues/42",
+            None,
+            ("acme/demo", 42, "https://github.com/acme/demo/issues/42"),
+            id="canonical-url",
+        ),
+    ],
+)
+def test_resolve_issue_target_accepts_valid_targets(
+    target: str,
+    origin: str | None,
+    expected: tuple[str, int, str],
+) -> None:
+    """Numeric and canonical Issue targets resolve to the same identity."""
+    assert resolve_issue_target(target, origin) == expected
 
-    assert (repository, number, url) == (
-        "acme/demo",
-        42,
-        "https://github.com/acme/demo/issues/42",
-    )
 
-
-def test_resolve_issue_target_rejects_numeric_without_origin() -> None:
-    """A numeric target requires an unambiguous local origin."""
+@pytest.mark.parametrize(
+    ("target", "origin"),
+    [
+        pytest.param("42", None, id="numeric-without-origin"),
+        pytest.param(
+            "https://github.com/acme/demo/pull/42",
+            None,
+            id="pull-url",
+        ),
+        pytest.param("0", "acme/demo", id="zero-number"),
+    ],
+)
+def test_resolve_issue_target_rejects_invalid_targets(
+    target: str,
+    origin: str | None,
+) -> None:
+    """Ambiguous, non-Issue, and non-positive targets fail closed."""
     with pytest.raises(LooprError) as captured:
-        resolve_issue_target("42", None)
-
-    assert captured.value.category == "input"
-
-
-def test_resolve_issue_target_parses_canonical_url() -> None:
-    """A canonical Issue URL resolves without needing a local origin."""
-    repository, number, url = resolve_issue_target(
-        "https://github.com/acme/demo/issues/42",
-        None,
-    )
-
-    assert (repository, number, url) == (
-        "acme/demo",
-        42,
-        "https://github.com/acme/demo/issues/42",
-    )
-
-
-def test_resolve_issue_target_rejects_pull_url() -> None:
-    """A pull-request URL is not an Issue target."""
-    with pytest.raises(LooprError) as captured:
-        resolve_issue_target("https://github.com/acme/demo/pull/42", None)
-
-    assert captured.value.category == "input"
-
-
-def test_resolve_issue_target_rejects_zero() -> None:
-    """A zero Issue number is not positive."""
-    with pytest.raises(LooprError) as captured:
-        resolve_issue_target("0", "acme/demo")
+        resolve_issue_target(target, origin)
 
     assert captured.value.category == "input"
 
@@ -822,23 +839,25 @@ def test_issue_client_snapshot_requests_bounded_comment_window(
     assert f"lastComments={MAX_ISSUE_COMMENTS}" in typed_values
 
 
-def test_issue_client_snapshot_accepts_null_author(tmp_path: Path) -> None:
-    """A deleted Issue author (`"author": null`) maps to an empty login."""
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            _issue_payload(author=None),
+            id="null-author",
+        ),
+        pytest.param(
+            {**_issue_payload(), "author": {"login": None}},
+            id="null-author-login",
+        ),
+    ],
+)
+def test_issue_client_snapshot_accepts_null_author(
+    tmp_path: Path,
+    payload: JsonObject,
+) -> None:
+    """Missing author logins map to an empty snapshot login."""
     repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(author=None))
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    snapshot = client.snapshot()
-
-    assert snapshot.author == ""
-
-
-def test_issue_client_snapshot_accepts_null_author_login(tmp_path: Path) -> None:
-    """An author object with a null login also maps to an empty login."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    payload = _issue_payload()
-    payload["author"] = {"login": None}
     runner = FakeIssueGh(issue=payload)
     client = IssueClient(runner, repo)
     client.initialize("42")
@@ -887,21 +906,21 @@ def test_issue_client_rejects_repository_mismatch(tmp_path: Path) -> None:
     assert captured.value.category == "repository"
 
 
-def test_issue_client_numeric_requires_local_origin(tmp_path: Path) -> None:
-    """A numeric Issue target cannot be resolved outside a Git checkout."""
-    runner = FakeIssueGh(issue=_issue_payload())
-    client = IssueClient(runner, tmp_path)
-
-    with pytest.raises(LooprError) as captured:
-        client.initialize("42")
-
-    assert captured.value.category == "repository"
-
-
-def test_issue_client_url_requires_local_origin_outside_git_checkout(
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param("42", id="numeric"),
+        pytest.param(
+            "https://github.com/acme/demo/issues/42",
+            id="canonical-url",
+        ),
+    ],
+)
+def test_issue_client_targets_require_local_origin(
     tmp_path: Path,
+    target: str,
 ) -> None:
-    """A canonical Issue URL cannot bypass the matching-origin check either.
+    """Issue targets cannot bypass the matching local-origin requirement.
 
     Bootstrap hands the returned base commit to the host for implementation
     in this checkout, so an Issue URL must not be able to skip the
@@ -911,7 +930,7 @@ def test_issue_client_url_requires_local_origin_outside_git_checkout(
     client = IssueClient(runner, tmp_path)
 
     with pytest.raises(LooprError) as captured:
-        client.initialize("https://github.com/acme/demo/issues/42")
+        client.initialize(target)
 
     assert captured.value.category == "repository"
 
@@ -1998,7 +2017,7 @@ def test_diff_blob_shas_maps_each_allowed_path_to_its_full_index_ids() -> None:
 
 
 def test_post_review_publishes_inline_comments_in_the_same_request(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """One create-review request carries the body and every inline comment."""
@@ -2016,7 +2035,7 @@ def test_post_review_publishes_inline_comments_in_the_same_request(
         captured["payload"] = json.loads(input_text)
         return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
 
-    monkeypatch.setattr(client, "_text", fake_text)
+    mocker.patch.object(client, "_text", fake_text)
 
     client.post_review(
         pull_request,
@@ -2040,7 +2059,7 @@ def test_post_review_publishes_inline_comments_in_the_same_request(
 
 
 def test_post_review_serializes_unicode_without_ascii_escaping(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     r"""Unicode review text is sent as UTF-8, not inflated by `\uXXXX` escapes."""
@@ -2058,7 +2077,7 @@ def test_post_review_serializes_unicode_without_ascii_escaping(
         captured["input_text"] = input_text
         return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
 
-    monkeypatch.setattr(client, "_text", fake_text)
+    mocker.patch.object(client, "_text", fake_text)
 
     client.post_review(pull_request, "COMMENT", "レビュー本文" * 100)
 
@@ -2067,7 +2086,7 @@ def test_post_review_serializes_unicode_without_ascii_escaping(
 
 
 def test_post_review_rejects_a_request_exceeding_the_command_input_bound(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A request too large for the command transport fails before any write.
@@ -2084,7 +2103,7 @@ def test_post_review_rejects_a_request_exceeding_the_command_input_bound(
         msg = "the oversized request must never reach the transport"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(client, "_text", fail_if_called)
+    mocker.patch.object(client, "_text", fail_if_called)
     oversized_comments = tuple(
         ReviewComment(path="file.py", line=index, side="RIGHT", body="x" * 65_000)
         for index in range(1, 70)

@@ -24,6 +24,8 @@ from scripts.process import CommandRunner
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
+
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 
@@ -156,21 +158,21 @@ def fake_parse_bootstrap(
     )
 
 
-def install_oracle_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+def install_oracle_fakes(mocker: MockerFixture) -> None:
     """Replace Oracle bundle, transport, and parser functions."""
-    monkeypatch.setattr(
+    mocker.patch.object(
         bootstrap_module,
         "build_bootstrap_bundle",
         fake_build_bootstrap_bundle,
     )
-    monkeypatch.setattr(bootstrap_module, "invoke_oracle", fake_oracle_invocation)
-    monkeypatch.setattr(bootstrap_module, "parse_bootstrap", fake_parse_bootstrap)
+    mocker.patch.object(bootstrap_module, "invoke_oracle", fake_oracle_invocation)
+    mocker.patch.object(bootstrap_module, "parse_bootstrap", fake_parse_bootstrap)
 
 
-def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+def install_orchestration_fakes(mocker: MockerFixture) -> None:
     """Replace external bootstrap transports with deterministic fakes."""
-    monkeypatch.setattr(bootstrap_module, "IssueClient", FakeIssueClient)
-    install_oracle_fakes(monkeypatch)
+    mocker.patch.object(bootstrap_module, "IssueClient", FakeIssueClient)
+    install_oracle_fakes(mocker)
 
 
 def _configure_stable(issue: IssueSnapshot) -> None:
@@ -201,12 +203,12 @@ def _execute(
 
 def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """A stable Issue and base branch produce a bound implementation prompt."""
     issue = sample_issue()
     _configure_stable(issue)
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     result = _execute(tmp_path)
 
@@ -228,19 +230,19 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
 
 def test_execute_bootstrap_forwards_oracle_overrides(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """Bootstrap forwards model and effort values to the shared Oracle call."""
     issue = sample_issue()
     _configure_stable(issue)
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
     calls: list[tuple[object, object]] = []
 
     def record_oracle(*args: object, **kwargs: object) -> str:
         calls.append((args[3], kwargs.get("model")))
         return "raw"
 
-    monkeypatch.setattr(bootstrap_module, "invoke_oracle", record_oracle)
+    mocker.patch.object(bootstrap_module, "invoke_oracle", record_oracle)
 
     _execute(tmp_path, thinking_time="extended", model="gpt-5.6-sol")
 
@@ -249,7 +251,7 @@ def test_execute_bootstrap_forwards_oracle_overrides(
 
 def test_execute_bootstrap_rejects_stale_issue_update(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """An Issue edited during prompt generation fails closed as stale."""
     initial = sample_issue()
@@ -260,7 +262,7 @@ def test_execute_bootstrap_rejects_stale_issue_update(
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
     FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -271,7 +273,7 @@ def test_execute_bootstrap_rejects_stale_issue_update(
 
 def test_execute_bootstrap_rejects_comment_edited_during_generation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """An edited bounded comment fails closed even when updatedAt is stable."""
     original: JsonObject = {
@@ -288,7 +290,7 @@ def test_execute_bootstrap_rejects_comment_edited_during_generation(
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
     FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -322,7 +324,7 @@ def test_execute_bootstrap_rejects_comment_edited_during_generation(
 )
 def test_execute_bootstrap_rejects_base_or_head_drift(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     branches: list[str],
     shas: list[str],
     heads: list[bytes],
@@ -336,7 +338,7 @@ def test_execute_bootstrap_rejects_base_or_head_drift(
     FakeIssueClient.heads = heads
     FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -348,7 +350,7 @@ def test_execute_bootstrap_rejects_base_or_head_drift(
 @pytest.mark.parametrize("local_branch", [b"main", b"HEAD"])
 def test_execute_bootstrap_rejects_default_or_detached_branch(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     local_branch: bytes,
 ) -> None:
     """The implementation handoff requires a named non-default branch."""
@@ -359,7 +361,7 @@ def test_execute_bootstrap_rejects_default_or_detached_branch(
     FakeIssueClient.heads = [SHA_A.encode()]
     FakeIssueClient.local_branches = [local_branch]
     FakeIssueClient.statuses = []
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -371,7 +373,7 @@ def test_execute_bootstrap_rejects_default_or_detached_branch(
 @pytest.mark.parametrize("status", [b" M changed.py\n", b"?? untracked.py\n"])
 def test_execute_bootstrap_rejects_dirty_workspace(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     status: bytes,
 ) -> None:
     """Tracked and untracked pre-existing files fail closed."""
@@ -382,7 +384,7 @@ def test_execute_bootstrap_rejects_dirty_workspace(
     FakeIssueClient.heads = [SHA_A.encode()]
     FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [status]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -428,7 +430,7 @@ def test_worktree_is_dirty_honors_explicit_untracked_files(tmp_path: Path) -> No
 
 def test_execute_bootstrap_rejects_workspace_dirtied_during_generation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """A workspace change during Oracle generation fails closed as stale."""
     issue = sample_issue()
@@ -438,7 +440,7 @@ def test_execute_bootstrap_rejects_workspace_dirtied_during_generation(
     FakeIssueClient.heads = [SHA_A.encode(), SHA_A.encode()]
     FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b"", b"?? new-file.py\n"]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -464,7 +466,7 @@ class ClosingIssueClient(FakeIssueClient):
 
 def test_execute_bootstrap_propagates_issue_closed_during_generation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """An Issue closed during prompt generation surfaces its state failure."""
     issue = sample_issue()
@@ -474,8 +476,8 @@ def test_execute_bootstrap_propagates_issue_closed_during_generation(
     FakeIssueClient.heads = [SHA_A.encode()]
     FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
-    monkeypatch.setattr(bootstrap_module, "IssueClient", ClosingIssueClient)
-    install_oracle_fakes(monkeypatch)
+    mocker.patch.object(bootstrap_module, "IssueClient", ClosingIssueClient)
+    install_oracle_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -494,7 +496,7 @@ class MissingBaseIssueClient(FakeIssueClient):
 
 def test_execute_bootstrap_names_fetch_remedy_when_base_missing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """A missing local base commit names the fetch remedy, not just the SHA."""
     issue = sample_issue()
@@ -504,8 +506,8 @@ def test_execute_bootstrap_names_fetch_remedy_when_base_missing(
     FakeIssueClient.heads = []
     FakeIssueClient.local_branches = []
     FakeIssueClient.statuses = []
-    monkeypatch.setattr(bootstrap_module, "IssueClient", MissingBaseIssueClient)
-    install_oracle_fakes(monkeypatch)
+    mocker.patch.object(bootstrap_module, "IssueClient", MissingBaseIssueClient)
+    install_oracle_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)

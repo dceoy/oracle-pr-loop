@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import stat
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from scripts import artifacts as artifacts_module
 from scripts.artifacts import TemporaryFileWriter, temporary_file_writer
 from scripts.models import LooprError
 from scripts.process import CommandRunner
+
+if TYPE_CHECKING:
+    from pytest_mock import MockerFixture
 
 
 def test_temporary_file_writer_cleans_up_after_success() -> None:
@@ -47,7 +51,7 @@ def test_temporary_file_writer_cleans_up_after_error() -> None:
 
 
 def test_temporary_file_writer_fails_closed_on_cleanup_error(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """Cleanup errors become command failures before callers can write."""
@@ -62,7 +66,7 @@ def test_temporary_file_writer_fails_closed_on_cleanup_error(
             message = "cleanup failed"
             raise OSError(message)
 
-    monkeypatch.setattr(
+    mocker.patch.object(
         artifacts_module.tempfile,
         "TemporaryDirectory",
         FailingTemporaryDirectory,

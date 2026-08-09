@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
+
 
 def _git_executable() -> str:
     """Return the Git executable required by integration tests."""
@@ -683,7 +685,7 @@ def test_malformed_head_ref_fails_before_staging(tmp_path: Path) -> None:
 
 
 def test_submit_cli_emits_the_stable_success_schema(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The public command emits exactly one submit JSON object."""
@@ -700,7 +702,7 @@ def test_submit_cli_emits_the_stable_success_schema(
     def fake_submit(**_kwargs: object) -> SubmitResult:
         return expected
 
-    monkeypatch.setattr(cli, "execute_submit", fake_submit)
+    mocker.patch.object(cli, "execute_submit", fake_submit)
     exit_code = cli.main([
         "submit",
         "--pr",
@@ -1197,12 +1199,12 @@ def test_transient_remote_confirmation_after_push_is_retried(tmp_path: Path) -> 
 
 def test_expected_remote_head_after_push_error_is_retried(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
     runner = DelayedRemoteAcceptanceRunner(repo, remote, state)
-    monkeypatch.setattr(submit_module, "POLL_INTERVAL_SECONDS", 0)
+    mocker.patch.object(submit_module, "POLL_INTERVAL_SECONDS", 0)
 
     result = execute_submit(
         pr_value="1",
@@ -1258,13 +1260,13 @@ def test_escaped_credential_in_path_fails_before_commit(tmp_path: Path) -> None:
 
 def test_fallback_accepts_commit_after_recovery_deadline(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
     runner = RecoveryDeadlineRunner(repo, remote, state)
-    monkeypatch.setattr(submit_module, "POLL_TIMEOUT_SECONDS", 0)
-    monkeypatch.setattr(submit_module, "POLL_INTERVAL_SECONDS", 0)
+    mocker.patch.object(submit_module, "POLL_TIMEOUT_SECONDS", 0)
+    mocker.patch.object(submit_module, "POLL_INTERVAL_SECONDS", 0)
 
     result = execute_submit(
         pr_value="1",
