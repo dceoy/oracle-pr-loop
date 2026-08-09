@@ -1434,6 +1434,65 @@ def test_client_diff_anchors_drops_a_head_tree_attribute_off_the_worktree(
     assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
 
 
+def test_client_diff_anchors_degrades_to_no_anchors_without_check_attr_source(
+    tmp_path: Path,
+) -> None:
+    """An unsupported `check-attr --source` degrades to no anchors, not a crash.
+
+    `--source` was introduced in Git 2.40; the 2.25-2.39 `git-check-attr`
+    rejects it as an unknown option, and this skill's public contract
+    requires only "Git", with no minimum version. A `git` shim ahead of the
+    real one on `PATH` reproduces that exact rejection for `check-attr
+    --source` while forwarding every other subcommand to the real `git`, so
+    `diff_anchors` runs against a genuine subprocess failure rather than a
+    stubbed exception. It must treat that failure the same way
+    `blob_is_binary` treats an unreadable blob -- fail closed by dropping
+    every anchor it cannot verify -- rather than letting a Git precondition
+    error abort an otherwise publishable review. The same PR snapshot still
+    yields anchors against the real, unshimmed `git`, so this also proves
+    the failure path is exercised rather than vacuously satisfied.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "old-git-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("BRAVO\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    pull_request = _sample_pr(base, head, paths=("file.py",))
+
+    real_client = GitHubClient(CommandRunner(), repo)
+    assert real_client.diff_anchors(pull_request) != frozenset()
+
+    shim_dir = tmp_path / "old-git-bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in\n'
+        '  *" check-attr "*"--source"*)\n'
+        '    echo "error: unknown option \\`source\'" >&2\n'
+        "    exit 129\n"
+        "    ;;\n"
+        "esac\n"
+        f'exec "{git}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    old_source_env = dict(os.environ)
+    old_source_env["PATH"] = f"{shim_dir}{os.pathsep}{old_source_env.get('PATH', '')}"
+    old_git_client = GitHubClient(CommandRunner(old_source_env), repo)
+
+    assert old_git_client.diff_anchors(pull_request) == frozenset()
+
+
 def test_client_patch_ignores_a_default_global_attributes_file(
     tmp_path: Path,
 ) -> None:

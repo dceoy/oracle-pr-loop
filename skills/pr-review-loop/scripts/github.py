@@ -916,9 +916,18 @@ class _ImmutableGitMixin:
         binary/non-diffable, independent of whatever textual hunk
         `patch()` produced under the worktree's own attributes.
 
+        `--source` itself requires Git 2.40; an older `check-attr` rejects
+        it as an unknown option and the command fails before reporting
+        anything, and this skill's public contract requires only "Git",
+        with no minimum version. Treating every candidate path as `unset`
+        when the command fails is the same fail-closed answer
+        `blob_is_binary` gives an unreadable blob: it only ever drops
+        anchors this call cannot verify, instead of raising a precondition
+        error that would abort an otherwise publishable review.
+
         Returns:
             The subset of paths whose `diff` attribute resolves to `unset`
-            at sha.
+            at sha, or every path given when `check-attr` itself failed.
 
         Raises:
             LooprError: `check-attr` returned a malformed or non-UTF-8
@@ -926,20 +935,23 @@ class _ImmutableGitMixin:
         """
         if not paths:
             return frozenset()
-        output = self.git_bytes(
-            [
-                "-c",
-                "core.attributesFile=/dev/null",
-                "check-attr",
-                "--source",
-                sha,
-                "-z",
-                "--stdin",
-                "diff",
-            ],
-            max_output=max_output,
-            input_text="".join(f"{path}\0" for path in paths),
-        )
+        try:
+            output = self.git_bytes(
+                [
+                    "-c",
+                    "core.attributesFile=/dev/null",
+                    "check-attr",
+                    "--source",
+                    sha,
+                    "-z",
+                    "--stdin",
+                    "diff",
+                ],
+                max_output=max_output,
+                input_text="".join(f"{path}\0" for path in paths),
+            )
+        except LooprError:
+            return frozenset(paths)
         fields = output.split(b"\0")
         if fields and fields[-1] == b"":
             fields = fields[:-1]
