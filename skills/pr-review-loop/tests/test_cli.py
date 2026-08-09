@@ -21,6 +21,7 @@ from scripts.models import (
     LooprError,
     PullRequest,
     ReviewComment,
+    ReviewResult,
 )
 from scripts.oracle import parse_review
 from scripts.process import CommandResult, CommandRunner
@@ -548,7 +549,7 @@ def test_argument_failure_uses_structured_error_schema(
     ],
 )
 def test_cli_propagates_oracle_overrides_consistently(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
     command: str,
     target: str,
@@ -582,7 +583,7 @@ def test_cli_propagates_oracle_overrides_consistently(
             implementation_prompt=None,
         )
 
-    monkeypatch.setattr(cli, target, fake_execute)
+    mocker.patch.object(cli, target, fake_execute)
     identifier_flag = "--issue" if command == "bootstrap" else "--pr"
     status = cli.main([command, identifier_flag, "1", *overrides])
     _stdout_json(capsys)

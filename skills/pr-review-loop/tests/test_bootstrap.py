@@ -230,19 +230,19 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
 
 def test_execute_bootstrap_forwards_oracle_overrides(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """Bootstrap forwards model and effort values to the shared Oracle call."""
     issue = sample_issue()
     _configure_stable(issue)
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
     calls: list[tuple[object, object]] = []
 
     def record_oracle(*args: object, **kwargs: object) -> str:
         calls.append((args[3], kwargs.get("model")))
         return "raw"
 
-    monkeypatch.setattr(bootstrap_module, "invoke_oracle", record_oracle)
+    mocker.patch.object(bootstrap_module, "invoke_oracle", record_oracle)
 
     _execute(tmp_path, thinking_time="extended", model="gpt-5.6-sol")
 
