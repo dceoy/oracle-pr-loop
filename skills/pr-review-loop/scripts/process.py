@@ -218,7 +218,8 @@ class CommandRunner:
                 self._repo_dir / self._oracle_home() / ".oracle" / "config.json"
             )
         try:
-            raw_text = config_path.read_text(encoding="utf-8")
+            # Match Node's fs.readFile(..., "utf8") replacement decoding.
+            raw_text = config_path.read_bytes().decode("utf-8", errors="replace")
         except OSError:
             return (None, None)
         try:

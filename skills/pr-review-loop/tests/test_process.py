@@ -324,6 +324,23 @@ def test_oracle_config_remote_host_is_none_when_config_file_is_absent(
     assert runner.oracle_config_remote_host is None
 
 
+def test_oracle_config_with_malformed_utf8_in_comment_is_parsed(
+    tmp_path: Path,
+) -> None:
+    """Malformed UTF-8 in a JSON5 comment is replaced like Node's decoder."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_bytes(
+        b"// malformed byte: \xff\n"
+        b'{"browser": {"remoteHost": "10.0.0.9:9473", '
+        b'"remoteToken": "config-secret-token"}}'
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("config-secret-token")
+
+
 def test_oracle_home_dir_config_is_read_without_an_extra_oracle_subdirectory(
     tmp_path: Path,
 ) -> None:
