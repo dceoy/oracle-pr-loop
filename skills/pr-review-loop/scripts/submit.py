@@ -196,7 +196,7 @@ def _legacy_artifacts_already_ignored(
 
     Returns:
         Whether `.pr-review-loop` is already excluded by an existing Git
-        ignore rule (`.gitignore`, `.git/info/exclude`, or equivalent).
+        ignore rule.
 
     Raises:
         LooprError: Git could not evaluate the ignore rules.
