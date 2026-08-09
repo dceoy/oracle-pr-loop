@@ -257,7 +257,7 @@ def validate_path(path: str) -> str:
     return path
 
 
-def _json_object(text: str, *, category: str) -> JsonObject:
+def parse_json_object(text: str, *, category: str) -> JsonObject:
     """Decode exactly one JSON object without repairing malformed data.
 
     Returns:
@@ -283,7 +283,7 @@ def _json_object(text: str, *, category: str) -> JsonObject:
     return cast("JsonObject", value)
 
 
-def _object(value: JsonValue | None, *, field: str) -> JsonObject:
+def require_object(value: JsonValue | None, *, field: str) -> JsonObject:
     """Require a JSON object field.
 
     Returns:
@@ -298,7 +298,9 @@ def _object(value: JsonValue | None, *, field: str) -> JsonObject:
     return value
 
 
-def _string(value: JsonValue | None, *, field: str, allow_empty: bool = False) -> str:
+def require_string(
+    value: JsonValue | None, *, field: str, allow_empty: bool = False
+) -> str:
     """Require a JSON string field.
 
     Returns:
@@ -313,7 +315,7 @@ def _string(value: JsonValue | None, *, field: str, allow_empty: bool = False) -
     return value
 
 
-def _integer(value: JsonValue | None, *, field: str) -> int:
+def require_integer(value: JsonValue | None, *, field: str) -> int:
     """Require a non-Boolean JSON integer field.
 
     Returns:
@@ -340,11 +342,11 @@ def _optional_author_login(value: JsonValue | None, *, field: str) -> str:
     """
     if value is None:
         return ""
-    author = _object(value, field=field)
+    author = require_object(value, field=field)
     login = author.get("login")
     if login is None:
         login = ""
-    return _string(login, field=f"{field}.login", allow_empty=True)
+    return require_string(login, field=f"{field}.login", allow_empty=True)
 
 
 class _ImmutableGitMixin:
@@ -613,7 +615,7 @@ class GitHubClient(_ImmutableGitMixin):
             LooprError: GitHub's response was malformed, inconsistent, or
                 failed identity validation.
         """
-        data = _json_object(
+        data = parse_json_object(
             self._text(
                 ["pr", "view", self.url, "--json", PR_FIELDS],
                 max_output=8 * 1024 * 1024,
@@ -635,8 +637,12 @@ class GitHubClient(_ImmutableGitMixin):
                     "github_schema",
                     "GitHub changed-file entry must be an object",
                 )
-            paths.append(validate_path(_string(item.get("path"), field="files.path")))
-        advertised_count = _integer(data.get("changedFiles"), field="changedFiles")
+            paths.append(
+                validate_path(require_string(item.get("path"), field="files.path"))
+            )
+        advertised_count = require_integer(
+            data.get("changedFiles"), field="changedFiles"
+        )
         if advertised_count < 0 or advertised_count != len(paths):
             raise LooprError(
                 EXIT_PRECONDITION,
@@ -650,11 +656,11 @@ class GitHubClient(_ImmutableGitMixin):
                 "duplicate changed paths",
             )
 
-        head_repository = _object(
+        head_repository = require_object(
             data.get("headRepository"),
             field="headRepository",
         )
-        head_owner = _object(
+        head_owner = require_object(
             data.get("headRepositoryOwner"),
             field="headRepositoryOwner",
         )
@@ -662,23 +668,27 @@ class GitHubClient(_ImmutableGitMixin):
         if isinstance(name_with_owner, str) and name_with_owner:
             head_repo = name_with_owner
         else:
-            owner = _string(head_owner.get("login"), field="headRepositoryOwner.login")
-            name = _string(head_repository.get("name"), field="headRepository.name")
+            owner = require_string(
+                head_owner.get("login"), field="headRepositoryOwner.login"
+            )
+            name = require_string(
+                head_repository.get("name"), field="headRepository.name"
+            )
             head_repo = f"{owner}/{name}"
-        author = _object(data.get("author"), field="author")
+        author = require_object(data.get("author"), field="author")
         pull_request = PullRequest(
             repository=self.repository,
-            number=_integer(data.get("number"), field="number"),
-            url=_string(data.get("url"), field="url"),
-            title=_string(data.get("title"), field="title", allow_empty=True),
-            body=_string(data.get("body") or "", field="body", allow_empty=True),
-            author=_string(author.get("login"), field="author.login"),
-            state=_string(data.get("state"), field="state"),
+            number=require_integer(data.get("number"), field="number"),
+            url=require_string(data.get("url"), field="url"),
+            title=require_string(data.get("title"), field="title", allow_empty=True),
+            body=require_string(data.get("body") or "", field="body", allow_empty=True),
+            author=require_string(author.get("login"), field="author.login"),
+            state=require_string(data.get("state"), field="state"),
             is_draft=bool(data.get("isDraft")),
-            base_ref=_string(data.get("baseRefName"), field="baseRefName"),
-            base_sha=_string(data.get("baseRefOid"), field="baseRefOid"),
-            head_ref=_string(data.get("headRefName"), field="headRefName"),
-            head_sha=_string(data.get("headRefOid"), field="headRefOid"),
+            base_ref=require_string(data.get("baseRefName"), field="baseRefName"),
+            base_sha=require_string(data.get("baseRefOid"), field="baseRefOid"),
+            head_ref=require_string(data.get("headRefName"), field="headRefName"),
+            head_sha=require_string(data.get("headRefOid"), field="headRefOid"),
             head_repository=head_repo,
             changed_paths=tuple(sorted(paths)),
             raw=data,
@@ -823,7 +833,7 @@ class GitHubClient(_ImmutableGitMixin):
             "body": body,
             "event": event,
         }
-        data = _json_object(
+        data = parse_json_object(
             self._text(
                 [
                     "api",
@@ -842,8 +852,8 @@ class GitHubClient(_ImmutableGitMixin):
             ),
             category="github_schema",
         )
-        review_id = _integer(data.get("id"), field="id")
-        commit_id = _string(data.get("commit_id"), field="commit_id")
+        review_id = require_integer(data.get("id"), field="id")
+        commit_id = require_string(data.get("commit_id"), field="commit_id")
         if review_id <= 0 or commit_id != pull_request.head_sha:
             if review_id > 0 and event != "COMMENT":
                 self.dismiss(pull_request, review_id)
@@ -890,7 +900,7 @@ class GitHubClient(_ImmutableGitMixin):
         Raises:
             LooprError: The re-read review's identity or commit does not match.
         """
-        data = _json_object(
+        data = parse_json_object(
             self._text(
                 [
                     "api",
@@ -905,14 +915,15 @@ class GitHubClient(_ImmutableGitMixin):
             category="github_schema",
         )
         if (
-            _integer(data.get("id"), field="id") != review_id
-            or _string(
-                _object(data.get("user"), field="user").get("login"), field="user.login"
+            require_integer(data.get("id"), field="id") != review_id
+            or require_string(
+                require_object(data.get("user"), field="user").get("login"),
+                field="user.login",
             ).casefold()
             != self.authenticated_login.casefold()
-            or _string(data.get("commit_id"), field="commit_id")
+            or require_string(data.get("commit_id"), field="commit_id")
             != pull_request.head_sha
-            or _string(data.get("body"), field="body") != body
+            or require_string(data.get("body"), field="body") != body
         ):
             raise LooprError(
                 EXIT_GITHUB,
@@ -956,8 +967,10 @@ def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
             )
         parsed.append((
             _optional_author_login(item.get("author"), field="comments.author"),
-            _string(item.get("body") or "", field="comments.body", allow_empty=True),
-            _string(item.get("createdAt"), field="comments.createdAt"),
+            require_string(
+                item.get("body") or "", field="comments.body", allow_empty=True
+            ),
+            require_string(item.get("createdAt"), field="comments.createdAt"),
         ))
     parsed.sort(key=operator.itemgetter(2))
     kept = parsed[-MAX_ISSUE_COMMENTS:] if len(parsed) > MAX_ISSUE_COMMENTS else parsed
@@ -1067,7 +1080,7 @@ class IssueClient(_ImmutableGitMixin):
                 identity validation, or contained a known credential.
         """
         owner, _, name = self.repository.partition("/")
-        envelope = _json_object(
+        envelope = parse_json_object(
             self._text(
                 [
                     "api",
@@ -1089,13 +1102,15 @@ class IssueClient(_ImmutableGitMixin):
             ),
             category="github_schema",
         )
-        response_data = _object(envelope.get("data"), field="data")
-        repository_data = _object(
+        response_data = require_object(envelope.get("data"), field="data")
+        repository_data = require_object(
             response_data.get("repository"),
             field="data.repository",
         )
-        data = _object(repository_data.get("issue"), field="data.repository.issue")
-        comments_field = _object(data.get("comments"), field="comments")
+        data = require_object(
+            repository_data.get("issue"), field="data.repository.issue"
+        )
+        comments_field = require_object(data.get("comments"), field="comments")
         comments_value = comments_field.get("nodes")
         if not isinstance(comments_value, list):
             raise LooprError(
@@ -1103,7 +1118,7 @@ class IssueClient(_ImmutableGitMixin):
                 "github_schema",
                 "GitHub field comments.nodes must be an array",
             )
-        body = _string(data.get("body") or "", field="body", allow_empty=True)
+        body = require_string(data.get("body") or "", field="body", allow_empty=True)
         if len(body.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:
             raise LooprError(
                 EXIT_PRECONDITION,
@@ -1112,13 +1127,13 @@ class IssueClient(_ImmutableGitMixin):
             )
         issue = IssueSnapshot(
             repository=self.repository,
-            number=_integer(data.get("number"), field="number"),
-            url=_string(data.get("url"), field="url"),
-            title=_string(data.get("title"), field="title", allow_empty=True),
+            number=require_integer(data.get("number"), field="number"),
+            url=require_string(data.get("url"), field="url"),
+            title=require_string(data.get("title"), field="title", allow_empty=True),
             body=body,
             author=_optional_author_login(data.get("author"), field="author"),
-            state=_string(data.get("state"), field="state"),
-            updated_at=_string(data.get("updatedAt"), field="updatedAt"),
+            state=require_string(data.get("state"), field="state"),
+            updated_at=require_string(data.get("updatedAt"), field="updatedAt"),
             comments=_bounded_comments(comments_value),
             raw=data,
         )
@@ -1173,12 +1188,12 @@ class IssueClient(_ImmutableGitMixin):
         Returns:
             The validated default branch name.
         """
-        data = _json_object(
+        data = parse_json_object(
             self._text(["repo", "view", self.repository, "--json", "defaultBranchRef"]),
             category="github_schema",
         )
-        ref = _object(data.get("defaultBranchRef"), field="defaultBranchRef")
-        branch = _string(ref.get("name"), field="defaultBranchRef.name")
+        ref = require_object(data.get("defaultBranchRef"), field="defaultBranchRef")
+        branch = require_string(ref.get("name"), field="defaultBranchRef.name")
         validate_ref(branch)
         return branch
 
@@ -1192,7 +1207,7 @@ class IssueClient(_ImmutableGitMixin):
             LooprError: GitHub's response was malformed or the SHA is invalid.
         """
         encoded_branch = urllib.parse.quote(branch, safe="")
-        data = _json_object(
+        data = parse_json_object(
             self._text([
                 "api",
                 "--hostname",
@@ -1201,8 +1216,8 @@ class IssueClient(_ImmutableGitMixin):
             ]),
             category="github_schema",
         )
-        commit = _object(data.get("commit"), field="commit")
-        sha = _string(commit.get("sha"), field="commit.sha")
+        commit = require_object(data.get("commit"), field="commit")
+        sha = require_string(commit.get("sha"), field="commit.sha")
         if not SHA_RE.fullmatch(sha):
             raise LooprError(
                 EXIT_PRECONDITION,
