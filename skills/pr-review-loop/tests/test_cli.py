@@ -27,7 +27,7 @@ from scripts.process import CommandResult, CommandRunner
 from scripts.review import execute_review
 from scripts.submit import execute_submit
 from test_review import FakeGitHubClient, install_orchestration_fakes, sample_pr
-from test_submission import ScenarioRunner, _fixture_repo
+from test_submit import ScenarioRunner, _fixture_repo
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

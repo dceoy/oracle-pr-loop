@@ -24,7 +24,7 @@ from .models import (
 )
 from .process import CommandRunner
 from .review import execute_review
-from .submit import execute_guarded as execute_submit
+from .submit import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
