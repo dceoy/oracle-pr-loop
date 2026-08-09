@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from scripts import process as process_module
 from scripts.artifacts import TemporaryFileWriter
 from scripts.models import IssueSnapshot, LooprError, PullRequest
 from scripts.oracle import (
@@ -644,6 +646,7 @@ class _FakeOracleRunner(CommandRunner):
         super().__init__(source_env if source_env is not None else {})
         self.payload = payload
         self.commands: list[tuple[str, ...]] = []
+        self.environments: list[dict[str, str]] = []
 
     def run(
         self,
@@ -658,9 +661,10 @@ class _FakeOracleRunner(CommandRunner):
         watch_path: Path | None = None,
     ) -> CommandResult:
         """Record the command and satisfy the Oracle watch-path contract."""
-        del cwd, env, timeout, input_text, check, max_output
+        del cwd, timeout, input_text, check, max_output
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
+        self.environments.append(dict(env))
         if argv and argv[0] == "oracle":
             if watch_path is None:
                 pytest.fail("Oracle invocation must provide a watched output path")
@@ -1361,6 +1365,34 @@ def test_oracle_invocation_uses_config_only_remote_host_as_remote(
 
     oracle_argv = runner.commands[0]
     assert "--browser-manual-login" not in oracle_argv
+
+
+def test_oracle_invocation_uses_effective_home_without_exported_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing HOME still selects config-only remote mode and redacts tokens."""
+    effective_home = tmp_path / "effective-home"
+    oracle_dir = effective_home / ".oracle"
+    oracle_dir.mkdir(parents=True)
+    oracle_dir.joinpath("config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", "remoteToken": "xyz"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(process_module.Path, "home", lambda: effective_home)
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A) + "xyz"
+    runner = _FakeOracleRunner(payload, {"PATH": os.environ["PATH"]})
+
+    with pytest.raises(LooprError, match="contained a credential"):
+        _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    assert runner.commands
+    assert "--browser-manual-login" not in runner.commands[0]
+    assert runner.environments[0]["HOME"] == str(effective_home)
+    assert runner.contains_secret("xyz")
 
 
 def test_oracle_invocation_uses_unquoted_key_config_remote_host_as_remote(

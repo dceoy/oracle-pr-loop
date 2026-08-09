@@ -490,6 +490,28 @@ def test_unset_oracle_home_dir_uses_home_config_with_repo_dir(
     assert not runner.contains_secret("repo-decoy-secret")
 
 
+def test_unset_oracle_home_dir_without_home_uses_effective_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent HOME still finds Oracle's account-level config fallback."""
+    effective_home = tmp_path / "effective-home"
+    oracle_dir = effective_home / ".oracle"
+    oracle_dir.mkdir(parents=True)
+    oracle_dir.joinpath("config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", "remoteToken": "xyz"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(process_module.Path, "home", lambda: effective_home)
+    runner = CommandRunner({"PATH": os.environ["PATH"]})
+
+    assert runner.oracle_env()["HOME"] == str(effective_home)
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret("xyz")
+    assert runner.contains_secret(b"xyz")
+    assert runner.redact("token=xyz") == "token=[REDACTED]"
+
+
 def test_oracle_config_with_line_comments_and_trailing_commas_is_parsed(
     tmp_path: Path,
 ) -> None:

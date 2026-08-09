@@ -105,6 +105,8 @@ class CommandRunner:
         """
         self.source_env = dict(source_env or os.environ)
         self._repo_dir = Path() if repo_dir is None else repo_dir
+        self._effective_home: str | None = None
+        self._effective_home_resolved = False
         self.secrets = {
             value
             for key, value in self.source_env.items()
@@ -135,6 +137,32 @@ class CommandRunner:
         )
         if normalized_remote_token:
             self.secrets.add(normalized_remote_token)
+
+    def _oracle_home(self) -> str:
+        """Return the effective HOME used by Oracle's subprocess.
+
+        Raises:
+            LooprError: The effective account home cannot be resolved.
+        """
+        if "HOME" in self.source_env:
+            return self.source_env["HOME"]
+        if not self._effective_home_resolved:
+            try:
+                self._effective_home = str(Path.home())
+            except (OSError, RuntimeError) as exc:
+                raise LooprError(
+                    EXIT_PRECONDITION,
+                    "bundle",
+                    "could not resolve Oracle's effective home directory",
+                ) from exc
+            self._effective_home_resolved = True
+        if self._effective_home is None:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "could not resolve Oracle's effective home directory",
+            )
+        return self._effective_home
 
     @property
     def oracle_config_remote_host(self) -> str | None:
@@ -186,10 +214,9 @@ class CommandRunner:
         if oracle_home_dir is not None:
             config_path = self._repo_dir / oracle_home_dir / "config.json"
         else:
-            home = self.source_env.get("HOME")
-            if not home:
-                return (None, None)
-            config_path = Path(home) / ".oracle" / "config.json"
+            config_path = (
+                self._repo_dir / self._oracle_home() / ".oracle" / "config.json"
+            )
         try:
             raw_text = config_path.read_text(encoding="utf-8")
         except OSError:
@@ -313,7 +340,7 @@ class CommandRunner:
         use a remote `oracle serve` instance works without a local Chrome
         session and without this module implementing a second transport.
         """
-        return self.allowlisted_env({
+        env = self.allowlisted_env({
             "CHROME_PATH",
             "DISPLAY",
             "WAYLAND_DISPLAY",
@@ -325,6 +352,9 @@ class CommandRunner:
             "ORACLE_REMOTE_HOST",
             "ORACLE_REMOTE_TOKEN",
         })
+        if "HOME" not in env:
+            env["HOME"] = self._oracle_home()
+        return env
 
     def run(
         self,
