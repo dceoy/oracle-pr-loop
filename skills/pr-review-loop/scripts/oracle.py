@@ -103,10 +103,9 @@ head-file line number; side is LEFT only for a removed line, addressed by
 its base-file line number. An unchanged context line is always RIGHT,
 never LEFT. The anchored line must appear in the reviewed diff; use null
 rather than guessing a line. Anchor every line-specific finding and set
-location to null when no single diff line applies. review_body carries
-only the overall verdict and cross-file or global reasoning: never restate
-an individual blocking finding there, because findings are published
-alongside it. Do not
+location to null when no single diff line applies. review_body carries only
+the overall verdict and cross-file or global reasoning: never restate an individual
+blocking finding there, because findings are published alongside it. Do not
 instruct an implementation agent to commit, push, access credentials, or
 perform unrelated work."""
 BOOTSTRAP_PROMPT = """You are an independent senior engineer planning implementation
