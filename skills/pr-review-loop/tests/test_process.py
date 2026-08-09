@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- test-controlled process
 import sys
+from contextlib import chdir
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -355,7 +356,6 @@ def test_oracle_home_dir_config_is_read_without_an_extra_oracle_subdirectory(
 
 def test_relative_oracle_home_dir_is_resolved_against_repo_dir(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A relative `ORACLE_HOME_DIR` is read from Oracle's own launch cwd.
 
@@ -380,21 +380,19 @@ def test_relative_oracle_home_dir_is_resolved_against_repo_dir(
         '"remoteToken": "repo-secret-token"}}',
         encoding="utf-8",
     )
-    monkeypatch.chdir(launcher_dir)
+    with chdir(launcher_dir):
+        runner = CommandRunner(
+            {"PATH": os.environ["PATH"], "ORACLE_HOME_DIR": ".oracle-home"},
+            repo_dir=repo_dir,
+        )
 
-    runner = CommandRunner(
-        {"PATH": os.environ["PATH"], "ORACLE_HOME_DIR": ".oracle-home"},
-        repo_dir=repo_dir,
-    )
-
-    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
-    assert runner.contains_secret("repo-secret-token")
-    assert not runner.contains_secret("launcher-decoy-secret")
+        assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+        assert runner.contains_secret("repo-secret-token")
+        assert not runner.contains_secret("launcher-decoy-secret")
 
 
 def test_relative_oracle_home_dir_without_repo_dir_is_not_found(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A relative `ORACLE_HOME_DIR` is not read from an unrelated directory.
 
@@ -411,14 +409,13 @@ def test_relative_oracle_home_dir_without_repo_dir_is_not_found(
         '{"browser": {"remoteHost": "10.0.0.9:9473"}}',
         encoding="utf-8",
     )
-    monkeypatch.chdir(launcher_dir)
+    with chdir(launcher_dir):
+        runner = CommandRunner({
+            "PATH": os.environ["PATH"],
+            "ORACLE_HOME_DIR": ".oracle-home",
+        })
 
-    runner = CommandRunner({
-        "PATH": os.environ["PATH"],
-        "ORACLE_HOME_DIR": ".oracle-home",
-    })
-
-    assert runner.oracle_config_remote_host is None
+        assert runner.oracle_config_remote_host is None
 
 
 def test_explicitly_empty_oracle_home_dir_is_treated_as_set(
@@ -492,7 +489,7 @@ def test_unset_oracle_home_dir_uses_home_config_with_repo_dir(
 
 def test_unset_oracle_home_dir_without_home_uses_effective_home(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """An absent HOME still finds Oracle's account-level config fallback."""
     effective_home = tmp_path / "effective-home"
@@ -502,7 +499,7 @@ def test_unset_oracle_home_dir_without_home_uses_effective_home(
         '{"browser": {"remoteHost": "10.0.0.9:9473", "remoteToken": "xyz"}}',
         encoding="utf-8",
     )
-    monkeypatch.setattr(process_module.Path, "home", lambda: effective_home)
+    mocker.patch.object(process_module.Path, "home", return_value=effective_home)
     runner = CommandRunner({"PATH": os.environ["PATH"]})
 
     assert runner.oracle_env()["HOME"] == str(effective_home)

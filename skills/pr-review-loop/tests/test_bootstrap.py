@@ -247,21 +247,23 @@ def test_execute_bootstrap_forwards_oracle_overrides(
     _execute(tmp_path, thinking_time="extended", model="gpt-5.6-sol")
 
     assert calls == [("extended", "gpt-5.6-sol")]
+
+
 def test_execute_bootstrap_binds_implicit_runner_to_repo_dir(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """An omitted runner uses the same repository directory as Oracle."""
     issue = sample_issue()
     _configure_stable(issue)
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
     created_repo_dirs: list[Path] = []
 
     def make_runner(*, repo_dir: Path) -> CommandRunner:
         created_repo_dirs.append(repo_dir)
         return CommandRunner(repo_dir=repo_dir)
 
-    monkeypatch.setattr(bootstrap_module, "CommandRunner", make_runner)
+    mocker.patch.object(bootstrap_module, "CommandRunner", make_runner)
 
     _ = execute_bootstrap(
         issue_value="7",

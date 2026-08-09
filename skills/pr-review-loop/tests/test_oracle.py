@@ -643,7 +643,8 @@ class _FakeOracleRunner(CommandRunner):
         source_env: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize a fake Oracle transport, defaulting to an isolated empty env."""
-        super().__init__(source_env if source_env is not None else {})
+        isolated_env = source_env or {"HOME": os.devnull}
+        super().__init__(isolated_env)
         self.payload = payload
         self.commands: list[tuple[str, ...]] = []
         self.environments: list[dict[str, str]] = []
@@ -1329,7 +1330,11 @@ def test_oracle_invocation_omits_manual_login_with_remote_transport(
     payload = _bootstrap_payload(issue, SHA_A)
     runner = _FakeOracleRunner(
         payload,
-        {"ORACLE_REMOTE_HOST": "127.0.0.1:9473", "ORACLE_REMOTE_TOKEN": "token-value"},
+        {
+            "HOME": os.devnull,
+            "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
+            "ORACLE_REMOTE_TOKEN": "token-value",
+        },
     )
     _generate_bootstrap(runner, writer, github, issue, SHA_A)
 
@@ -1369,7 +1374,7 @@ def test_oracle_invocation_uses_config_only_remote_host_as_remote(
 
 def test_oracle_invocation_uses_effective_home_without_exported_home(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
 ) -> None:
     """Missing HOME still selects config-only remote mode and redacts tokens."""
     effective_home = tmp_path / "effective-home"
@@ -1379,7 +1384,7 @@ def test_oracle_invocation_uses_effective_home_without_exported_home(
         '{"browser": {"remoteHost": "10.0.0.9:9473", "remoteToken": "xyz"}}',
         encoding="utf-8",
     )
-    monkeypatch.setattr(process_module.Path, "home", lambda: effective_home)
+    mocker.patch.object(process_module.Path, "home", return_value=effective_home)
     issue = _sample_issue()
     writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
     github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
@@ -1598,7 +1603,10 @@ def test_oracle_invocation_treats_whitespace_only_env_host_as_unset(
     writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
     github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
     payload = _bootstrap_payload(issue, SHA_A)
-    runner = _FakeOracleRunner(payload, {"ORACLE_REMOTE_HOST": "   "})
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": os.devnull, "ORACLE_REMOTE_HOST": "   "},
+    )
     _generate_bootstrap(runner, writer, github, issue, SHA_A)
 
     oracle_argv = runner.commands[0]

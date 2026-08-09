@@ -263,20 +263,20 @@ def test_execute_review_forwards_oracle_overrides(
 
 
 def test_execute_review_binds_implicit_runner_to_repo_dir(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """An omitted runner uses the same repository directory as Oracle."""
     initial = sample_pr()
     FakeGitHubClient.snapshots = [initial, initial, initial]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
     created_repo_dirs: list[Path] = []
 
     def make_runner(*, repo_dir: Path) -> CommandRunner:
         created_repo_dirs.append(repo_dir)
         return CommandRunner(repo_dir=repo_dir)
 
-    monkeypatch.setattr(review_module, "CommandRunner", make_runner)
+    mocker.patch.object(review_module, "CommandRunner", make_runner)
 
     execute_review(
         pr_value="21",
