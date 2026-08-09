@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from scripts.artifacts import TemporaryFileWriter
-from scripts.github import GitHubClient
 from scripts.models import IssueSnapshot, LooprError, PullRequest
 from scripts.oracle import (
     BOOTSTRAP_PROMPT,
@@ -18,8 +17,9 @@ from scripts.oracle import (
     MAX_ORACLE_ARG_BYTES,
     MAX_ORACLE_ATTACHMENTS,
     PROMPT,
-    BootstrapOracleClient,
-    OracleClient,
+    build_bootstrap_bundle,
+    build_review_bundle,
+    invoke_oracle,
     parse_bootstrap,
     parse_review,
 )
@@ -28,11 +28,32 @@ from scripts.process import CommandResult, CommandRunner
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from scripts.github import IssueClient
+    from scripts.github import GitHubClient, IssueClient
     from scripts.models import JsonObject
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+
+
+def _invoke(
+    runner: CommandRunner,
+    writer: TemporaryFileWriter,
+    repo_dir: Path,
+    prompt: str,
+    attachments: tuple[Path, ...],
+    max_attachments: int,
+) -> str:
+    """Invoke the test transport with stable bounds and a test slug."""
+    return invoke_oracle(
+        runner,
+        writer,
+        repo_dir,
+        "heavy",
+        prompt,
+        attachments,
+        "test-slug",
+        max_attachments=max_attachments,
+    )
 
 
 def _sample_pr() -> PullRequest:
@@ -84,10 +105,9 @@ def test_bundle_rejects_excessive_instruction_file_inventory(tmp_path: Path) -> 
         "GitHubClient",
         _TooManyInstructionsGitHub(tmp_path),
     )
-    oracle = OracleClient(runner, github, writer, "heavy")
 
     with pytest.raises(LooprError) as captured:
-        oracle.build_bundle(_sample_pr())
+        build_review_bundle(runner, github, writer, _sample_pr())
 
     assert captured.value.category == "bundle"
     assert "instruction-file limit" in str(captured.value)
@@ -97,14 +117,12 @@ def test_oracle_review_rejects_excessive_attachment_count(tmp_path: Path) -> Non
     """The Oracle command cannot receive an unbounded number of --file arguments."""
     runner = CommandRunner()
     writer = TemporaryFileWriter(tmp_path / "oracle", runner)
-    github = GitHubClient(runner, tmp_path)
-    oracle = OracleClient(runner, github, writer, "heavy")
     attachments = tuple(
         Path(f"attachment-{index}.txt") for index in range(MAX_ORACLE_ATTACHMENTS + 1)
     )
 
     with pytest.raises(LooprError) as captured:
-        oracle.review(_sample_pr(), attachments)
+        _invoke(runner, writer, tmp_path, "prompt", attachments, MAX_ORACLE_ATTACHMENTS)
 
     assert captured.value.category == "bundle"
     assert "attachment count" in str(captured.value)
@@ -117,8 +135,6 @@ def test_oracle_review_rejects_excessive_argument_bytes(
     """The complete Oracle argv is byte-bounded before subprocess execution."""
     runner = CommandRunner()
     writer = TemporaryFileWriter(tmp_path / "oracle", runner)
-    github = GitHubClient(runner, tmp_path)
-    oracle = OracleClient(runner, github, writer, "heavy")
     oversized_path = Path("x" * MAX_ORACLE_ARG_BYTES)
 
     def unexpected_run(*_args: object, **_kwargs: object) -> None:
@@ -127,7 +143,14 @@ def test_oracle_review_rejects_excessive_argument_bytes(
     monkeypatch.setattr(runner, "run", unexpected_run)
 
     with pytest.raises(LooprError) as captured:
-        oracle.review(_sample_pr(), (oversized_path,))
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (oversized_path,),
+            MAX_ORACLE_ATTACHMENTS,
+        )
 
     assert captured.value.category == "bundle"
     assert "arguments exceed" in str(captured.value)
@@ -164,47 +187,19 @@ def test_parse_review_accepts_valid_output_without_connector_context() -> None:
     assert parsed.verdict == "APPROVE"
 
 
-def test_parse_review_rejects_repository_mismatch() -> None:
-    """An Oracle response naming another repository cannot redirect the result."""
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "other/repo"),
+        ("pr_number", 22),
+        ("base_sha", SHA_B),
+        ("head_sha", SHA_A),
+    ],
+)
+def test_parse_review_rejects_identity_mismatch(field: str, value: object) -> None:
+    """A response naming another repository, PR, or SHA cannot redirect it."""
     pull_request = _sample_pr()
-    payload = _review_payload(pull_request, repository="other/repo")
-
-    with pytest.raises(LooprError) as captured:
-        parse_review(payload, pull_request)
-
-    assert captured.value.category == "oracle_identity"
-
-
-def test_parse_review_rejects_pr_number_mismatch() -> None:
-    """An Oracle response naming another PR cannot redirect the result."""
-    pull_request = _sample_pr()
-    payload = _review_payload(pull_request, pr_number=pull_request.number + 1)
-
-    with pytest.raises(LooprError) as captured:
-        parse_review(payload, pull_request)
-
-    assert captured.value.category == "oracle_identity"
-
-
-def test_parse_review_rejects_base_sha_mismatch() -> None:
-    """An Oracle response naming a stale or different base SHA is rejected."""
-    pull_request = _sample_pr()
-    payload = _review_payload(pull_request, base_sha=SHA_B)
-
-    with pytest.raises(LooprError) as captured:
-        parse_review(payload, pull_request)
-
-    assert captured.value.category == "oracle_identity"
-
-
-def test_parse_review_rejects_head_sha_mismatch_from_connector_context() -> None:
-    """A response naming a different head cannot redirect the result.
-
-    This guards against connector exploration surfacing a newer commit than
-    the one attached: it must not override the exact reviewed head_sha.
-    """
-    pull_request = _sample_pr()
-    payload = _review_payload(pull_request, head_sha=SHA_A)
+    payload = _review_payload(pull_request, **{field: value})
 
     with pytest.raises(LooprError) as captured:
         parse_review(payload, pull_request)
@@ -244,10 +239,18 @@ def test_review_prompt_keeps_pr_requirements_as_criteria(tmp_path: Path) -> None
         ),
     )
     runner = _FakeOracleRunner(_review_payload(pull_request))
-    oracle = OracleClient(runner, github, writer, "heavy")
 
-    bundle = oracle.build_bundle(pull_request)
-    reviewed = oracle.review(pull_request, bundle)
+    bundle = build_review_bundle(runner, github, writer, pull_request)
+    prompt = PROMPT.format(
+        repository=pull_request.repository,
+        pr_number=pull_request.number,
+        base_sha=pull_request.base_sha,
+        head_sha=pull_request.head_sha,
+    )
+    raw = _invoke(
+        runner, writer, github.repo_dir, prompt, bundle, MAX_ORACLE_ATTACHMENTS
+    )
+    reviewed = parse_review(raw, pull_request)
 
     prompt_index = runner.commands[0].index("--prompt")
     written_prompt = runner.commands[0][prompt_index + 1]
@@ -311,6 +314,47 @@ class _FakeReviewGitHub:
         return data
 
 
+def test_review_bundle_preserves_core_and_manifest_order(tmp_path: Path) -> None:
+    """The shared builder keeps evidence order and changed-file kinds stable."""
+    runner = CommandRunner()
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    github = cast(
+        "GitHubClient",
+        _FakeReviewGitHub(
+            tmp_path,
+            tracked=("CONTRIBUTING.md", "AGENTS.md", "src/file.py"),
+            blobs={
+                "AGENTS.md": b"agent rules\n",
+                "CONTRIBUTING.md": b"contribution rules\n",
+                "src/file.py": b"print('ok')\n",
+            },
+        ),
+    )
+    pull_request = replace(
+        _sample_pr(),
+        changed_paths=("src/file.py", "AGENTS.md"),
+    )
+
+    bundle = build_review_bundle(runner, github, writer, pull_request)
+
+    assert [str(path.relative_to(writer.root)) for path in bundle] == [
+        "snapshot.json",
+        "patch.diff",
+        "changed-paths.txt",
+        "bundle-manifest.json",
+        "attachments/001.txt",
+        "attachments/002.txt",
+        "attachments/003.txt",
+    ]
+    manifest = json.loads((writer.root / "bundle-manifest.json").read_text())
+    assert [(item["path"], item["kind"]) for item in manifest] == [
+        ("AGENTS.md", "changed"),
+        ("CONTRIBUTING.md", "instruction"),
+        ("src/file.py", "changed"),
+    ]
+    assert [item["bytes"] for item in manifest] == [12, 19, 12]
+
+
 def test_review_prompt_is_isolated_from_pr_content(tmp_path: Path) -> None:
     """PR title/body reach Oracle only as an attachment, never the prompt text."""
     pull_request = replace(
@@ -329,10 +373,8 @@ def test_review_prompt_is_isolated_from_pr_content(tmp_path: Path) -> None:
     )
     payload = _review_payload(pull_request)
     runner = _FakeOracleRunner(payload)
-    oracle = OracleClient(runner, github, writer, "heavy")
 
-    bundle = oracle.build_bundle(pull_request)
-    reviewed = oracle.review(pull_request, bundle)
+    bundle = build_review_bundle(runner, github, writer, pull_request)
 
     expected_prompt = PROMPT.format(
         repository=pull_request.repository,
@@ -340,6 +382,15 @@ def test_review_prompt_is_isolated_from_pr_content(tmp_path: Path) -> None:
         base_sha=pull_request.base_sha,
         head_sha=pull_request.head_sha,
     )
+    raw = _invoke(
+        runner,
+        writer,
+        github.repo_dir,
+        expected_prompt,
+        bundle,
+        MAX_ORACLE_ATTACHMENTS,
+    )
+    reviewed = parse_review(raw, pull_request)
     prompt_index = runner.commands[0].index("--prompt")
     written_prompt = runner.commands[0][prompt_index + 1]
     assert written_prompt == expected_prompt
@@ -403,32 +454,18 @@ def test_parse_bootstrap_accepts_valid_output() -> None:
     assert parsed.implementation_prompt == "Implement the requested change."
 
 
-def test_parse_bootstrap_rejects_repository_mismatch() -> None:
-    """An Oracle response naming another repository cannot redirect the result."""
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "other/repo"),
+        ("issue_number", 100),
+        ("base_sha", SHA_B),
+    ],
+)
+def test_parse_bootstrap_rejects_identity_mismatch(field: str, value: object) -> None:
+    """A response naming another repository, Issue, or SHA cannot redirect it."""
     issue = _sample_issue()
-    payload = _bootstrap_payload(issue, SHA_A, repository="other/repo")
-
-    with pytest.raises(LooprError) as captured:
-        parse_bootstrap(payload, issue, SHA_A)
-
-    assert captured.value.category == "oracle_identity"
-
-
-def test_parse_bootstrap_rejects_issue_number_mismatch() -> None:
-    """An Oracle response naming another Issue cannot redirect the result."""
-    issue = _sample_issue()
-    payload = _bootstrap_payload(issue, SHA_A, issue_number=issue.number + 1)
-
-    with pytest.raises(LooprError) as captured:
-        parse_bootstrap(payload, issue, SHA_A)
-
-    assert captured.value.category == "oracle_identity"
-
-
-def test_parse_bootstrap_rejects_base_sha_mismatch() -> None:
-    """An Oracle response naming a stale or different base SHA is rejected."""
-    issue = _sample_issue()
-    payload = _bootstrap_payload(issue, SHA_A, base_sha=SHA_B)
+    payload = _bootstrap_payload(issue, SHA_A, **{field: value})
 
     with pytest.raises(LooprError) as captured:
         parse_bootstrap(payload, issue, SHA_A)
@@ -572,10 +609,9 @@ def test_bootstrap_bundle_rejects_excessive_instruction_file_inventory(
             ),
         ),
     )
-    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
 
     with pytest.raises(LooprError) as captured:
-        oracle.build_bundle(_sample_issue(), SHA_A)
+        build_bootstrap_bundle(runner, github, writer, _sample_issue(), SHA_A)
 
     assert captured.value.category == "bundle"
     assert "instruction-file limit" in str(captured.value)
@@ -595,10 +631,9 @@ def test_bootstrap_bundle_rejects_credential_in_instruction_file(
             blobs={"AGENTS.md": b"token: known-instruction-secret\n"},
         ),
     )
-    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
 
     with pytest.raises(LooprError) as captured:
-        oracle.build_bundle(_sample_issue(), SHA_A)
+        build_bootstrap_bundle(runner, github, writer, _sample_issue(), SHA_A)
 
     assert captured.value.category == "bundle"
 
@@ -607,15 +642,20 @@ def test_bootstrap_generate_rejects_excessive_attachment_count(tmp_path: Path) -
     """The Oracle command cannot receive an unbounded number of --file arguments."""
     runner = CommandRunner()
     writer = TemporaryFileWriter(tmp_path / "oracle", runner)
-    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
-    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
     attachments = tuple(
         Path(f"attachment-{index}.txt")
         for index in range(MAX_BOOTSTRAP_ATTACHMENTS + 1)
     )
 
     with pytest.raises(LooprError) as captured:
-        oracle.generate(_sample_issue(), "main", SHA_A, attachments)
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            attachments,
+            MAX_BOOTSTRAP_ATTACHMENTS,
+        )
 
     assert captured.value.category == "bundle"
     assert "attachment count" in str(captured.value)
@@ -628,8 +668,6 @@ def test_bootstrap_generate_rejects_excessive_argument_bytes(
     """The complete Oracle argv is byte-bounded before subprocess execution."""
     runner = CommandRunner()
     writer = TemporaryFileWriter(tmp_path / "oracle", runner)
-    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
-    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
     oversized_path = Path("x" * MAX_ORACLE_ARG_BYTES)
 
     def unexpected_run(*_args: object, **_kwargs: object) -> None:
@@ -638,7 +676,14 @@ def test_bootstrap_generate_rejects_excessive_argument_bytes(
     monkeypatch.setattr(runner, "run", unexpected_run)
 
     with pytest.raises(LooprError) as captured:
-        oracle.generate(_sample_issue(), "main", SHA_A, (oversized_path,))
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (oversized_path,),
+            MAX_BOOTSTRAP_ATTACHMENTS,
+        )
 
     assert captured.value.category == "bundle"
     assert "arguments exceed" in str(captured.value)
@@ -672,10 +717,8 @@ def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None
     )
     payload = _bootstrap_payload(issue, SHA_A)
     runner = _FakeOracleRunner(payload)
-    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
 
-    bundle = oracle.build_bundle(issue, SHA_A)
-    generated = oracle.generate(issue, "main", SHA_A, bundle)
+    bundle = build_bootstrap_bundle(runner, github, writer, issue, SHA_A)
 
     expected_prompt = BOOTSTRAP_PROMPT.format(
         repository=issue.repository,
@@ -683,6 +726,15 @@ def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None
         base_ref="main",
         base_sha=SHA_A,
     )
+    raw = _invoke(
+        runner,
+        writer,
+        github.repo_dir,
+        expected_prompt,
+        bundle,
+        MAX_BOOTSTRAP_ATTACHMENTS,
+    )
+    generated = parse_bootstrap(raw, issue, SHA_A)
     prompt_index = runner.commands[0].index("--prompt")
     written_prompt = runner.commands[0][prompt_index + 1]
     assert written_prompt == expected_prompt

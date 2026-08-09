@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import stat
-import uuid
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -23,6 +22,8 @@ from .models import (
 from .process import CommandError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .artifacts import TemporaryFileWriter
     from .github import GitHubClient, IssueClient
     from .process import CommandRunner
@@ -478,7 +479,164 @@ def _bounded_text_attachment(
     )
 
 
-def _invoke_oracle(
+def _build_attachment_bundle(
+    writer: TemporaryFileWriter,
+    runner: CommandRunner,
+    core: tuple[Path, ...],
+    candidates: tuple[tuple[str, str], ...],
+    read: Callable[[str], bytes | None],
+) -> tuple[Path, ...]:
+    """Build one bounded manifest and its successful text attachments.
+
+    Returns:
+        The core artifacts, manifest, and written attachments in command order.
+    """
+    manifest: list[JsonValue] = []
+    attachments: list[Path] = []
+    total = sum(path.stat().st_size for path in core)
+    for index, (path, kind) in enumerate(candidates, start=1):
+        item = _bounded_text_attachment(
+            writer,
+            runner,
+            read(path),
+            path=path,
+            kind=kind,
+            index=index,
+            current_total=total,
+        )
+        manifest.append(item[0])
+        if item[1] is not None:
+            attachment, size = item[1]
+            attachments.append(attachment)
+            total += size
+    manifest_path = writer.json("bundle-manifest.json", manifest)
+    return (*core, manifest_path, *attachments)
+
+
+def build_review_bundle(
+    runner: CommandRunner,
+    github: GitHubClient,
+    writer: TemporaryFileWriter,
+    pull_request: PullRequest,
+) -> tuple[Path, ...]:
+    """Build a deterministic bounded review bundle from immutable Git data.
+
+    Returns:
+        The bundle's artifact paths, core files first.
+
+    Raises:
+        LooprError: pull_request or its repository exceeds a bundle limit,
+            or the patch is not clean UTF-8 or contains a known credential.
+    """
+    if len(pull_request.changed_paths) > MAX_CHANGED_FILES:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "pull request exceeds changed-file limit",
+        )
+    patch = github.patch(pull_request, max_output=MAX_PATCH_BYTES)
+    try:
+        patch_text = patch.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "patch is not UTF-8",
+        ) from exc
+    if runner.contains_secret(patch):
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "patch contains a known credential",
+        )
+    tracked = set(github.tracked_paths(pull_request))
+    instructions = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
+    }
+    if len(instructions) > MAX_INSTRUCTION_FILES:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "repository exceeds instruction-file limit",
+        )
+    core = (
+        writer.json("snapshot.json", _snapshot(pull_request)),
+        writer.text("patch.diff", patch_text),
+        writer.text(
+            "changed-paths.txt",
+            "\n".join(pull_request.changed_paths) + "\n",
+        ),
+    )
+    candidates = tuple(
+        (
+            path,
+            "instruction"
+            if path in instructions and path not in pull_request.changed_paths
+            else "changed",
+        )
+        for path in sorted(set(pull_request.changed_paths) | instructions)
+    )
+    return _build_attachment_bundle(
+        writer,
+        runner,
+        core,
+        candidates,
+        lambda path: github.changed_file_bytes(
+            pull_request,
+            path,
+            max_output=MAX_FILE_BYTES,
+        ),
+    )
+
+
+def build_bootstrap_bundle(
+    runner: CommandRunner,
+    issue_client: IssueClient,
+    writer: TemporaryFileWriter,
+    issue: IssueSnapshot,
+    base_sha: str,
+) -> tuple[Path, ...]:
+    """Build a deterministic bounded bootstrap bundle from immutable Git data.
+
+    Returns:
+        The bundle's artifact paths, core files first.
+
+    Raises:
+        LooprError: The repository exceeds an instruction-file limit, or an
+            instruction file contains a known credential.
+    """
+    tracked = issue_client.tracked_paths_at(base_sha)
+    instructions = tuple(
+        sorted(
+            path
+            for path in tracked
+            if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
+        )
+    )
+    if len(instructions) > MAX_INSTRUCTION_FILES:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "repository exceeds instruction-file limit",
+        )
+    core = (writer.json("issue-snapshot.json", _issue_snapshot(issue)),)
+    candidates = tuple((path, "instruction") for path in instructions)
+    return _build_attachment_bundle(
+        writer,
+        runner,
+        core,
+        candidates,
+        lambda path: issue_client.blob_bytes_at(
+            base_sha,
+            path,
+            max_output=MAX_FILE_BYTES,
+        ),
+    )
+
+
+def invoke_oracle(
     runner: CommandRunner,
     writer: TemporaryFileWriter,
     repo_dir: Path,
@@ -578,275 +736,3 @@ def _invoke_oracle(
             "Oracle output exceeded bounds or contained a credential",
         )
     return raw
-
-
-class OracleClient:
-    """Build deterministic evidence and request one strict Oracle verdict."""
-
-    def __init__(
-        self,
-        runner: CommandRunner,
-        github: GitHubClient,
-        writer: TemporaryFileWriter,
-        thinking_time: str,
-    ) -> None:
-        """Initialize the Oracle review client."""
-        self.runner = runner
-        self.github = github
-        self.writer = writer
-        self.thinking_time = thinking_time
-
-    def build_bundle(self, pull_request: PullRequest) -> tuple[Path, ...]:
-        """Build a deterministic bounded review bundle from immutable Git data.
-
-        Returns:
-            The bundle's artifact paths, core files first.
-
-        Raises:
-            LooprError: pull_request or its repository exceeds a bundle limit,
-                or the patch is not clean UTF-8 or contains a known credential.
-        """
-        if len(pull_request.changed_paths) > MAX_CHANGED_FILES:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "pull request exceeds changed-file limit",
-            )
-        patch = self.github.patch(pull_request, max_output=MAX_PATCH_BYTES)
-        try:
-            patch_text = patch.decode("utf-8", "strict")
-        except UnicodeDecodeError as exc:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "patch is not UTF-8",
-            ) from exc
-        if self.runner.contains_secret(patch):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "patch contains a known credential",
-            )
-        tracked = set(self.github.tracked_paths(pull_request))
-        instructions = {
-            path
-            for path in tracked
-            if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
-        }
-        if len(instructions) > MAX_INSTRUCTION_FILES:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "repository exceeds instruction-file limit",
-            )
-        core = [
-            self.writer.json("snapshot.json", _snapshot(pull_request)),
-            self.writer.text("patch.diff", patch_text),
-            self.writer.text(
-                "changed-paths.txt",
-                "\n".join(pull_request.changed_paths) + "\n",
-            ),
-        ]
-        manifest: list[JsonValue] = []
-        attachments: list[Path] = []
-        total = sum(path.stat().st_size for path in core)
-        selected_paths = sorted(set(pull_request.changed_paths) | instructions)
-        for index, path in enumerate(selected_paths, start=1):
-            kind = (
-                "instruction"
-                if path in instructions and path not in pull_request.changed_paths
-                else "changed"
-            )
-            item = self._attachment(
-                pull_request,
-                path,
-                kind,
-                index,
-                total,
-            )
-            manifest.append(item[0])
-            if item[1] is not None:
-                attachment, size = item[1]
-                attachments.append(attachment)
-                total += size
-        manifest_path = self.writer.json("bundle-manifest.json", manifest)
-        return (*core, manifest_path, *attachments)
-
-    def _attachment(
-        self,
-        pull_request: PullRequest,
-        path: str,
-        kind: str,
-        index: int,
-        current_total: int,
-    ) -> tuple[JsonObject, tuple[Path, int] | None]:
-        """Create one bounded text attachment or an explicit omission record.
-
-        Returns:
-            The manifest entry, paired with the written attachment path and
-            its size, or None if the file was omitted instead of written.
-        """
-        data = self.github.changed_file_bytes(
-            pull_request,
-            path,
-            max_output=MAX_FILE_BYTES,
-        )
-        return _bounded_text_attachment(
-            self.writer,
-            self.runner,
-            data,
-            path=path,
-            kind=kind,
-            index=index,
-            current_total=current_total,
-        )
-
-    def review(
-        self,
-        pull_request: PullRequest,
-        attachments: tuple[Path, ...],
-    ) -> OracleReview:
-        """Invoke Oracle once and strictly validate its bounded output.
-
-        Returns:
-            The validated Oracle review.
-        """
-        prompt = PROMPT.format(
-            repository=pull_request.repository,
-            pr_number=pull_request.number,
-            base_sha=pull_request.base_sha,
-            head_sha=pull_request.head_sha,
-        )
-        slug = (
-            f"loopr-review-{pull_request.number}-"
-            f"{pull_request.head_sha[:12]}-{uuid.uuid4().hex[:8]}"
-        )
-        raw = _invoke_oracle(
-            self.runner,
-            self.writer,
-            self.github.repo_dir,
-            self.thinking_time,
-            prompt,
-            attachments,
-            slug,
-            max_attachments=MAX_ORACLE_ATTACHMENTS,
-        )
-        parsed = parse_review(raw, pull_request)
-        return parsed
-
-
-class BootstrapOracleClient:
-    """Build deterministic bootstrap evidence and request one implementation prompt."""
-
-    def __init__(
-        self,
-        runner: CommandRunner,
-        issue_client: IssueClient,
-        writer: TemporaryFileWriter,
-        thinking_time: str,
-    ) -> None:
-        """Initialize the Oracle bootstrap client."""
-        self.runner = runner
-        self.issue_client = issue_client
-        self.writer = writer
-        self.thinking_time = thinking_time
-
-    def build_bundle(
-        self,
-        issue: IssueSnapshot,
-        base_sha: str,
-    ) -> tuple[Path, ...]:
-        """Build a deterministic bounded bootstrap bundle from immutable Git data.
-
-        Returns:
-            The bundle's artifact paths, core files first.
-
-        Raises:
-            LooprError: the repository exceeds an instruction-file limit, or
-                an instruction file contains a known credential.
-        """
-        tracked = self.issue_client.tracked_paths_at(base_sha)
-        instructions = sorted(
-            path
-            for path in tracked
-            if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
-        )
-        if len(instructions) > MAX_INSTRUCTION_FILES:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "repository exceeds instruction-file limit",
-            )
-        core = [self.writer.json("issue-snapshot.json", _issue_snapshot(issue))]
-        manifest: list[JsonValue] = []
-        attachments: list[Path] = []
-        total = sum(path.stat().st_size for path in core)
-        for index, path in enumerate(instructions, start=1):
-            item = self._attachment(base_sha, path, index, total)
-            manifest.append(item[0])
-            if item[1] is not None:
-                attachment, size = item[1]
-                attachments.append(attachment)
-                total += size
-        manifest_path = self.writer.json("bundle-manifest.json", manifest)
-        return (*core, manifest_path, *attachments)
-
-    def _attachment(
-        self,
-        base_sha: str,
-        path: str,
-        index: int,
-        current_total: int,
-    ) -> tuple[JsonObject, tuple[Path, int] | None]:
-        """Create one bounded instruction-file attachment or an omission record.
-
-        Returns:
-            The manifest entry, paired with the written attachment path and
-            its size, or None if the file was omitted instead of written.
-        """
-        data = self.issue_client.blob_bytes_at(
-            base_sha,
-            path,
-            max_output=MAX_FILE_BYTES,
-        )
-        return _bounded_text_attachment(
-            self.writer,
-            self.runner,
-            data,
-            path=path,
-            kind="instruction",
-            index=index,
-            current_total=current_total,
-        )
-
-    def generate(
-        self,
-        issue: IssueSnapshot,
-        base_ref: str,
-        base_sha: str,
-        attachments: tuple[Path, ...],
-    ) -> OracleBootstrap:
-        """Invoke Oracle once and strictly validate its bounded output.
-
-        Returns:
-            The validated Oracle bootstrap result.
-        """
-        prompt = BOOTSTRAP_PROMPT.format(
-            repository=issue.repository,
-            issue_number=issue.number,
-            base_ref=base_ref,
-            base_sha=base_sha,
-        )
-        slug = f"loopr-bootstrap-{issue.number}-{base_sha[:12]}-{uuid.uuid4().hex[:8]}"
-        raw = _invoke_oracle(
-            self.runner,
-            self.writer,
-            self.issue_client.repo_dir,
-            self.thinking_time,
-            prompt,
-            attachments,
-            slug,
-            max_attachments=MAX_BOOTSTRAP_ATTACHMENTS,
-        )
-        parsed = parse_bootstrap(raw, issue, base_sha)
-        return parsed

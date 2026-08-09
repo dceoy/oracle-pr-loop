@@ -27,7 +27,7 @@ from scripts.models import (
     LooprError,
     PullRequest,
 )
-from scripts.oracle import OracleClient
+from scripts.oracle import build_review_bundle
 from scripts.process import CommandResult, CommandRunner
 
 if TYPE_CHECKING:
@@ -298,16 +298,11 @@ def test_generic_git_failure_aborts_bundle_construction(tmp_path: Path) -> None:
     runner = CommandRunner()
     writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     github = _FailingGitHub(tmp_path)
-    oracle = OracleClient(
-        runner,
-        cast("GitHubClient", github),
-        writer,
-        "heavy",
-    )
+    github_client = cast("GitHubClient", github)
     pull_request = _sample_pr("a" * 40, "b" * 40)
 
     with pytest.raises(LooprError, match="injected git failure"):
-        oracle.build_bundle(pull_request)
+        build_review_bundle(runner, github_client, writer, pull_request)
 
 
 def _repo_with_origin(tmp_path: Path, origin_url: str) -> Path:

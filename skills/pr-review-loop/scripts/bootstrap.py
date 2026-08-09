@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 from .artifacts import temporary_file_writer
 from .github import IssueClient
 from .models import EXIT_PRECONDITION, EXIT_RACE, BootstrapResult, LooprError
-from .oracle import BootstrapOracleClient
+from .oracle import (
+    BOOTSTRAP_PROMPT,
+    MAX_BOOTSTRAP_ATTACHMENTS,
+    build_bootstrap_bundle,
+    invoke_oracle,
+    parse_bootstrap,
+)
 from .process import CommandRunner
 
 if TYPE_CHECKING:
@@ -43,14 +50,33 @@ def execute_bootstrap(
         command_runner,
         prefix=f"pr-review-loop-bootstrap-{initial.number}-",
     ) as writer:
-        oracle = BootstrapOracleClient(
+        attachments = build_bootstrap_bundle(
             command_runner,
             issue_client,
             writer,
-            thinking_time,
+            initial,
+            base_sha,
         )
-        bundle = oracle.build_bundle(initial, base_sha)
-        generated = oracle.generate(initial, base_ref, base_sha, bundle)
+        prompt = BOOTSTRAP_PROMPT.format(
+            repository=initial.repository,
+            issue_number=initial.number,
+            base_ref=base_ref,
+            base_sha=base_sha,
+        )
+        slug = (
+            f"loopr-bootstrap-{initial.number}-{base_sha[:12]}-{uuid.uuid4().hex[:8]}"
+        )
+        raw = invoke_oracle(
+            command_runner,
+            writer,
+            issue_client.repo_dir,
+            thinking_time,
+            prompt,
+            attachments,
+            slug,
+            max_attachments=MAX_BOOTSTRAP_ATTACHMENTS,
+        )
+        generated = parse_bootstrap(raw, initial, base_sha)
 
     after = issue_client.snapshot()
     after_ref, after_sha = _base_snapshot(issue_client)

@@ -134,30 +134,27 @@ class FakeGitHubClient:
         self.dismissed.append(review_id)
 
 
-class FakeOracleClient:
-    """Return a deterministic review without launching Oracle."""
+def fake_build_review_bundle(*_args: object, **_kwargs: object) -> tuple[Path, ...]:
+    """Return an empty deterministic fake bundle."""
+    return ()
 
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        pass
 
-    @staticmethod
-    def build_bundle(_pull_request: PullRequest) -> tuple[Path, ...]:
-        """Return an empty deterministic fake bundle."""
-        return ()
+def fake_oracle_invocation(*_args: object, **_kwargs: object) -> str:
+    """Return a placeholder raw response without launching Oracle."""
+    return "raw"
 
-    @staticmethod
-    def review(
-        pull_request: PullRequest,
-        _attachments: tuple[Path, ...],
-    ) -> OracleReview:
-        """Return a valid approval for the supplied snapshot."""
-        return approve_review(pull_request)
+
+def fake_parse_review(_raw: str, pull_request: PullRequest) -> OracleReview:
+    """Return a valid approval for the supplied snapshot."""
+    return approve_review(pull_request)
 
 
 def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace external review transports with deterministic fakes."""
     monkeypatch.setattr(review_module, "GitHubClient", FakeGitHubClient)
-    monkeypatch.setattr(review_module, "OracleClient", FakeOracleClient)
+    monkeypatch.setattr(review_module, "build_review_bundle", fake_build_review_bundle)
+    monkeypatch.setattr(review_module, "invoke_oracle", fake_oracle_invocation)
+    monkeypatch.setattr(review_module, "parse_review", fake_parse_review)
 
 
 @pytest.mark.parametrize(
@@ -176,22 +173,17 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
     install_orchestration_fakes(monkeypatch)
 
-    class OracleVerdict(FakeOracleClient):
-        @staticmethod
-        def review(
-            pull_request: PullRequest,
-            _attachments: tuple[Path, ...],
-        ) -> OracleReview:
-            return replace(
-                approve_review(pull_request),
-                verdict=oracle_verdict,
-                blocking_findings=expected_findings,
-                implementation_prompt=(
-                    "Fix F1." if oracle_verdict == "REQUEST_CHANGES" else None
-                ),
-            )
+    def parse_verdict(_raw: str, pull_request: PullRequest) -> OracleReview:
+        return replace(
+            approve_review(pull_request),
+            verdict=oracle_verdict,
+            blocking_findings=expected_findings,
+            implementation_prompt=(
+                "Fix F1." if oracle_verdict == "REQUEST_CHANGES" else None
+            ),
+        )
 
-    monkeypatch.setattr(review_module, "OracleClient", OracleVerdict)
+    monkeypatch.setattr(review_module, "parse_review", parse_verdict)
 
     result = execute_review(
         pr_value="21",
@@ -267,21 +259,19 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
     monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
     install_orchestration_fakes(monkeypatch)
 
-    class ContradictoryBodyOracleClient(FakeOracleClient):
-        @staticmethod
-        def review(
-            pull_request: PullRequest,
-            _attachments: tuple[Path, ...],
-        ) -> OracleReview:
-            return replace(
-                approve_review(pull_request),
-                verdict="REQUEST_CHANGES",
-                review_body="Approved.",
-                blocking_findings=({"id": "F1"},),
-                implementation_prompt="Fix F1.",
-            )
+    def parse_contradictory_review(
+        _raw: str,
+        pull_request: PullRequest,
+    ) -> OracleReview:
+        return replace(
+            approve_review(pull_request),
+            verdict="REQUEST_CHANGES",
+            review_body="Approved.",
+            blocking_findings=({"id": "F1"},),
+            implementation_prompt="Fix F1.",
+        )
 
-    monkeypatch.setattr(review_module, "OracleClient", ContradictoryBodyOracleClient)
+    monkeypatch.setattr(review_module, "parse_review", parse_contradictory_review)
 
     class WrongStateGitHubClient(FakeGitHubClient):
         def verify_posted(
@@ -386,15 +376,13 @@ def test_execute_review_rejects_oversized_posted_body(
     FakeGitHubClient.snapshots = [initial, initial]
     install_orchestration_fakes(monkeypatch)
 
-    class OversizedOracleClient(FakeOracleClient):
-        @staticmethod
-        def review(
-            pull_request: PullRequest,
-            _attachments: tuple[Path, ...],
-        ) -> OracleReview:
-            return replace(approve_review(pull_request), review_body="x" * 70_000)
+    def parse_oversized_review(
+        _raw: str,
+        pull_request: PullRequest,
+    ) -> OracleReview:
+        return replace(approve_review(pull_request), review_body="x" * 70_000)
 
-    monkeypatch.setattr(review_module, "OracleClient", OversizedOracleClient)
+    monkeypatch.setattr(review_module, "parse_review", parse_oversized_review)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -484,7 +472,9 @@ def test_post_write_snapshot_interrupt_dismisses_review(
 ) -> None:
     """A post-write KeyboardInterrupt neutralizes the unreported review."""
     monkeypatch.setattr(review_module, "GitHubClient", _InterruptingGitHubClient)
-    monkeypatch.setattr(review_module, "OracleClient", FakeOracleClient)
+    monkeypatch.setattr(review_module, "build_review_bundle", fake_build_review_bundle)
+    monkeypatch.setattr(review_module, "invoke_oracle", fake_oracle_invocation)
+    monkeypatch.setattr(review_module, "parse_review", fake_parse_review)
 
     with pytest.raises(KeyboardInterrupt):
         execute_review(

@@ -128,42 +128,49 @@ class FakeIssueClient:
         return None
 
 
-class FakeBootstrapOracleClient:
-    """Return a deterministic bootstrap result without launching Oracle."""
+def fake_build_bootstrap_bundle(
+    *_args: object,
+    **_kwargs: object,
+) -> tuple[Path, ...]:
+    """Return an empty deterministic fake bundle."""
+    return ()
 
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        pass
 
-    @staticmethod
-    def build_bundle(_issue: IssueSnapshot, _base_sha: str) -> tuple[Path, ...]:
-        """Return an empty deterministic fake bundle."""
-        return ()
+def fake_oracle_invocation(*_args: object, **_kwargs: object) -> str:
+    """Return a placeholder raw response without launching Oracle."""
+    return "raw"
 
-    @staticmethod
-    def generate(
-        issue: IssueSnapshot,
-        _base_ref: str,
-        base_sha: str,
-        _attachments: tuple[Path, ...],
-    ) -> OracleBootstrap:
-        """Return a valid bootstrap result bound to issue and base_sha."""
-        return OracleBootstrap(
-            repository=issue.repository,
-            issue_number=issue.number,
-            base_sha=base_sha,
-            implementation_prompt="Implement the requested change.",
-            raw={},
-        )
+
+def fake_parse_bootstrap(
+    _raw: str,
+    issue: IssueSnapshot,
+    base_sha: str,
+) -> OracleBootstrap:
+    """Return a valid bootstrap result bound to issue and base_sha."""
+    return OracleBootstrap(
+        repository=issue.repository,
+        issue_number=issue.number,
+        base_sha=base_sha,
+        implementation_prompt="Implement the requested change.",
+        raw={},
+    )
+
+
+def install_oracle_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace Oracle bundle, transport, and parser functions."""
+    monkeypatch.setattr(
+        bootstrap_module,
+        "build_bootstrap_bundle",
+        fake_build_bootstrap_bundle,
+    )
+    monkeypatch.setattr(bootstrap_module, "invoke_oracle", fake_oracle_invocation)
+    monkeypatch.setattr(bootstrap_module, "parse_bootstrap", fake_parse_bootstrap)
 
 
 def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace external bootstrap transports with deterministic fakes."""
     monkeypatch.setattr(bootstrap_module, "IssueClient", FakeIssueClient)
-    monkeypatch.setattr(
-        bootstrap_module,
-        "BootstrapOracleClient",
-        FakeBootstrapOracleClient,
-    )
+    install_oracle_fakes(monkeypatch)
 
 
 def _configure_stable(issue: IssueSnapshot) -> None:
@@ -441,11 +448,7 @@ def test_execute_bootstrap_propagates_issue_closed_during_generation(
     FakeIssueClient.local_branches = [b"feature"]
     FakeIssueClient.statuses = [b""]
     monkeypatch.setattr(bootstrap_module, "IssueClient", ClosingIssueClient)
-    monkeypatch.setattr(
-        bootstrap_module,
-        "BootstrapOracleClient",
-        FakeBootstrapOracleClient,
-    )
+    install_oracle_fakes(monkeypatch)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
@@ -475,11 +478,7 @@ def test_execute_bootstrap_names_fetch_remedy_when_base_missing(
     FakeIssueClient.local_branches = []
     FakeIssueClient.statuses = []
     monkeypatch.setattr(bootstrap_module, "IssueClient", MissingBaseIssueClient)
-    monkeypatch.setattr(
-        bootstrap_module,
-        "BootstrapOracleClient",
-        FakeBootstrapOracleClient,
-    )
+    install_oracle_fakes(monkeypatch)
 
     with pytest.raises(LooprError) as captured:
         _execute(tmp_path)
