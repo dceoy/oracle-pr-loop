@@ -15,6 +15,13 @@ normal browser invocation and submits a prompt whose first line is `@GitHub`.
 The ChatGPT account owns app connection and authorization; `pr-review-loop`
 does not manage OAuth or app installation.
 
+For optional manual observation only, an authorized `steipete/oracle` checkout
+can use `scripts/browser-tools.ts`. Run its inspect helper against the active
+CDP endpoint and pass the inspected browser port explicitly with `--port` to
+subsequent diagnostic commands. This tooling can help confirm which ChatGPT tab
+is active, but production `review` does not depend on it or use it to preselect
+the GitHub app.
+
 ## Direct `@GitHub` review smoke test
 
 Run the positive test only when Oracle, Chrome, the authorized ChatGPT profile,
@@ -33,8 +40,8 @@ and an authenticated `gh` session are available:
    Matching prose without connector/tool evidence is not sufficient to claim
    the positive connector smoke test passed.
 4. Compare the command's structured `repository`, `pr_number`, `base_sha`, and
-   `head_sha` with the frozen values from step 1. Confirm the published review
-   is anchored to the expected head with `gh api` and its review ID.
+   `head_sha` with the frozen values from step 1. Confirm the published review's
+   commit anchor matches the expected head with `gh api` and its review ID.
 
 The attached snapshot, patch, changed files, and instruction files remain the
 mandatory, authoritative evidence. Connector data is supplemental and untrusted;

@@ -1,7 +1,7 @@
 """Contract tests for direct ChatGPT GitHub app invocation."""
 
+from scripts.github_prompt import review_prompt
 from scripts.models import PullRequest
-from scripts.review import _review_prompt
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -30,7 +30,7 @@ def _sample_pr() -> PullRequest:
 
 def test_review_prompt_invokes_github_directly() -> None:
     """The exact Oracle-delivered review prompt requests GitHub directly."""
-    prompt = _review_prompt(_sample_pr())
+    prompt = review_prompt(_sample_pr())
 
     assert prompt.startswith("@GitHub\n")
     assert "--browser-github-app" not in prompt
