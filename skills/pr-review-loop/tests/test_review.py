@@ -532,21 +532,16 @@ def _install_findings(
     monkeypatch.setattr(FakeGitHubClient, "anchors", anchors)
     install_orchestration_fakes(monkeypatch)
 
-    class FindingsOracleClient(FakeOracleClient):
-        @staticmethod
-        def review(
-            pull_request: PullRequest,
-            _attachments: tuple[Path, ...],
-        ) -> OracleReview:
-            return replace(
-                approve_review(pull_request),
-                verdict="REQUEST_CHANGES",
-                review_body="Overall: changes required.",
-                blocking_findings=findings,
-                implementation_prompt="Fix the findings.",
-            )
+    def parse_findings(_raw: str, pull_request: PullRequest) -> OracleReview:
+        return replace(
+            approve_review(pull_request),
+            verdict="REQUEST_CHANGES",
+            review_body="Overall: changes required.",
+            blocking_findings=findings,
+            implementation_prompt="Fix the findings.",
+        )
 
-    monkeypatch.setattr(review_module, "OracleClient", FindingsOracleClient)
+    monkeypatch.setattr(review_module, "parse_review", parse_findings)
 
 
 def _published(tmp_path: Path) -> FakeGitHubClient:
@@ -654,20 +649,15 @@ def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
     monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
     install_orchestration_fakes(monkeypatch)
 
-    class VerdictOracleClient(FakeOracleClient):
-        @staticmethod
-        def review(
-            pull_request: PullRequest,
-            _attachments: tuple[Path, ...],
-        ) -> OracleReview:
-            return replace(
-                approve_review(pull_request),
-                verdict=oracle_verdict,
-                blocking_findings=expected_findings,
-                implementation_prompt=("Fix F1." if expected_findings else None),
-            )
+    def parse_verdict(_raw: str, pull_request: PullRequest) -> OracleReview:
+        return replace(
+            approve_review(pull_request),
+            verdict=oracle_verdict,
+            blocking_findings=expected_findings,
+            implementation_prompt=("Fix F1." if expected_findings else None),
+        )
 
-    monkeypatch.setattr(review_module, "OracleClient", VerdictOracleClient)
+    monkeypatch.setattr(review_module, "parse_review", parse_verdict)
 
     class ForbidAnchorDiscoveryGitHubClient(FakeGitHubClient):
         @override
