@@ -23,7 +23,7 @@ from .models import (
     PullRequestIdentity,
     ReviewComment,
 )
-from .process import CommandError
+from .process import MAX_INPUT, CommandError
 
 if TYPE_CHECKING:
     from .process import CommandRunner
@@ -1127,7 +1127,14 @@ class GitHubClient(_ImmutableGitMixin):
         )
 
     def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Read the exact base-to-head merge-base patch.
+        """Read the exact base-to-head merge-base patch in canonical form.
+
+        Every format-affecting option is pinned explicitly to Git's own
+        defaults, so a repository-local `diff.*` setting (`GIT_CONFIG_GLOBAL`
+        and `GIT_CONFIG_NOSYSTEM` already exclude global/system config, but
+        not the repository's own `.git/config`) cannot change the headers or
+        hunk context `diff_anchors` reads, or silently diverge from the diff
+        GitHub's own review API validates comment anchors against.
 
         Returns:
             The patch's raw bytes.
@@ -1135,10 +1142,16 @@ class GitHubClient(_ImmutableGitMixin):
         return self.git_bytes(
             [
                 "diff",
+                "--no-color",
                 "--no-ext-diff",
                 "--no-textconv",
                 "--full-index",
                 "--find-renames",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--unified=3",
+                "--inter-hunk-context=0",
+                "--diff-algorithm=myers",
                 f"{pull_request.base_sha}...{pull_request.head_sha}",
             ],
             max_output=max_output,
@@ -1200,6 +1213,13 @@ class GitHubClient(_ImmutableGitMixin):
         }
         if comments:
             payload["comments"] = [comment.as_payload() for comment in comments]
+        serialized = json.dumps(payload, ensure_ascii=False)
+        if len(serialized.encode("utf-8")) > MAX_INPUT:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "input",
+                "serialized review request exceeds the command input bound",
+            )
         data = parse_json_object(
             self._text(
                 [
@@ -1215,7 +1235,7 @@ class GitHubClient(_ImmutableGitMixin):
                     "--input",
                     "-",
                 ],
-                input_text=json.dumps(payload),
+                input_text=serialized,
             ),
             category="github_schema",
         )

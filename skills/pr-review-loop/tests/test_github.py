@@ -1225,6 +1225,50 @@ def test_client_diff_anchors_rejects_a_context_line_as_left(tmp_path: Path) -> N
     assert ("file.py", "RIGHT", 2) in anchors
 
 
+def test_client_diff_anchors_ignores_repository_local_diff_config(
+    tmp_path: Path,
+) -> None:
+    """Repository-local `diff.*` config cannot change anchors from Git's defaults.
+
+    `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` already exclude global and
+    system config, but not this repository's own `.git/config`. A
+    `diff.noprefix` or oversized `diff.context`/`diff.algorithm` setting there
+    must not corrupt the header paths `diff_anchors` reads or expose context
+    lines beyond Git's default 3-line window, either of which could produce
+    an anchor GitHub's own diff does not contain.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "configured-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    lines = [f"line{index}" for index in range(1, 13)]
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    lines[5] = "CHANGED"
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "diff.noprefix", "true"], cwd=repo)
+    _git(git, ["config", "diff.context", "10"], cwd=repo)
+    _git(git, ["config", "diff.interHunkContext", "10"], cwd=repo)
+    _git(git, ["config", "diff.algorithm", "patience"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, line) for path, _side, line in anchors} == {
+        ("file.py", line) for line in range(3, 10)
+    }
+    assert ("file.py", "LEFT", 1) not in anchors
+    assert ("file.py", "LEFT", 12) not in anchors
+
+
 def test_post_review_publishes_inline_comments_in_the_same_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1265,3 +1309,60 @@ def test_post_review_publishes_inline_comments_in_the_same_request(
             {"path": "file.py", "line": 3, "side": "LEFT", "body": "inline two"},
         ],
     }
+
+
+def test_post_review_serializes_unicode_without_ascii_escaping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    r"""Unicode review text is sent as UTF-8, not inflated by `\uXXXX` escapes."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+    captured: dict[str, str] = {}
+
+    def fake_text(
+        _args: list[str],
+        *,
+        input_text: str | None = None,
+        **_kwargs: object,
+    ) -> str:
+        assert input_text is not None
+        captured["input_text"] = input_text
+        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
+
+    monkeypatch.setattr(client, "_text", fake_text)
+
+    client.post_review(pull_request, "COMMENT", "レビュー本文" * 100)
+
+    assert "レビュー" in captured["input_text"]
+    assert "\\u" not in captured["input_text"]
+
+
+def test_post_review_rejects_a_request_exceeding_the_command_input_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request too large for the command transport fails before any write.
+
+    Each comment body is already bounded individually by `review.py`, but a
+    large number of individually valid comments can still serialize past the
+    command runner's input cap; that must fail closed locally rather than as
+    a confusing subprocess error, and without ever touching the network.
+    """
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> str:
+        msg = "the oversized request must never reach the transport"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(client, "_text", fail_if_called)
+    oversized_comments = tuple(
+        ReviewComment(path="file.py", line=index, side="RIGHT", body="x" * 65_000)
+        for index in range(1, 70)
+    )
+
+    with pytest.raises(LooprError) as captured:
+        client.post_review(pull_request, "COMMENT", "body", oversized_comments)
+
+    assert captured.value.category == "input"
