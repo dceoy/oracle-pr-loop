@@ -376,7 +376,7 @@ def test_legacy_runtime_artifacts_are_never_staged(tmp_path: Path) -> None:
 def test_locally_ignored_legacy_artifacts_do_not_break_staging(
     tmp_path: Path,
 ) -> None:
-    """An upgraded checkout with .pr-review-loop/ in .git/info/exclude still submits."""
+    """An upgraded checkout with locally ignored legacy artifacts still submits."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     exclude_path = repo / ".git" / "info" / "exclude"
     exclude_path.write_text(".pr-review-loop/\n", encoding="utf-8")

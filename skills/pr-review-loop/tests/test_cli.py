@@ -622,24 +622,30 @@ def test_test_modules_match_production_modules() -> None:
     assert tests == production
 
 
-def test_manual_smoke_documentation_covers_supported_clients() -> None:
-    text = (CANONICAL_SKILL / "references" / "operations.md").read_text(
+def test_documentation_links_preserve_canonical_ownership() -> None:
+    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    skill = (CANONICAL_SKILL / "SKILL.md").read_text(encoding="utf-8")
+    contracts = (CANONICAL_SKILL / "references" / "command-contracts.md").read_text(
         encoding="utf-8"
     )
-    normalized = " ".join(text.split())
-    required = (
+    operations_path = CANONICAL_SKILL / "references" / "operations.md"
+    operations = " ".join(operations_path.read_text(encoding="utf-8").split())
+
+    assert "skills/pr-review-loop/SKILL.md" in readme
+    assert "skills/pr-review-loop/references/command-contracts.md" in readme
+    assert "references/command-contracts.md" in skill
+    assert "references/operations.md" in skill
+    assert "../SKILL.md" in contracts
+    assert "operations.md" in contracts
+    assert operations_path.exists()
+    for concept in ("browser-tools.ts", "--port", "@GitHub", "commit anchor"):
+        assert concept in operations
+    for heading in (
+        "Common flow",
+        "Issue bootstrap",
         "Codex CLI smoke test",
         "Claude Code smoke test",
         "Cursor CLI smoke test",
-        ".agents/skills/pr-review-loop",
-        ".claude/skills/pr-review-loop",
-        "REQUEST_CHANGES",
-        "blocking_findings",
-        "--expected-head",
-        "fresh `review`",
-        "iteration limit",
-        "private command-scoped temporary files",
-        "stale_head",
-    )
-    for concept in required:
-        assert concept in normalized
+        "Recovery",
+    ):
+        assert heading not in operations
