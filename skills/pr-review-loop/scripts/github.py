@@ -399,9 +399,7 @@ def diff_anchors(
     return frozenset(anchors)
 
 
-def diff_base_paths(
-    patch: str, allowed_paths: frozenset[str]
-) -> dict[str, str]:
+def diff_base_paths(patch: str, allowed_paths: frozenset[str]) -> dict[str, str]:
     """Map each allowed head path to the base path its own diff section names.
 
     `diff_anchors` addresses every anchor, including a rename's `LEFT`
