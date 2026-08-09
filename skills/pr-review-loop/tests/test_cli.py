@@ -22,6 +22,7 @@ from scripts.models import (
     PullRequest,
     ReviewComment,
     ReviewResult,
+    SubmitResult,
 )
 from scripts.oracle import parse_review
 from scripts.process import CommandResult, CommandRunner
@@ -504,6 +505,65 @@ def test_operational_failure_uses_stable_nonzero_error_schema(
     assert set(payload) == {"schema_version", "command", "error"}
     assert error["category"] == category
 
+def test_submit_command_survives_unparseable_oracle_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`submit` never invokes Oracle, so a malformed Oracle config must not break it."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def fake_submit(**_kwargs: object) -> SubmitResult:
+        return SubmitResult(
+            repository="octo/repo",
+            pr_number=1,
+            base_sha="a" * 40,
+            previous_head_sha="b" * 40,
+            resulting_head_sha="c" * 40,
+            commit_sha="d" * 40,
+            pushed_branch="feature",
+        )
+
+    monkeypatch.setattr(cli, "execute_submit", fake_submit)
+
+    status = cli.main(["submit", "--pr", "1", "--expected-head", "a" * 40])
+
+    assert status == 0
+
+
+def test_review_dispatch_surfaces_unparseable_oracle_config_as_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reading a broken Oracle config on the Oracle-only path stays structured."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def touch_oracle_config(**kwargs: object) -> ReviewResult:
+        _ = cast("CommandRunner", kwargs["runner"]).oracle_config_remote_host
+        message = "unreachable: property access must raise first"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(cli, "execute_review", touch_oracle_config)
+
+    status = cli.main(["review", "--pr", "1"])
+    payload = _stdout_json(capsys)
+    error = cast("dict[str, object]", payload["error"])
+
+    assert status == EXIT_PRECONDITION
+    assert error["category"] == "bundle"
+    assert "could not be parsed" in cast("str", error["message"])
 
 @pytest.mark.parametrize(
     ("args", "command"),

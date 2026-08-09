@@ -28,6 +28,18 @@ TERMINATION_GRACE_SECONDS = 2
 MIN_SECRET_LENGTH = 4
 
 
+def normalize_oracle_remote_value(value: object) -> str | None:
+    """Trim a remote-transport value the way Oracle's own resolver does.
+
+    Returns:
+        The stripped value, or None if it is not a non-blank string.
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """A completed bounded command result."""
@@ -81,10 +93,32 @@ class CommandRunner:
                 )
             )
         }
-        config_remote_host, config_remote_token = self._read_oracle_config_remote()
-        self.oracle_config_remote_host = config_remote_host
-        if config_remote_token and len(config_remote_token) >= MIN_SECRET_LENGTH:
-            self.secrets.add(config_remote_token)
+        self._oracle_config_remote_error: LooprError | None = None
+        self._oracle_config_remote_host: str | None = None
+        try:
+            config_remote_host, config_remote_token = self._read_oracle_config_remote()
+        except LooprError as exc:
+            # Defer raising to first access of the `oracle_config_remote_host`
+            # property (the Oracle-only call path), so a config file Oracle
+            # itself accepts (JSON5) but this module cannot parse does not
+            # break commands, such as `submit`, that never invoke Oracle.
+            self._oracle_config_remote_error = exc
+        else:
+            self._oracle_config_remote_host = config_remote_host
+            if config_remote_token and len(config_remote_token) >= MIN_SECRET_LENGTH:
+                self.secrets.add(config_remote_token)
+
+    @property
+    def oracle_config_remote_host(self) -> str | None:
+        """Oracle's config-declared `browser.remoteHost`, or None if unset.
+
+        Deferred from construction to this first access, on the Oracle-only
+        call path, so a config file this module cannot parse never breaks
+        commands that never invoke Oracle.
+        """
+        if self._oracle_config_remote_error is not None:
+            raise self._oracle_config_remote_error
+        return self._oracle_config_remote_host
 
     def _read_oracle_config_remote(self) -> tuple[str | None, str | None]:
         """Read Oracle's own remote-transport fields from its config file.
@@ -93,11 +127,14 @@ class CommandRunner:
         config file (`$ORACLE_HOME_DIR/config.json`, or `~/.oracle/config.json`
         when unset) ahead of `ORACLE_REMOTE_HOST`/`ORACLE_REMOTE_TOKEN`, so
         this module must know the config-declared values too rather than
-        trusting its own env export alone.
+        trusting its own env export alone. Values are trimmed the way
+        Oracle's own `resolveRemoteServiceConfig()` trims them, so a
+        whitespace-padded config value cannot desync from what Oracle
+        actually uses for transport selection and secret redaction.
 
         Returns:
             The config-declared (remote host, remote token); each is None if
-            unset, or if the config file is absent or unreadable.
+            unset or blank, or if the config file is absent or unreadable.
 
         Raises:
             LooprError: the config file exists but cannot be parsed, so a
@@ -136,8 +173,8 @@ class CommandRunner:
         host = browser_config.get("remoteHost")
         token = browser_config.get("remoteToken")
         return (
-            host if isinstance(host, str) and host else None,
-            token if isinstance(token, str) and token else None,
+            normalize_oracle_remote_value(host),
+            normalize_oracle_remote_value(token),
         )
 
     def redact(self, text: str) -> str:

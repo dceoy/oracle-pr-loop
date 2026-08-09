@@ -22,7 +22,7 @@ from .models import (
     OracleReview,
     PullRequest,
 )
-from .process import CommandError
+from .process import CommandError, normalize_oracle_remote_value
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -847,7 +847,10 @@ def _effective_oracle_remote_host(
     `ORACLE_REMOTE_HOST`. A config-only `browser.remoteHost` is Oracle's
     supported remote-transport path and is honored here too; only a config
     value that disagrees with an explicitly exported `ORACLE_REMOTE_HOST`
-    would otherwise silently route the run to an unverified endpoint.
+    would otherwise silently route the run to an unverified endpoint. Both
+    sources are trimmed the way Oracle's own resolver trims them, so a
+    whitespace-only value is treated as unset rather than as a live remote
+    host.
 
     Returns:
         The agreed-upon remote host, or None when neither source sets one.
@@ -857,7 +860,7 @@ def _effective_oracle_remote_host(
             declare a `browser.remoteHost`/`ORACLE_REMOTE_HOST`, and they
             disagree.
     """
-    env_remote_host = env.get("ORACLE_REMOTE_HOST")
+    env_remote_host = normalize_oracle_remote_value(env.get("ORACLE_REMOTE_HOST"))
     config_remote_host = runner.oracle_config_remote_host
     if config_remote_host and env_remote_host and config_remote_host != env_remote_host:
         raise LooprError(

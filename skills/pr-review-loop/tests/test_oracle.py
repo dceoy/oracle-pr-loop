@@ -1390,3 +1390,45 @@ def test_oracle_invocation_rejects_config_remote_host_disagreeing_with_env(
     with pytest.raises(LooprError, match="remoteHost"):
         oracle.generate(issue, "main", SHA_A, bundle)
     assert runner.commands == []
+
+
+def test_oracle_invocation_treats_whitespace_only_env_host_as_unset(
+    tmp_path: Path,
+) -> None:
+    """A whitespace-only `ORACLE_REMOTE_HOST` is unset, matching Oracle's trimming."""
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"ORACLE_REMOTE_HOST": "   "})
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+
+
+def test_oracle_invocation_accepts_config_host_matching_padded_env_host(
+    tmp_path: Path,
+) -> None:
+    """A config `browser.remoteHost` matches an env value padded with whitespace."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": str(home), "ORACLE_REMOTE_HOST": "  10.0.0.9:9473  "},
+    )
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv

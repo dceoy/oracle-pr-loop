@@ -123,6 +123,50 @@ def test_oracle_remote_token_only_in_config_file_is_still_redacted(
     assert runner.redact(f"token={config_only_token}") == "token=[REDACTED]"
 
 
+def test_oracle_config_remote_token_is_trimmed_before_registration(
+    tmp_path: Path,
+) -> None:
+    """A whitespace-padded config token registers as the trimmed value Oracle uses."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteToken": " config-file-only-secret-token "}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.contains_secret("config-file-only-secret-token")
+    assert runner.redact("token=config-file-only-secret-token") == "token=[REDACTED]"
+
+
+def test_oracle_config_remote_host_is_trimmed(tmp_path: Path) -> None:
+    """A whitespace-padded config host is trimmed to the value Oracle uses."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "  10.0.0.9:9473  "}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
+def test_oracle_config_remote_host_whitespace_only_is_treated_as_unset(
+    tmp_path: Path,
+) -> None:
+    """A whitespace-only config host is unset, matching Oracle's own trimming."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "   "}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
+
+
 def test_oracle_config_remote_host_is_none_when_config_file_is_absent(
     tmp_path: Path,
 ) -> None:
@@ -149,7 +193,9 @@ def test_oracle_home_dir_config_is_read_without_an_extra_oracle_subdirectory(
     assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
-def test_oracle_config_with_json5_syntax_fails_closed(tmp_path: Path) -> None:
+def test_oracle_config_with_json5_syntax_fails_closed_on_access(
+    tmp_path: Path,
+) -> None:
     """A JSON5-only config file must not be silently treated as remote-free."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
@@ -158,8 +204,27 @@ def test_oracle_config_with_json5_syntax_fails_closed(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
     with pytest.raises(LooprError, match="could not be parsed"):
-        CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_with_json5_syntax_does_not_break_construction(
+    tmp_path: Path,
+) -> None:
+    """Construction must not raise, so commands that skip Oracle stay unaffected."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.contains_secret("anything") is False
+    assert runner.redact("no secrets here") == "no secrets here"
 
 
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:
