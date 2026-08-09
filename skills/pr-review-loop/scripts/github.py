@@ -305,14 +305,20 @@ def validate_path(path: str) -> str:
 def _header_path(value: str, prefix: str) -> str | None:
     """Return one safe diff-header path, or None when it names no usable file.
 
+    Git appends a tab after the path in `---`/`+++` lines when the path
+    contains a space, to separate it from a trailing timestamp field; that
+    separator is dropped here so it is never mistaken for an unsafe control
+    character in the path itself.
+
     Returns:
         The prefix-stripped path, or None for /dev/null, a quoted path, or a
         path that is unsafe to address.
     """
-    if not value.startswith(prefix):
+    path = value.split("\t", 1)[0]
+    if not path.startswith(prefix):
         return None
     try:
-        return validate_path(value.removeprefix(prefix))
+        return validate_path(path.removeprefix(prefix))
     except LooprError:
         return None
 

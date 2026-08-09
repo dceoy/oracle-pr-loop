@@ -173,6 +173,25 @@ def _string(value: JsonValue | None, *, field: str) -> str:
     return value.strip()
 
 
+def _exact_string(value: JsonValue | None, *, field: str) -> str:
+    """Require one non-empty Oracle string field without altering its text.
+
+    Unlike `_string()`, this never strips whitespace, so it is safe for
+    fields such as a file path where leading/trailing characters are
+    significant and stripping them could silently rename the path.
+
+    Returns:
+        The string value, exactly as given.
+
+    Raises:
+        LooprError: value is not a non-empty string.
+    """
+    if not isinstance(value, str) or not value:
+        message = f"Oracle field {field} must be a non-empty string"
+        raise LooprError(EXIT_ORACLE, "oracle_schema", message)
+    return value
+
+
 def _integer(value: JsonValue | None, *, field: str) -> int:
     """Require one non-Boolean Oracle integer field.
 
@@ -217,7 +236,9 @@ def _location(value: JsonValue | None) -> JsonObject | None:
             "blocking finding location must name a positive line on LEFT or RIGHT",
         )
     return {
-        "path": _string(value.get("path"), field="blocking_findings.location.path"),
+        "path": _exact_string(
+            value.get("path"), field="blocking_findings.location.path"
+        ),
         "line": line,
         "side": side,
     }

@@ -1177,6 +1177,24 @@ def test_diff_anchors_ignores_unsafe_and_unreadable_header_paths() -> None:
     )
 
 
+def test_diff_anchors_reads_a_header_path_containing_a_space() -> None:
+    """Git's tab separator after a spaced path must not look like a control char."""
+    patch = (
+        "diff --git a/foo bar.py b/foo bar.py\n"
+        "index a29bdeb..c0d0fb4 100644\n"
+        "--- a/foo bar.py\t\n"
+        "+++ b/foo bar.py\t\n"
+        "@@ -1 +1,2 @@\n"
+        " line1\n"
+        "+line2\n"
+    )
+
+    assert diff_anchors(patch, frozenset({"foo bar.py"})) == frozenset({
+        ("foo bar.py", "RIGHT", 1),
+        ("foo bar.py", "RIGHT", 2),
+    })
+
+
 def test_client_diff_anchors_reads_the_frozen_base_to_head_diff(
     tmp_path: Path,
 ) -> None:
