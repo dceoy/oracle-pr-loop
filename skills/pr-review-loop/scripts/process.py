@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import string
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- this module is the sole, argv-validated, shell=False subprocess boundary
 import tempfile
 import time
@@ -397,6 +398,14 @@ def _loads_json5_subset(text: str) -> object:
 _JSON5_STRING_ESCAPE = re.compile(
     r"\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})|\\\r\n|\\(.)", re.DOTALL
 )
+_JSON5_SIMPLE_ESCAPES = {
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+}
 
 
 def _decode_json5_escapes(text: str) -> str:
@@ -433,9 +442,143 @@ def _decode_json5_escapes(text: str) -> str:
         # A line terminator after `\` (LF, CR, U+2028, U+2029) is also a
         # line continuation and resolves to nothing; any other character
         # is a `NonEscapeCharacter` escape and resolves to itself.
-        return "" if other in "\r\n\u2028\u2029" else other
+        if other in "\r\n\u2028\u2029":
+            return ""
+        return _JSON5_SIMPLE_ESCAPES.get(other, other)
 
     return _JSON5_STRING_ESCAPE.sub(_decode, text)
+
+
+def _skip_json5_trivia(text: str, start: int) -> int:
+    """Skip JSON5 whitespace and comments starting at start.
+
+    This is intentionally a lexical helper for the parse-failure fallback;
+    it does not validate the complete JSON5 document. An unterminated block
+    comment consumes the rest of the text, since no member key after it can
+    belong to a config Oracle successfully parses.
+
+    Returns:
+        The first index after whitespace and comments.
+    """
+    length = len(text)
+    index = start
+    while index < length:
+        while index < length and text[index] in _JS_TRIM_CHARS:
+            index += 1
+        if text.startswith("//", index):
+            index, _ = _skip_json5_line_comment(text, index, length)
+            continue
+        if text.startswith("/*", index):
+            try:
+                index = _skip_json5_block_comment(text, index, length)
+            except ValueError:
+                return length
+            continue
+        return index
+    return index
+
+
+def _json5_unicode_escape_end(text: str, start: int) -> int | None:
+    r"""Return the end of a JSON5 Unicode identifier escape, if present."""
+    if text[start : start + 2] != r"\u":
+        return None
+    end = start + 6
+    digits = text[start + 2 : end]
+    if end > len(text) or any(char not in string.hexdigits for char in digits):
+        return None
+    return end
+
+
+def _consume_json5_identifier(text: str, start: int) -> tuple[str, int]:
+    r"""Consume an ASCII JSON5 identifier, including Unicode escapes.
+
+    Returns:
+        The raw identifier spelling and the first index after it.
+    """
+    result: list[str] = []
+    index = start
+    first = True
+    while index < len(text):
+        char = text[index]
+        if (first and _is_json5_identifier_start(char)) or (
+            not first and _is_json5_identifier_continue(char)
+        ):
+            result.append(char)
+            index += 1
+            first = False
+            continue
+        escape_end = _json5_unicode_escape_end(text, index)
+        if escape_end is not None:
+            result.append(text[index:escape_end])
+            index = escape_end
+            first = False
+            continue
+        break
+    return "".join(result), index
+
+
+def _consume_json5_quoted_string(
+    text: str,
+    start: int,
+) -> tuple[str, int, bool]:
+    """Consume one JSON5 quoted string and return its body and termination.
+
+    Returns:
+        The raw body, the first index after the string, and whether it closed.
+    """
+    quote = text[start]
+    result: list[str] = []
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            result.extend((char, text[index + 1]))
+            index += 2
+            continue
+        if char == quote:
+            return "".join(result), index + 1, True
+        result.append(char)
+        index += 1
+    return "".join(result), index, False
+
+
+def _json5_may_declare_remote_field(text: str) -> bool:
+    """Return whether text contains a remote field member key.
+
+    Used only after the dependency-free JSON5 subset parser rejects a config.
+    The scan deliberately does not try to parse values or object nesting. It
+    only recognizes exact remoteHost/remoteToken member names while ignoring
+    comments and quoted strings that are not followed by a colon.
+    """
+    remote_fields = frozenset(("remoteHost", "remoteToken"))
+    index = 0
+    while index < len(text):
+        index = _skip_json5_trivia(text, index)
+        if index >= len(text):
+            return False
+        char = text[index]
+        if char in "\"'":
+            candidate, end, terminated = _consume_json5_quoted_string(text, index)
+            if not terminated:
+                return False
+            index = end
+        elif (
+            _is_json5_identifier_start(char)
+            or _json5_unicode_escape_end(text, index) is not None
+        ):
+            candidate, end = _consume_json5_identifier(text, index)
+            index = end
+        else:
+            index += 1
+            continue
+        member_end = _skip_json5_trivia(text, index)
+        if (
+            member_end < len(text)
+            and text[member_end] == ":"
+            and _decode_json5_escapes(candidate) in remote_fields
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -514,10 +657,7 @@ class CommandRunner:
         normalized_remote_token = normalize_oracle_remote_value(
             self.source_env.get("ORACLE_REMOTE_TOKEN")
         )
-        if (
-            normalized_remote_token
-            and len(normalized_remote_token) >= MIN_SECRET_LENGTH
-        ):
+        if normalized_remote_token:
             self.secrets.add(normalized_remote_token)
         self._oracle_config_remote_error: LooprError | None = None
         self._oracle_config_remote_host: str | None = None
@@ -531,7 +671,7 @@ class CommandRunner:
             self._oracle_config_remote_error = exc
         else:
             self._oracle_config_remote_host = config_remote_host
-            if config_remote_token and len(config_remote_token) >= MIN_SECRET_LENGTH:
+            if config_remote_token:
                 self.secrets.add(config_remote_token)
 
     @property
@@ -570,14 +710,12 @@ class CommandRunner:
         Returns:
             The config-declared (remote host, remote token); each is None if
             unset or blank, or if the config file is absent, unreadable, or
-            unparseable while spelling out neither field name, directly or
-            via any backslash-escaped spelling.
+            unparseable while declaring neither remote field as a member key.
 
         Raises:
-            LooprError: the config file cannot be parsed and spells out
-                `remoteHost` or `remoteToken`, directly or via any
-                backslash-escaped spelling, so a config-declared remote
-                host or token cannot be ruled out.
+            LooprError: the config file cannot be parsed and contains a
+                member key resolving to `remoteHost` or `remoteToken`, so a
+                config-declared remote host or token cannot be ruled out.
         """
         oracle_home_dir = self.source_env.get("ORACLE_HOME_DIR")
         if oracle_home_dir is not None:
@@ -594,13 +732,12 @@ class CommandRunner:
         try:
             raw_config: object = _loads_json5_subset(raw_text)
         except ValueError as exc:
-            spelled_out = _decode_json5_escapes(raw_text)
-            if "remoteHost" not in spelled_out and "remoteToken" not in spelled_out:
+            if not _json5_may_declare_remote_field(raw_text):
                 # Oracle's JSON5 syntax (unquoted keys, single-quoted
                 # strings, ...) beyond comments/trailing commas is not
-                # supported here, but neither field spelling -- after
-                # resolving every backslash escape -- appears anywhere in
-                # the file, so it cannot declare either one; a purely
+                # supported here, but neither field appears as a member key
+                # outside comments or unrelated string values, so it cannot
+                # declare either one; a purely
                 # local-settings config must not block Oracle.
                 return (None, None)
             message = (
@@ -609,9 +746,9 @@ class CommandRunner:
                 "keys, and single-quoted strings (Oracle's own config format "
                 "is JSON5, which also allows syntax such as a leading '+' on "
                 "a number, hexadecimal literals, or 'Infinity'/'NaN' that "
-                "this module does not support), and it spells out "
-                "'remoteHost' or 'remoteToken', including via a "
-                "backslash-escaped spelling; a config-declared "
+                "this module does not support), and it contains a member "
+                "key resolving to 'remoteHost' or 'remoteToken'; a "
+                "config-declared "
                 "browser.remoteHost or browser.remoteToken cannot be ruled "
                 "out, so refusing to proceed. Convert the config to plain "
                 "JSON or remove the config-backed remote-transport fields."

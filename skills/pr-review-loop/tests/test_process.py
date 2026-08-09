@@ -106,6 +106,31 @@ def test_command_error_keeps_bounded_redacted_completed_output(tmp_path: Path) -
     assert "command-secret-value" not in str(error)
 
 
+@pytest.mark.parametrize("token", ["x", "xy", "xyz"])
+def test_short_oracle_remote_env_tokens_are_redacted(token: str) -> None:
+    """Oracle remote tokens remain secrets below the generic threshold."""
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "ORACLE_REMOTE_TOKEN": token,
+    })
+
+    assert runner.contains_secret(token)
+    assert runner.contains_secret(token.encode())
+    assert runner.redact(f"token={token}") == "token=[REDACTED]"
+
+
+@pytest.mark.parametrize("value", ["x", "xy", "xyz"])
+def test_short_unrelated_credential_values_are_not_registered(value: str) -> None:
+    """The generic minimum still applies to unrelated environment secrets."""
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "API_TOKEN": value,
+    })
+
+    assert runner.contains_secret(value) is False
+    assert runner.redact(f"token={value}") == f"token={value}"
+
+
 def test_oracle_remote_token_only_in_config_file_is_still_redacted(
     tmp_path: Path,
 ) -> None:
@@ -121,6 +146,25 @@ def test_oracle_remote_token_only_in_config_file_is_still_redacted(
 
     assert runner.contains_secret(config_only_token)
     assert runner.redact(f"token={config_only_token}") == "token=[REDACTED]"
+
+
+@pytest.mark.parametrize("token", ["x", "xy", "xyz"])
+def test_short_oracle_remote_config_tokens_are_redacted(
+    tmp_path: Path,
+    token: str,
+) -> None:
+    """Config-backed Oracle remote tokens remain secrets at any length."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        f'{{"browser": {{"remoteToken": "{token}"}}}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.contains_secret(token)
+    assert runner.contains_secret(token.encode())
+    assert runner.redact(f"token={token}") == "token=[REDACTED]"
 
 
 def test_oracle_remote_token_from_env_is_trimmed_before_registration() -> None:
@@ -586,6 +630,45 @@ def test_oracle_config_with_unsupported_json5_syntax_and_no_remote_fields_is_ign
         "{browser: {manualLogin: true}, extra: +5}",
         encoding="utf-8",
     )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
+    assert runner.contains_secret("anything") is False
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        "{ browser: { manualLogin: true }, extra: +5 /* remoteHost documentation */ }",
+        '{ browser: { manualLogin: true }, extra: +5, note: "remoteToken" }',
+    ],
+)
+def test_unsupported_json5_remote_name_decoys_do_not_block_local_config(
+    tmp_path: Path,
+    config_text: str,
+) -> None:
+    """Comments and unrelated strings must not look like remote member keys."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(config_text, encoding="utf-8")
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
+    assert runner.contains_secret("anything") is False
+
+
+@pytest.mark.parametrize("escape", [r"\r", r"\t", r"\n"])
+def test_json5_standard_escapes_in_non_remote_keys_do_not_block_local_config(
+    tmp_path: Path,
+    escape: str,
+) -> None:
+    """Standard JSON5 escapes must not turn a non-remote key into a match."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    config_text = f'{{ browser: {{"{escape}emoteHost": 1}}, extra: +5 }}'
+    (oracle_dir / "config.json").write_text(config_text, encoding="utf-8")
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
