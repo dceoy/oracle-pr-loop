@@ -84,7 +84,7 @@ Use `.agents/skills/pr-review-loop` and execute the same common flow. Repository
 
 ### Local Oracle browser
 
-`pr-review-loop` still passes `--browser-manual-login` on every Oracle invocation unless `ORACLE_REMOTE_HOST` is set in its process environment (see below), so existing local-browser hosts keep reusing their persistent authenticated profile with no config changes required; set `ORACLE_BROWSER_PROFILE_DIR` to relocate that profile. Initialize the persistent profile once, signing in when Chrome opens:
+`pr-review-loop` still passes `--browser-manual-login` on every Oracle invocation unless `ORACLE_REMOTE_HOST` is set in its process environment or Oracle's own config file declares `browser.remoteHost` (see below), so existing local-browser hosts with neither set keep reusing their persistent authenticated profile with no config changes required; set `ORACLE_BROWSER_PROFILE_DIR` to relocate that profile. Initialize the persistent profile once, signing in when Chrome opens:
 
 ```console
 oracle --engine browser --browser-manual-login --browser-keep-browser \
@@ -112,7 +112,7 @@ export ORACLE_REMOTE_TOKEN='...'  # token printed by `oracle serve`; it rotates 
 oracle --engine browser --prompt "Reply with ready"
 ```
 
-`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` to every Oracle invocation, and treats `ORACLE_REMOTE_HOST` as its supported signal for remote transport; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. Export both variables in the environment `pr-review-loop` runs in. `pr-review-loop` also reads `<ORACLE_HOME_DIR or HOME>/.oracle/config.json` — the same file Oracle itself consults ahead of these environment variables — so a config-declared `browser.remoteToken` is still registered for redaction/rejection, and `bootstrap`/`review` refuse to run if a config-declared `browser.remoteHost` disagrees with the exported `ORACLE_REMOTE_HOST` (including when only the config declares one), rather than silently letting the config value override the exported endpoint.
+`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` to every Oracle invocation, and treats either an exported `ORACLE_REMOTE_HOST` or a config-declared `browser.remoteHost` as its supported signal for remote transport; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. Export both variables in the environment `pr-review-loop` runs in for the SSH-tunnel setup above, or rely on Oracle's config file alone. `pr-review-loop` also reads `$ORACLE_HOME_DIR/config.json` when `ORACLE_HOME_DIR` is set, otherwise `$HOME/.oracle/config.json` — the same file Oracle itself consults ahead of these environment variables — so a config-declared `browser.remoteToken` is registered for redaction/rejection, and a config-only `browser.remoteHost` selects remote mode just as it does for Oracle itself; `bootstrap`/`review` refuse to run only when both the config and the exported `ORACLE_REMOTE_HOST` declare a host and they disagree, rather than silently letting one override the other. A config file that cannot be parsed even after tolerating comments/trailing commas, and that textually contains `remoteHost` or `remoteToken`, also refuses to run rather than risk missing a config-declared remote host or token; see "Recovery" below.
 
 ## Recovery
 
@@ -124,5 +124,6 @@ Oracle inputs and outputs are private command-scoped temporary files; GitHub and
 - Oracle/schema failure: restore the browser/session or reviewer output; do not weaken schema validation.
 - repository/origin mismatch: stop rather than redirect the patch.
 - `bootstrap`'s `workspace` precondition (local `HEAD` is not the returned `base_sha`, or the checkout has uncommitted tracked or untracked changes): the current checkout already holds implementation work from a prior `bootstrap`/implement cycle, or has unrelated local changes or stray untracked files. Set those aside (commit, stash, discard, or switch away), return to a clean checkout at the repository's current default-branch tip, and rerun `bootstrap`; do not point it at an in-progress implementation branch.
+- Oracle config parse failure (`bundle` category, `EXIT_PRECONDITION`): the config file at `$ORACLE_HOME_DIR/config.json` (or `$HOME/.oracle/config.json`) declares `remoteHost`/`remoteToken` but uses JSON5 syntax beyond comments and trailing commas (for example unquoted keys or single-quoted strings); convert those fields to plain JSON, or remove the config-backed remote-transport fields, so `pr-review-loop` can safely inspect the config before invoking Oracle.
 
 GitHub.com same-repository PRs only. Forks and GitHub Enterprise are unsupported; CI status is not an approval gate.

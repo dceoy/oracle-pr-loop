@@ -40,6 +40,109 @@ def normalize_oracle_remote_value(value: object) -> str | None:
     return stripped or None
 
 
+def _strip_json_comments(text: str) -> str:
+    """Remove `//` and `/* */` comments that are outside string literals.
+
+    Returns:
+        text with every such comment removed.
+    """
+    result: list[str] = []
+    length = len(text)
+    index = 0
+    in_string = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            result.append(char)
+            if char == "\\" and index + 1 < length:
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "/":
+            index += 2
+            while index < length and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] == "*":
+            index += 2
+            while index + 1 < length and text[index : index + 2] != "*/":
+                index += 1
+            index += 2
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _strip_json_trailing_commas(text: str) -> str:
+    """Remove commas outside strings that only precede a closing `}`/`]`.
+
+    Must run on comment-free text, so a plain whitespace lookahead is
+    enough to find the next structural character.
+
+    Returns:
+        text with every such trailing comma removed.
+    """
+    result: list[str] = []
+    length = len(text)
+    index = 0
+    in_string = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            result.append(char)
+            if char == "\\" and index + 1 < length:
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == ",":
+            lookahead = index + 1
+            while lookahead < length and text[lookahead] in " \t\r\n":
+                lookahead += 1
+            if lookahead < length and text[lookahead] in "}]":
+                index += 1
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _loads_json5_subset(text: str) -> object:
+    """Parse JSON, tolerating Oracle's comment and trailing-comma syntax.
+
+    Oracle parses its config file as JSON5 (comments, trailing commas,
+    unquoted keys, and more). This project has no JSON5 dependency, so
+    this only strips comments and trailing commas -- the two JSON5
+    features Oracle's own documented config examples rely on -- before
+    delegating to `json.loads`; a config using other JSON5-only syntax
+    still fails to parse here and is treated as unparseable, raising
+    `ValueError` (propagated from `json.loads`) rather than silently
+    yielding an incomplete result.
+
+    Returns:
+        The parsed JSON value.
+    """
+    return json.loads(_strip_json_trailing_commas(_strip_json_comments(text)))
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """A completed bounded command result."""
@@ -134,10 +237,12 @@ class CommandRunner:
 
         Returns:
             The config-declared (remote host, remote token); each is None if
-            unset or blank, or if the config file is absent or unreadable.
+            unset or blank, or if the config file is absent, unreadable, or
+            unparseable but does not mention either field name.
 
         Raises:
-            LooprError: the config file exists but cannot be parsed, so a
+            LooprError: the config file cannot be parsed and contains the
+                literal text `remoteHost` or `remoteToken`, so a
                 config-declared remote host or token cannot be ruled out.
         """
         oracle_home_dir = self.source_env.get("ORACLE_HOME_DIR")
@@ -153,12 +258,22 @@ class CommandRunner:
         except OSError:
             return (None, None)
         try:
-            raw_config: object = json.loads(raw_text)
+            raw_config: object = _loads_json5_subset(raw_text)
         except ValueError as exc:
+            if "remoteHost" not in raw_text and "remoteToken" not in raw_text:
+                # Oracle's JSON5 syntax (unquoted keys, single-quoted
+                # strings, ...) beyond comments/trailing commas is not
+                # supported here, but neither field spelling appears
+                # anywhere in the file, so it cannot declare either one;
+                # a purely local-settings config must not block Oracle.
+                return (None, None)
             message = (
                 f"Oracle's config file at {config_path} could not be parsed "
-                "as JSON (Oracle itself accepts JSON5, e.g. comments or "
-                "trailing commas); a config-declared browser.remoteHost or "
+                "even after stripping comments and trailing commas (Oracle's "
+                "own config format is JSON5, which also allows syntax such "
+                "as unquoted keys or single-quoted strings that this module "
+                "does not support), and it contains 'remoteHost' or "
+                "'remoteToken'; a config-declared browser.remoteHost or "
                 "browser.remoteToken cannot be ruled out, so refusing to "
                 "proceed. Convert the config to plain JSON or remove the "
                 "config-backed remote-transport fields."

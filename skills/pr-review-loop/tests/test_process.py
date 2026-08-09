@@ -193,14 +193,44 @@ def test_oracle_home_dir_config_is_read_without_an_extra_oracle_subdirectory(
     assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
-def test_oracle_config_with_json5_syntax_fails_closed_on_access(
+def test_oracle_config_with_line_comments_and_trailing_commas_is_parsed(
     tmp_path: Path,
 ) -> None:
-    """A JSON5-only config file must not be silently treated as remote-free."""
+    """Oracle's documented JSON5 comment/trailing-comma syntax still parses."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
         '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
+def test_oracle_config_with_block_comment_is_parsed(tmp_path: Path) -> None:
+    """A JSON5 block comment ahead of a value does not break parsing."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": /* remote */ {"remoteHost": "10.0.0.9:9473"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
+def test_oracle_config_with_unsupported_json5_syntax_fails_closed_on_access(
+    tmp_path: Path,
+) -> None:
+    """A config relying on JSON5 syntax beyond comments/trailing commas fails closed."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{browser: {"remoteHost": "10.0.0.9:9473"}}',
         encoding="utf-8",
     )
 
@@ -210,14 +240,14 @@ def test_oracle_config_with_json5_syntax_fails_closed_on_access(
         _ = runner.oracle_config_remote_host
 
 
-def test_oracle_config_with_json5_syntax_does_not_break_construction(
+def test_oracle_config_with_unsupported_json5_syntax_does_not_break_construction(
     tmp_path: Path,
 ) -> None:
     """Construction must not raise, so commands that skip Oracle stay unaffected."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        '{browser: {"remoteHost": "10.0.0.9:9473"}}',
         encoding="utf-8",
     )
 
@@ -225,6 +255,55 @@ def test_oracle_config_with_json5_syntax_does_not_break_construction(
 
     assert runner.contains_secret("anything") is False
     assert runner.redact("no secrets here") == "no secrets here"
+
+
+def test_oracle_config_with_unsupported_json5_syntax_and_no_remote_fields_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A local-settings-only config using exotic JSON5 syntax must not block Oracle."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{browser: {manualLogin: true}}",
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
+    assert runner.contains_secret("anything") is False
+
+
+def test_oracle_config_with_unsupported_json5_syntax_naming_remote_token_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """An unparseable config naming only `remoteToken` still fails closed."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{browser: {"remoteToken": "config-secret-token"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_comment_stripping_is_string_aware(tmp_path: Path) -> None:
+    """A `//` inside a quoted value is not mistaken for a line comment."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{\n  // remote transport\n"
+        '  "browser": {"remoteHost": "https://10.0.0.9:9473"},\n}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "https://10.0.0.9:9473"
 
 
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:

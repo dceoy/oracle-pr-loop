@@ -1410,6 +1410,33 @@ def test_oracle_invocation_treats_whitespace_only_env_host_as_unset(
     assert "--browser-manual-login" in oracle_argv
 
 
+def test_oracle_invocation_survives_json5_config_with_local_only_settings(
+    tmp_path: Path,
+) -> None:
+    """A valid JSON5 config with only local-browser settings still allows Oracle."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{\n  // local profile only, no remote transport\n"
+        '  "browser": {"manualLogin": true},\n}',
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+
+
 def test_oracle_invocation_accepts_config_host_matching_padded_env_host(
     tmp_path: Path,
 ) -> None:
