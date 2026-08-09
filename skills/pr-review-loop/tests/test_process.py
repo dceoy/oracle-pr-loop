@@ -194,6 +194,52 @@ def test_oracle_config_remote_host_whitespace_only_is_treated_as_unset(
     assert runner.oracle_config_remote_host is None
 
 
+def test_oracle_remote_token_from_env_bom_padded_is_trimmed_before_registration() -> (
+    None
+):
+    """A BOM-padded env token registers as the value Oracle's `trim()` uses.
+
+    Python's `str.strip()` does not treat U+FEFF as whitespace, unlike
+    JavaScript's `String.prototype.trim()`, which Oracle's resolver uses.
+    """
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "ORACLE_REMOTE_TOKEN": "\ufeffremote-secret-token\ufeff",
+    })
+
+    assert runner.contains_secret("remote-secret-token")
+    assert runner.redact("token=remote-secret-token") == "token=[REDACTED]"
+
+
+def test_oracle_config_remote_token_bom_padded_is_trimmed_before_registration(
+    tmp_path: Path,
+) -> None:
+    """A BOM-padded config token registers as the value Oracle's `trim()` uses."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteToken": "\\ufeffconfig-secret-token\\ufeff"}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.contains_secret("config-secret-token")
+    assert runner.redact("token=config-secret-token") == "token=[REDACTED]"
+
+
+def test_oracle_config_remote_host_bom_padded_is_trimmed(tmp_path: Path) -> None:
+    """A BOM-padded config host is trimmed to the value Oracle's `trim()` uses."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "\\ufeff10.0.0.9:9473\\ufeff"}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
 def test_oracle_config_remote_host_is_none_when_config_file_is_absent(
     tmp_path: Path,
 ) -> None:
@@ -300,6 +346,30 @@ def test_oracle_config_with_unquoted_keys_and_no_remote_fields_is_ignored(
 
     assert runner.oracle_config_remote_host is None
     assert runner.contains_secret("anything") is False
+
+
+def test_oracle_config_unquoted_key_with_non_ascii_digit_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A key using a non-ASCII `isdigit()` character fails closed, not silently.
+
+    U+00B2 (`²`) is `str.isdigit()` in Python but is not a JSON5
+    `ID_Continue` character, so Oracle's own `JSON5.parse` rejects this
+    file (and Oracle then runs with no remote host at all) even though it
+    also spells out a valid `remoteHost`. Accepting `foo²` as an
+    unquoted key here would make this module extract that `remoteHost`
+    and select remote mode where Oracle itself selects local mode.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remoteHost: '127.0.0.1:9473' }, foo²: 1 }",
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
 
 
 def test_oracle_config_with_unsupported_json5_syntax_fails_closed_on_access(

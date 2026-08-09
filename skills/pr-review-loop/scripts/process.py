@@ -28,6 +28,22 @@ POLL_INTERVAL_SECONDS = 0.01
 TERMINATION_GRACE_SECONDS = 2
 MIN_SECRET_LENGTH = 4
 
+# Oracle's `normalizeString()` trims with JavaScript's `String.prototype.trim()`,
+# whose WhiteSpace/LineTerminator character set (ECMA-262) differs from
+# Python's `str.isspace()` -- notably it includes U+FEFF (BOM), which Python
+# does not treat as whitespace. Trimming with Python's default `str.strip()`
+# would leave a BOM-padded value registered as the secret while Oracle
+# authenticates with the BOM-free string, letting the effective credential
+# bypass output redaction. Characters below, in order: TAB, LF, VT, FF, CR,
+# SP, NBSP, OGHAM SPACE MARK, EN QUAD..HAIR SPACE, LS, PS, NNBSP, MMSP,
+# IDEOGRAPHIC SPACE, BOM.
+_JS_TRIM_CHARS = (
+    "\t\n\x0b\x0c\r "
+    "\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
 
 def normalize_oracle_remote_value(value: object) -> str | None:
     """Trim a remote-transport value the way Oracle's own resolver does.
@@ -37,7 +53,7 @@ def normalize_oracle_remote_value(value: object) -> str | None:
     """
     if not isinstance(value, str):
         return None
-    stripped = value.strip()
+    stripped = value.strip(_JS_TRIM_CHARS)
     return stripped or None
 
 
@@ -224,13 +240,28 @@ def _convert_json5_single_quoted_strings(text: str) -> str:
 
 
 def _is_json5_identifier_start(char: str) -> bool:
-    """Return whether `char` can start a bare JSON5 identifier key."""
-    return char in "_$" or char.isalpha()
+    """Return whether `char` can start a bare JSON5 identifier key.
+
+    Restricted to the ASCII letters Oracle's documented config examples
+    use (`browser`, `remoteHost`, ...), rather than the full Unicode
+    `ID_Start` set JSON5 permits: Python's `str.isalpha()` classifies some
+    non-ASCII characters as alphabetic even where they are not a JSON5
+    `ID_Start` character, which could unquote a key Oracle's own
+    `JSON5.parse` rejects and make this parser see a `remoteHost`/
+    `remoteToken` field that Oracle does not.
+    """
+    return char in "_$" or ("a" <= char <= "z") or ("A" <= char <= "Z")
 
 
 def _is_json5_identifier_continue(char: str) -> bool:
-    """Return whether `char` can continue a bare JSON5 identifier key."""
-    return _is_json5_identifier_start(char) or char.isdigit()
+    """Return whether `char` can continue a bare JSON5 identifier key.
+
+    Restricted to ASCII digits for the same reason `_is_json5_identifier_start`
+    is restricted to ASCII letters: Python's `str.isdigit()` accepts
+    non-ASCII characters (e.g. U+00B2 `²`) that are not a JSON5
+    `ID_Continue` character.
+    """
+    return _is_json5_identifier_start(char) or ("0" <= char <= "9")
 
 
 def _quote_json5_unquoted_keys(text: str) -> str:
