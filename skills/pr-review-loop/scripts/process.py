@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, NoReturn, cast
 
+from .models import EXIT_PRECONDITION, LooprError
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -87,23 +89,44 @@ class CommandRunner:
     def _read_oracle_config_remote(self) -> tuple[str | None, str | None]:
         """Read Oracle's own remote-transport fields from its config file.
 
-        Oracle resolves `browser.remoteHost`/`browser.remoteToken` from
-        `<home>/.oracle/config.json` ahead of `ORACLE_REMOTE_HOST`/
-        `ORACLE_REMOTE_TOKEN`, so this module must know the config-declared
-        values too rather than trusting its own env export alone.
+        Oracle resolves `browser.remoteHost`/`browser.remoteToken` from its
+        config file (`$ORACLE_HOME_DIR/config.json`, or `~/.oracle/config.json`
+        when unset) ahead of `ORACLE_REMOTE_HOST`/`ORACLE_REMOTE_TOKEN`, so
+        this module must know the config-declared values too rather than
+        trusting its own env export alone.
 
         Returns:
             The config-declared (remote host, remote token); each is None if
-            unset, or if the config file is absent, unreadable, or malformed.
+            unset, or if the config file is absent or unreadable.
+
+        Raises:
+            LooprError: the config file exists but cannot be parsed, so a
+                config-declared remote host or token cannot be ruled out.
         """
-        home = self.source_env.get("ORACLE_HOME_DIR") or self.source_env.get("HOME")
-        if not home:
-            return (None, None)
-        config_path = Path(home) / ".oracle" / "config.json"
+        oracle_home_dir = self.source_env.get("ORACLE_HOME_DIR")
+        if oracle_home_dir:
+            config_path = Path(oracle_home_dir) / "config.json"
+        else:
+            home = self.source_env.get("HOME")
+            if not home:
+                return (None, None)
+            config_path = Path(home) / ".oracle" / "config.json"
         try:
-            raw_config: object = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw_text = config_path.read_text(encoding="utf-8")
+        except OSError:
             return (None, None)
+        try:
+            raw_config: object = json.loads(raw_text)
+        except ValueError as exc:
+            message = (
+                f"Oracle's config file at {config_path} could not be parsed "
+                "as JSON (Oracle itself accepts JSON5, e.g. comments or "
+                "trailing commas); a config-declared browser.remoteHost or "
+                "browser.remoteToken cannot be ruled out, so refusing to "
+                "proceed. Convert the config to plain JSON or remove the "
+                "config-backed remote-transport fields."
+            )
+            raise LooprError(EXIT_PRECONDITION, "bundle", message) from exc
         if not isinstance(raw_config, dict):
             return (None, None)
         config = cast("JsonObject", raw_config)

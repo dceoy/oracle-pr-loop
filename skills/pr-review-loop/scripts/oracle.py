@@ -844,19 +844,22 @@ def _effective_oracle_remote_host(
     """Resolve the remote host Oracle will actually use, or None for local.
 
     Oracle resolves `browser.remoteHost` from its own config file ahead of
-    `ORACLE_REMOTE_HOST`, so a config-declared host that disagrees with the
-    exported one would otherwise route the run to an unverified endpoint.
+    `ORACLE_REMOTE_HOST`. A config-only `browser.remoteHost` is Oracle's
+    supported remote-transport path and is honored here too; only a config
+    value that disagrees with an explicitly exported `ORACLE_REMOTE_HOST`
+    would otherwise silently route the run to an unverified endpoint.
 
     Returns:
         The agreed-upon remote host, or None when neither source sets one.
 
     Raises:
-        LooprError: the config file declares a `browser.remoteHost` that
-            does not match the exported `ORACLE_REMOTE_HOST`.
+        LooprError: both the config file and the exported environment
+            declare a `browser.remoteHost`/`ORACLE_REMOTE_HOST`, and they
+            disagree.
     """
     env_remote_host = env.get("ORACLE_REMOTE_HOST")
     config_remote_host = runner.oracle_config_remote_host
-    if config_remote_host and config_remote_host != env_remote_host:
+    if config_remote_host and env_remote_host and config_remote_host != env_remote_host:
         raise LooprError(
             EXIT_PRECONDITION,
             "bundle",

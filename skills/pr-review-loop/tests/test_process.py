@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from scripts import process as process_module
+from scripts.models import LooprError
 from scripts.process import CommandError, CommandRunner
 
 if TYPE_CHECKING:
@@ -129,6 +130,36 @@ def test_oracle_config_remote_host_is_none_when_config_file_is_absent(
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
     assert runner.oracle_config_remote_host is None
+
+
+def test_oracle_home_dir_config_is_read_without_an_extra_oracle_subdirectory(
+    tmp_path: Path,
+) -> None:
+    """`ORACLE_HOME_DIR` points at Oracle's config directory, not its parent."""
+    (tmp_path / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({
+        "PATH": os.environ["PATH"],
+        "ORACLE_HOME_DIR": str(tmp_path),
+    })
+
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+
+
+def test_oracle_config_with_json5_syntax_fails_closed(tmp_path: Path) -> None:
+    """A JSON5-only config file must not be silently treated as remote-free."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{\n  // remote transport\n  "browser": {"remoteHost": "10.0.0.9:9473"},\n}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
 
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:

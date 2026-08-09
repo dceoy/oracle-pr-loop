@@ -1324,10 +1324,10 @@ def _write_oracle_config_remote_host(home: Path, remote_host: str) -> None:
     )
 
 
-def test_oracle_invocation_rejects_config_remote_host_without_matching_env(
+def test_oracle_invocation_uses_config_only_remote_host_as_remote(
     tmp_path: Path,
 ) -> None:
-    """A config-only `browser.remoteHost` cannot silently override local mode."""
+    """A config-only `browser.remoteHost` selects remote mode, Oracle's default."""
     home = tmp_path / "home"
     home.mkdir()
     _write_oracle_config_remote_host(home, "10.0.0.9:9473")
@@ -1339,9 +1339,10 @@ def test_oracle_invocation_rejects_config_remote_host_without_matching_env(
     oracle = BootstrapOracleClient(runner, github, writer, "heavy")
 
     bundle = oracle.build_bundle(issue, SHA_A)
-    with pytest.raises(LooprError, match="remoteHost"):
-        oracle.generate(issue, "main", SHA_A, bundle)
-    assert runner.commands == []
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
 
 
 def test_oracle_invocation_allows_config_remote_host_matching_exported_env(
@@ -1366,3 +1367,26 @@ def test_oracle_invocation_allows_config_remote_host_matching_exported_env(
 
     oracle_argv = runner.commands[0]
     assert "--browser-manual-login" not in oracle_argv
+
+
+def test_oracle_invocation_rejects_config_remote_host_disagreeing_with_env(
+    tmp_path: Path,
+) -> None:
+    """A config `browser.remoteHost` disagreeing with the exported env is rejected."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": str(home), "ORACLE_REMOTE_HOST": "127.0.0.1:9473"},
+    )
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    with pytest.raises(LooprError, match="remoteHost"):
+        oracle.generate(issue, "main", SHA_A, bundle)
+    assert runner.commands == []
