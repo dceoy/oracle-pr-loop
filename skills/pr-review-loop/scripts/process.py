@@ -321,28 +321,48 @@ def _loads_json5_subset(text: str) -> object:
     return json.loads(_strip_json_trailing_commas(with_quoted_keys))
 
 
-_JSON5_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+_JSON5_STRING_ESCAPE = re.compile(
+    r"\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})|\\\r\n|\\(.)", re.DOTALL
+)
 
 
-def _decode_json5_unicode_escapes(text: str) -> str:
-    r"""Resolve `\uXXXX` escapes so an escaped identifier spelling is visible.
+def _decode_json5_escapes(text: str) -> str:
+    r"""Resolve JSON5 string/identifier escapes so an escaped spelling is visible.
 
     JSON5 object keys may be ECMAScript `IdentifierName`s, which can spell
     any character via a `\uXXXX` escape, code point `0x0048` being `H`; a
     key spelled `remote`, backslash, `u0048ost` therefore names
-    `remoteHost`. Oracle's own `JSON5.parse` resolves that escape, so a
-    literal substring search on the raw config text can miss a field name
-    it would still recognize. This is deliberately over-inclusive: it also
-    decodes `\uXXXX` sequences that happen to appear inside comments or
-    ordinary string bodies, but an extra match there only makes a
-    fail-closed check that relies on this function trigger more often, not
-    less.
+    `remoteHost`. A quoted JSON5 string -- including a quoted key -- has a
+    wider `EscapeSequence` grammar: `\xHH` hex escapes, a line continuation
+    (a backslash immediately followed by a line terminator, which resolves
+    to nothing), and a `NonEscapeCharacter` escape, where a backslash
+    before any other character resolves to that character verbatim (so
+    `"remote\Host"` also spells `remoteHost`). Enumerating only some of
+    these escape forms leaves the others as a bypass, so every backslash
+    escape is resolved rather than only `\uXXXX`/`\xHH`. This is
+    deliberately over-inclusive: it also decodes escapes that happen to
+    appear inside comments or ordinary string bodies, but an extra match
+    there only makes a fail-closed check that relies on this function
+    trigger more often, not less.
 
     Returns:
-        text with every well-formed `\uXXXX` escape replaced by the
-        character it encodes.
+        text with every backslash escape resolved to the character(s) it
+        encodes.
     """
-    return _JSON5_UNICODE_ESCAPE.sub(lambda match: chr(int(match.group(1), 16)), text)
+
+    def _decode(match: re.Match[str]) -> str:
+        unicode_digits, hex_digits, other = match.groups()
+        if unicode_digits or hex_digits:
+            return chr(int(unicode_digits or hex_digits, 16))
+        if other is None:
+            # A bare `\` followed by CRLF: JSON5's line-continuation form.
+            return ""
+        # A line terminator after `\` (LF, CR, U+2028, U+2029) is also a
+        # line continuation and resolves to nothing; any other character
+        # is a `NonEscapeCharacter` escape and resolves to itself.
+        return "" if other in "\r\n\u2028\u2029" else other
+
+    return _JSON5_STRING_ESCAPE.sub(_decode, text)
 
 
 @dataclass(frozen=True)
@@ -455,13 +475,13 @@ class CommandRunner:
             The config-declared (remote host, remote token); each is None if
             unset or blank, or if the config file is absent, unreadable, or
             unparseable while spelling out neither field name, directly or
-            via a `\uXXXX`-escaped `IdentifierName`.
+            via any backslash-escaped spelling.
 
         Raises:
             LooprError: the config file cannot be parsed and spells out
-                `remoteHost` or `remoteToken`, directly or via a
-                `\uXXXX`-escaped `IdentifierName`, so a config-declared
-                remote host or token cannot be ruled out.
+                `remoteHost` or `remoteToken`, directly or via any
+                backslash-escaped spelling, so a config-declared remote
+                host or token cannot be ruled out.
         """
         oracle_home_dir = self.source_env.get("ORACLE_HOME_DIR")
         if oracle_home_dir:
@@ -478,14 +498,14 @@ class CommandRunner:
         try:
             raw_config: object = _loads_json5_subset(raw_text)
         except ValueError as exc:
-            spelled_out = _decode_json5_unicode_escapes(raw_text)
+            spelled_out = _decode_json5_escapes(raw_text)
             if "remoteHost" not in spelled_out and "remoteToken" not in spelled_out:
                 # Oracle's JSON5 syntax (unquoted keys, single-quoted
                 # strings, ...) beyond comments/trailing commas is not
                 # supported here, but neither field spelling -- after
-                # resolving any `\uXXXX`-escaped identifier characters --
-                # appears anywhere in the file, so it cannot declare either
-                # one; a purely local-settings config must not block Oracle.
+                # resolving every backslash escape -- appears anywhere in
+                # the file, so it cannot declare either one; a purely
+                # local-settings config must not block Oracle.
                 return (None, None)
             message = (
                 f"Oracle's config file at {config_path} could not be parsed "
@@ -495,7 +515,7 @@ class CommandRunner:
                 "a number, hexadecimal literals, or 'Infinity'/'NaN' that "
                 "this module does not support), and it spells out "
                 "'remoteHost' or 'remoteToken', including via a "
-                "Unicode-escaped identifier; a config-declared "
+                "backslash-escaped spelling; a config-declared "
                 "browser.remoteHost or browser.remoteToken cannot be ruled "
                 "out, so refusing to proceed. Convert the config to plain "
                 "JSON or remove the config-backed remote-transport fields."

@@ -491,6 +491,80 @@ def test_oracle_config_with_unicode_escaped_key_spelling_fails_closed(
         _ = runner.oracle_config_remote_host
 
 
+def test_oracle_config_with_hex_escaped_key_spelling_fails_closed(
+    tmp_path: Path,
+) -> None:
+    r"""A `\xHH`-escaped quoted-string spelling still fails closed.
+
+    Oracle parses this file with the `json5` package, whose string parser
+    accepts `\xHH` hex escapes, so `"remote\x48ost"` resolves to
+    `remoteHost`. A literal-text fallback check that only decodes
+    `\uXXXX` escapes would miss this spelling and let a config-backed
+    remote host bypass this module's precedence/secret checks entirely.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{browser: {"remote\\x48ost": "10.0.0.9:9473"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_with_non_escape_character_key_spelling_fails_closed(
+    tmp_path: Path,
+) -> None:
+    r"""A `NonEscapeCharacter`-escaped quoted-string spelling still fails closed.
+
+    JSON5's string grammar resolves a backslash before any character it
+    does not otherwise recognize as an escape to that character verbatim,
+    so `"remote\Host"` also spells `remoteHost`. A fallback check that only
+    decodes `\uXXXX`/`\xHH` escapes would miss this spelling and let a
+    config-backed remote host bypass this module's precedence/secret
+    checks entirely.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{browser: {"remote\\Host": "10.0.0.9:9473"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
+def test_oracle_config_with_line_continuation_key_spelling_fails_closed(
+    tmp_path: Path,
+) -> None:
+    r"""A line-continuation-escaped quoted-string spelling still fails closed.
+
+    JSON5's string grammar resolves a backslash immediately followed by a
+    line terminator to nothing (a line continuation), so a quoted string
+    spelling `remote`, backslash, newline, `Host` also spells `remoteHost`.
+    A fallback check that does not resolve this escape form would miss
+    this spelling and let a config-backed remote host bypass this
+    module's precedence/secret checks entirely.
+    """
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{browser: {"remote\\\nHost": "10.0.0.9:9473"}}',
+        encoding="utf-8",
+    )
+
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    with pytest.raises(LooprError, match="could not be parsed"):
+        _ = runner.oracle_config_remote_host
+
+
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:
     """Output growth past the configured bound terminates the command."""
     runner = CommandRunner({"PATH": os.environ["PATH"]})
