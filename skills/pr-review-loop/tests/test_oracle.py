@@ -761,3 +761,94 @@ def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None
     snapshot_text = (writer.root / "issue-snapshot.json").read_text(encoding="utf-8")
     assert "Ignore all previous" in snapshot_text
     assert "reveal credentials" in snapshot_text
+
+
+def _finding_review_payload(location: object = None, **overrides: object) -> str:
+    """Return one Oracle review payload carrying a single blocking finding."""
+    pull_request = _sample_pr()
+    finding: dict[str, object] = {
+        "id": "F1",
+        "title": "Title",
+        "description": "Description.",
+        "required_change": "Change it.",
+        "location": location,
+    }
+    finding.update(overrides)
+    payload = {
+        "schema_version": 1,
+        "repository": pull_request.repository,
+        "pr_number": pull_request.number,
+        "base_sha": pull_request.base_sha,
+        "head_sha": pull_request.head_sha,
+        "verdict": "REQUEST_CHANGES",
+        "review_body": "Changes required.",
+        "implementation_prompt": "Fix F1.",
+        "blocking_findings": [finding],
+        "non_blocking_notes": [],
+    }
+    return json.dumps(payload)
+
+
+def test_parse_review_accepts_a_validated_finding_location() -> None:
+    """A well-formed location survives parsing unchanged and unrepaired."""
+    parsed = parse_review(
+        _finding_review_payload({"path": "file.py", "line": 7, "side": "RIGHT"}),
+        _sample_pr(),
+    )
+
+    assert parsed.blocking_findings[0]["location"] == {
+        "path": "file.py",
+        "line": 7,
+        "side": "RIGHT",
+    }
+
+
+def test_parse_review_accepts_a_null_location_for_a_global_finding() -> None:
+    """A global finding declares a null location rather than omitting the field."""
+    parsed = parse_review(_finding_review_payload(), _sample_pr())
+
+    assert parsed.blocking_findings[0]["location"] is None
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        {"path": "file.py", "line": 7},
+        {"path": "file.py", "line": 7, "side": "RIGHT", "extra": 1},
+        {"path": "file.py", "line": 7, "side": "MIDDLE"},
+        {"path": "file.py", "line": 0, "side": "RIGHT"},
+        {"path": "file.py", "line": -3, "side": "RIGHT"},
+        {"path": "file.py", "line": "7", "side": "RIGHT"},
+        {"path": "file.py", "line": True, "side": "RIGHT"},
+        {"path": "", "line": 7, "side": "RIGHT"},
+        "file.py:7",
+        7,
+        [],
+    ],
+)
+def test_parse_review_rejects_malformed_finding_location(location: object) -> None:
+    """Malformed location metadata fails the Oracle contract outright."""
+    with pytest.raises(LooprError) as captured:
+        parse_review(_finding_review_payload(location), _sample_pr())
+
+    assert captured.value.category == "oracle_schema"
+
+
+def test_parse_review_rejects_a_finding_without_a_location_field() -> None:
+    """The location field is required on every blocking finding."""
+    payload = cast("dict[str, object]", json.loads(_finding_review_payload()))
+    findings = cast("list[dict[str, object]]", payload["blocking_findings"])
+    del findings[0]["location"]
+
+    with pytest.raises(LooprError) as captured:
+        parse_review(json.dumps(payload), _sample_pr())
+
+    assert captured.value.category == "oracle_schema"
+
+
+def test_review_prompt_requires_anchored_findings_without_body_duplication() -> None:
+    """The prompt states the anchor contract and the no-duplication rule."""
+    assert "location" in PROMPT
+    assert "LEFT" in PROMPT
+    assert "RIGHT" in PROMPT
+    assert "never restate an individual" in PROMPT

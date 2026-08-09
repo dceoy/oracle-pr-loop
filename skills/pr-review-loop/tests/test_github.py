@@ -17,6 +17,7 @@ from scripts.github import (
     MAX_ISSUE_COMMENTS_TOTAL_BYTES,
     GitHubClient,
     IssueClient,
+    diff_anchors,
     resolve_issue_target,
     resolve_target,
 )
@@ -26,6 +27,7 @@ from scripts.models import (
     JsonValue,
     LooprError,
     PullRequest,
+    ReviewComment,
 )
 from scripts.oracle import build_review_bundle
 from scripts.process import CommandResult, CommandRunner
@@ -1078,3 +1080,147 @@ def test_issue_client_ensure_commit_object_rejects_missing_sha(
         client.ensure_commit_object("a" * 40)
 
     assert captured.value.category == "git"
+
+
+SAMPLE_PATCH = """diff --git a/file.py b/file.py
+index 1111111..2222222 100644
+--- a/file.py
++++ b/file.py
+@@ -1,4 +1,4 @@
+ alpha
+-beta
++bravo
+ gamma
+diff --git a/gone.py b/gone.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/gone.py
++++ /dev/null
+@@ -1,2 +0,0 @@
+-one
+-two
+diff --git a/old.py b/new.py
+similarity index 80%
+rename from old.py
+rename to new.py
+index 4444444..5555555 100644
+--- a/old.py
++++ b/new.py
+@@ -3,2 +3,2 @@ def anchor() -> None:
+-stale
++fresh
+ tail
+diff --git a/ignored.py b/ignored.py
+index 6666666..7777777 100644
+--- a/ignored.py
++++ b/ignored.py
+@@ -1 +1 @@
+-before
++after
+"""
+
+
+def test_diff_anchors_maps_each_line_kind_to_its_own_side() -> None:
+    """Added, removed, and context lines anchor on the side that contains them."""
+    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py", "gone.py", "new.py"}))
+
+    assert anchors == frozenset({
+        ("file.py", "LEFT", 1),
+        ("file.py", "RIGHT", 1),
+        ("file.py", "LEFT", 2),
+        ("file.py", "RIGHT", 2),
+        ("file.py", "LEFT", 3),
+        ("file.py", "RIGHT", 3),
+        ("gone.py", "LEFT", 1),
+        ("gone.py", "LEFT", 2),
+        ("new.py", "LEFT", 3),
+        ("new.py", "RIGHT", 3),
+        ("new.py", "LEFT", 4),
+        ("new.py", "RIGHT", 4),
+    })
+
+
+def test_diff_anchors_excludes_paths_outside_the_validated_inventory() -> None:
+    """A diff section for a path the snapshot did not list yields no anchors."""
+    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py"}))
+
+    assert {path for path, _side, _line in anchors} == {"file.py"}
+    assert ("old.py", "LEFT", 3) not in anchors
+
+
+def test_diff_anchors_ignores_unsafe_and_unreadable_header_paths() -> None:
+    """Traversing, quoted, or prefix-less diff headers contribute no anchors."""
+    patch = (
+        "diff --git a/../escape.py b/../escape.py\n"
+        "--- a/../escape.py\n"
+        "+++ b/../escape.py\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+        'diff --git "a/quoted\\tname.py" "b/quoted\\tname.py"\n'
+        '--- "a/quoted\\tname.py"\n'
+        '+++ "b/quoted\\tname.py"\n'
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+
+    assert diff_anchors(patch, frozenset({"../escape.py", "quoted\tname.py"})) == (
+        frozenset()
+    )
+
+
+def test_client_diff_anchors_reads_the_frozen_base_to_head_diff(
+    tmp_path: Path,
+) -> None:
+    """Anchors come from the immutable base/head objects, not the worktree."""
+    _git_exe, repo, base, head = _repo_with_two_commits(tmp_path)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    assert client.diff_anchors(pull_request) == frozenset({
+        ("file.py", "LEFT", 1),
+        ("file.py", "RIGHT", 1),
+    })
+
+
+def test_post_review_publishes_inline_comments_in_the_same_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One create-review request carries the body and every inline comment."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+    captured: dict[str, JsonObject] = {}
+
+    def fake_text(
+        _args: list[str],
+        *,
+        input_text: str | None = None,
+        **_kwargs: object,
+    ) -> str:
+        assert input_text is not None
+        captured["payload"] = json.loads(input_text)
+        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
+
+    monkeypatch.setattr(client, "_text", fake_text)
+
+    client.post_review(
+        pull_request,
+        "REQUEST_CHANGES",
+        "review body",
+        (
+            ReviewComment(path="file.py", line=7, side="RIGHT", body="inline one"),
+            ReviewComment(path="file.py", line=3, side="LEFT", body="inline two"),
+        ),
+    )
+
+    assert captured["payload"] == {
+        "commit_id": pull_request.head_sha,
+        "body": "review body",
+        "event": "REQUEST_CHANGES",
+        "comments": [
+            {"path": "file.py", "line": 7, "side": "RIGHT", "body": "inline one"},
+            {"path": "file.py", "line": 3, "side": "LEFT", "body": "inline two"},
+        ],
+    }

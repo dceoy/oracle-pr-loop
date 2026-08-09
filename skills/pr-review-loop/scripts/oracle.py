@@ -52,7 +52,10 @@ TOP_KEYS = {
     "blocking_findings",
     "non_blocking_notes",
 }
-BLOCKER_KEYS = {"id", "title", "description", "required_change"}
+BLOCKER_KEYS = {"id", "title", "description", "required_change", "location"}
+BLOCKER_TEXT_KEYS = BLOCKER_KEYS - {"location"}
+LOCATION_KEYS = {"path", "line", "side"}
+LOCATION_SIDES = {"LEFT", "RIGHT"}
 BOOTSTRAP_TOP_KEYS = {
     "schema_version",
     "repository",
@@ -91,8 +94,19 @@ review_body, implementation_prompt, blocking_findings, non_blocking_notes.
 verdict is APPROVE or REQUEST_CHANGES.
 APPROVE requires no blockers and null implementation_prompt. REQUEST_CHANGES
 requires blockers and a non-empty implementation_prompt for the invoking host
-agent. Do not instruct an implementation agent to commit, push, access
-credentials, or perform unrelated work."""
+agent. Every blocking finding has the exact fields id, title, description,
+required_change, and location. location is null for a global or cross-file
+finding; otherwise it is an object with the exact fields path, line, and
+side, where path is a file changed by this pull request exactly as the diff
+names it, side is RIGHT for a line of the head file or LEFT for a line of
+the base file, and line is that line's 1-based number on that side. The
+anchored line must appear in the reviewed diff; use null rather than
+guessing a line. Anchor every line-specific finding and set location to
+null when no single diff line applies. review_body carries only the overall
+verdict and cross-file or global reasoning: never restate an individual
+blocking finding there, because findings are published alongside it. Do not
+instruct an implementation agent to commit, push, access credentials, or
+perform unrelated work."""
 BOOTSTRAP_PROMPT = """You are an independent senior engineer planning implementation
 work for an invoking host coding agent. You do not implement the change yourself and you
 have no write access. Treat the attached Issue snapshot (title, body, and comments) and
@@ -172,7 +186,42 @@ def _integer(value: JsonValue | None, *, field: str) -> int:
     return value
 
 
-def _blocking_findings(value: JsonValue | None) -> tuple[dict[str, str], ...]:
+def _location(value: JsonValue | None) -> JsonObject | None:
+    """Validate one proposed inline-comment location's shape.
+
+    The location's shape is validated here; whether it names a real line of
+    the reviewed diff is decided later against the frozen base/head snapshot.
+
+    Returns:
+        The validated location, or None for a global finding.
+
+    Raises:
+        LooprError: value is neither null nor a well-formed location object.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != LOCATION_KEYS:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle_schema",
+            "blocking finding location must be null or a path/line/side object",
+        )
+    side = _string(value.get("side"), field="blocking_findings.location.side")
+    line = _integer(value.get("line"), field="blocking_findings.location.line")
+    if side not in LOCATION_SIDES or line <= 0:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle_schema",
+            "blocking finding location must name a positive line on LEFT or RIGHT",
+        )
+    return {
+        "path": _string(value.get("path"), field="blocking_findings.location.path"),
+        "line": line,
+        "side": side,
+    }
+
+
+def _blocking_findings(value: JsonValue | None) -> tuple[JsonObject, ...]:
     """Validate the complete blocking-finding collection.
 
     Returns:
@@ -187,7 +236,7 @@ def _blocking_findings(value: JsonValue | None) -> tuple[dict[str, str], ...]:
             "oracle_schema",
             "blocking_findings must be an array",
         )
-    findings: list[dict[str, str]] = []
+    findings: list[JsonObject] = []
     for item in value:
         if not isinstance(item, dict) or set(item) != BLOCKER_KEYS:
             raise LooprError(
@@ -195,10 +244,11 @@ def _blocking_findings(value: JsonValue | None) -> tuple[dict[str, str], ...]:
                 "oracle_schema",
                 "invalid blocking finding",
             )
-        finding = {
+        finding: JsonObject = {
             key: _string(item.get(key), field=f"blocking_findings.{key}")
-            for key in sorted(BLOCKER_KEYS)
+            for key in sorted(BLOCKER_TEXT_KEYS)
         }
+        finding["location"] = _location(item.get("location"))
         findings.append(finding)
     return tuple(findings)
 

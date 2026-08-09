@@ -7,6 +7,7 @@ import operator
 import os
 import re
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -20,6 +21,7 @@ from .models import (
     LooprError,
     PullRequest,
     PullRequestIdentity,
+    ReviewComment,
 )
 from .process import CommandError
 
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from .process import CommandRunner
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+HUNK_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 OWNER_REPO_PART_COUNT = 2
 LS_TREE_FIELD_COUNT = 4
@@ -36,6 +39,8 @@ MAX_ISSUE_COMMENTS = 30
 MAX_ISSUE_COMMENT_BYTES = 20_000
 MAX_ISSUE_COMMENTS_TOTAL_BYTES = 300_000
 MAX_ISSUE_BODY_BYTES = 200_000
+MAX_ANCHOR_PATCH_BYTES = 2 * 1024 * 1024
+BODY_MARKERS = frozenset({" ", "+", "-", "\\"})
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
     "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
@@ -295,6 +300,90 @@ def validate_path(path: str) -> str:
         message = f"unsafe changed path: {path}"
         raise LooprError(EXIT_PRECONDITION, "path", message)
     return path
+
+
+def _header_path(value: str, prefix: str) -> str | None:
+    """Return one safe diff-header path, or None when it names no usable file.
+
+    Returns:
+        The prefix-stripped path, or None for /dev/null, a quoted path, or a
+        path that is unsafe to address.
+    """
+    if not value.startswith(prefix):
+        return None
+    try:
+        return validate_path(value.removeprefix(prefix))
+    except LooprError:
+        return None
+
+
+@dataclass
+class _DiffCursor:
+    """Mutable scan position inside one unified-diff file section."""
+
+    path: str | None = None
+    old_line: int = 0
+    new_line: int = 0
+    in_hunk: bool = False
+
+
+def _scan_body_line(
+    marker: str,
+    cursor: _DiffCursor,
+    anchors: set[tuple[str, str, int]],
+    allowed_paths: frozenset[str],
+) -> None:
+    """Record the anchors one hunk body line contributes and advance the cursor."""
+    if marker == "\\":
+        return
+    path = cursor.path
+    if path is not None and path in allowed_paths:
+        if marker in {" ", "-"}:
+            anchors.add((path, "LEFT", cursor.old_line))
+        if marker in {" ", "+"}:
+            anchors.add((path, "RIGHT", cursor.new_line))
+    if marker in {" ", "-"}:
+        cursor.old_line += 1
+    if marker in {" ", "+"}:
+        cursor.new_line += 1
+
+
+def diff_anchors(
+    patch: str, allowed_paths: frozenset[str]
+) -> frozenset[tuple[str, str, int]]:
+    """Enumerate every `(path, side, line)` GitHub can anchor a comment to.
+
+    Only lines that the frozen base-to-head patch itself contains are
+    enumerated: added and context lines on `RIGHT` with their head-file line
+    numbers, removed and context lines on `LEFT` with their base-file line
+    numbers. A file is addressed by the path it has at head, which is the path
+    GitHub's review API expects, so a rename's `LEFT` lines and a deletion's
+    lines stay addressable. Any path outside allowed_paths, and any diff
+    section this scanner cannot read unambiguously, contributes no anchors.
+
+    Returns:
+        The anchors the reviewed diff supports.
+    """
+    anchors: set[tuple[str, str, int]] = set()
+    cursor = _DiffCursor()
+    old_path: str | None = None
+    for line in patch.split("\n"):
+        marker = line[:1]
+        if cursor.in_hunk and marker in BODY_MARKERS:
+            _scan_body_line(marker, cursor, anchors, allowed_paths)
+            continue
+        cursor.in_hunk = False
+        if line.startswith("diff --git "):
+            old_path, cursor.path = None, None
+        elif line.startswith("--- "):
+            old_path = _header_path(line.removeprefix("--- "), "a/")
+        elif line.startswith("+++ "):
+            cursor.path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+        elif (match := HUNK_RE.match(line)) is not None and cursor.path is not None:
+            cursor.old_line = int(match.group(1))
+            cursor.new_line = int(match.group(2))
+            cursor.in_hunk = True
+    return frozenset(anchors)
 
 
 def parse_json_object(text: str, *, category: str) -> JsonObject:
@@ -1053,6 +1142,28 @@ class GitHubClient(_ImmutableGitMixin):
             max_output=max_output,
         )
 
+    def diff_anchors(
+        self, pull_request: PullRequest
+    ) -> frozenset[tuple[str, str, int]]:
+        """Enumerate the comment anchors the frozen base-to-head diff supports.
+
+        Returns:
+            The anchors, restricted to the snapshot's validated changed paths.
+
+        Raises:
+            LooprError: The patch is not UTF-8.
+        """
+        patch = self.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+        try:
+            text = patch.decode("utf-8", "strict")
+        except UnicodeDecodeError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "patch is not UTF-8",
+            ) from exc
+        return diff_anchors(text, frozenset(pull_request.changed_paths))
+
     def tracked_paths(self, pull_request: PullRequest) -> tuple[str, ...]:
         """List every tracked UTF-8 path in the frozen head tree.
 
@@ -1066,8 +1177,13 @@ class GitHubClient(_ImmutableGitMixin):
         pull_request: PullRequest,
         event: str,
         body: str,
+        comments: tuple[ReviewComment, ...] = (),
     ) -> tuple[int, JsonObject]:
-        """Post one aggregate review anchored to the frozen head SHA.
+        """Post one review, with any inline comments, anchored to the frozen head.
+
+        The aggregate body and every inline comment are published by the same
+        create-review request, so publication stays a single atomic write that
+        GitHub either accepts whole or rejects whole.
 
         Returns:
             The posted review's ID and the raw GitHub response.
@@ -1080,6 +1196,8 @@ class GitHubClient(_ImmutableGitMixin):
             "body": body,
             "event": event,
         }
+        if comments:
+            payload["comments"] = [comment.as_payload() for comment in comments]
         data = parse_json_object(
             self._text(
                 [

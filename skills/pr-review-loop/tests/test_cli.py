@@ -20,6 +20,7 @@ from scripts.models import (
     JsonValue,
     LooprError,
     PullRequest,
+    ReviewComment,
     ReviewResult,
 )
 from scripts.oracle import parse_review
@@ -164,6 +165,7 @@ class AcceptanceGitHubClient(GitHubClient):
         self._snapshots = list(type(self).snapshots)
         self.post_count = 0
         self.posted_events: list[str] = []
+        self.posted_comments: list[tuple[ReviewComment, ...]] = []
 
     def initialize(self, pr_value: str) -> None:
         del pr_value
@@ -191,10 +193,12 @@ class AcceptanceGitHubClient(GitHubClient):
         pull_request: PullRequest,
         event: str,
         body: str,
+        comments: tuple[ReviewComment, ...] = (),
     ) -> tuple[int, JsonObject]:
         del body
         self.post_count += 1
         self.posted_events.append(event)
+        self.posted_comments.append(comments)
         review_id = 101 if event == "REQUEST_CHANGES" else 102
         return review_id, {"id": review_id, "commit_id": pull_request.head_sha}
 
@@ -259,6 +263,7 @@ def _oracle_payload(pull_request: PullRequest, *, verdict: str) -> JsonObject:
             "title": "Fix the fixture",
             "description": "The fixture still contains the review blocker.",
             "required_change": "Replace feature content with fixed content.",
+            "location": {"path": "file.txt", "line": 1, "side": "RIGHT"},
         }
         blockers.append(finding)
     return {
@@ -372,6 +377,13 @@ def _assert_review_result(
     github = AcceptanceGitHubClient.instance
     assert isinstance(github, AcceptanceGitHubClient)
     assert github.posted_events == [verdict]
+    anchored = [
+        (comment.path, comment.side, comment.line)
+        for comment in github.posted_comments[0]
+    ]
+    assert anchored == (
+        [("file.txt", "RIGHT", 1)] if verdict == "REQUEST_CHANGES" else []
+    )
 
     assert "artifacts_dir" not in payload
     oracle_commands = [
