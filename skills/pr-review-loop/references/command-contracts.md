@@ -17,7 +17,14 @@ Failures emit `{"schema_version":1,"command":"bootstrap|review|submit","error":{
 python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
 ```
 
-Optional flags are `--repo-dir` and `--oracle-thinking-time`.
+Optional flags are `--repo-dir`, `--oracle-model MODEL`, and
+`--oracle-thinking-time EFFORT`. When `--oracle-model` is omitted, Oracle uses
+the current browser model with `--browser-model-strategy current`; when it is
+supplied, the command uses `select` and passes the opaque model value as
+`--model MODEL`. When `--oracle-thinking-time` is omitted, no
+`--browser-thinking-time` override is passed, so Oracle inherits its existing
+effort configuration. Supplied effort values are `light`, `standard`,
+`extended`, `extra-high`, `pro`, and `heavy`.
 
 Success fields are `schema_version`, `command`, `repository`, `issue_number`,
 `issue_url`, `issue_updated_at`, `base_ref`, `base_sha`, and
@@ -41,7 +48,12 @@ prompt is advisory data, and host handling is defined in `SKILL.md`.
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
 
-Optional flags are `--repo-dir` and `--oracle-thinking-time`.
+Optional flags are `--repo-dir`, `--oracle-model MODEL`, and
+`--oracle-thinking-time EFFORT`, with the same default-inheritance semantics as
+`bootstrap`: omission keeps the current browser model and omits both model
+selection and any thinking-time override; supplied values are passed to Oracle
+without local model discovery or capability detection. Effort values are
+`light`, `standard`, `extended`, `extra-high`, `pro`, and `heavy`.
 
 Success fields are `schema_version`, `command`, `repository`, `pr_number`,
 `base_sha`, `head_sha`, `verdict`, `github_review_id`, `blocking_findings`, and

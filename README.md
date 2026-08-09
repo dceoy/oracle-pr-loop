@@ -69,6 +69,12 @@ Ask a compatible host to implement an open Issue, create its PR, and carry it
 through independent review, or review an existing PR. The host uses the
 canonical workflow and command contract above.
 
+For direct command use, `bootstrap` and `review` optionally accept
+`--oracle-model MODEL` and `--oracle-thinking-time EFFORT`. With neither flag,
+the current browser model is preserved and no effort override is sent to
+Oracle. Supplying either value passes only that explicit override; supported
+efforts are `light`, `standard`, `extended`, `extra-high`, `pro`, and `heavy`.
+
 ## Development
 
 ```console

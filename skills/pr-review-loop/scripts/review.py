@@ -37,7 +37,8 @@ def _generate_review(
     github: GitHubClient,
     writer: TemporaryFileWriter,
     pull_request: PullRequest,
-    thinking_time: str,
+    thinking_time: str | None,
+    model: str | None,
 ) -> OracleReview:
     """Build evidence, invoke Oracle once, and parse its review.
 
@@ -58,6 +59,7 @@ def _generate_review(
         prompt,
         attachments,
         slug,
+        model=model,
         max_attachments=MAX_ORACLE_ATTACHMENTS,
     )
     return parse_review(raw, pull_request)
@@ -67,7 +69,8 @@ def execute_review(
     *,
     pr_value: str,
     repo_dir: Path,
-    thinking_time: str,
+    thinking_time: str | None = None,
+    model: str | None = None,
     runner: CommandRunner | None = None,
 ) -> ReviewResult:
     """Review and post one exact pull-request snapshot.
@@ -94,6 +97,7 @@ def execute_review(
             writer,
             initial,
             thinking_time,
+            model,
         )
 
     body, comments = _publication(github, initial, verdict)

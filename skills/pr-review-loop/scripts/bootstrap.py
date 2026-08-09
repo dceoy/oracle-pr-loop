@@ -25,7 +25,8 @@ def execute_bootstrap(
     *,
     issue_value: str,
     repo_dir: Path,
-    thinking_time: str,
+    thinking_time: str | None = None,
+    model: str | None = None,
     runner: CommandRunner | None = None,
 ) -> BootstrapResult:
     """Turn one open GitHub Issue into a bounded implementation prompt.
@@ -74,6 +75,7 @@ def execute_bootstrap(
             prompt,
             attachments,
             slug,
+            model=model,
             max_attachments=MAX_BOOTSTRAP_ATTACHMENTS,
         )
         generated = parse_bootstrap(raw, initial, base_sha)

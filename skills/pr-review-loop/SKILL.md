@@ -155,6 +155,14 @@ python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
 
 `bootstrap` requires an open, same-repository GitHub Issue and Oracle with an authenticated browser profile. It emits one JSON object bound to the Issue's `updatedAt` and the base branch's exact commit SHA, and never edits, commits, pushes, or creates a pull request.
 
+`bootstrap` and `review` accept the optional `--oracle-model MODEL` and
+`--oracle-thinking-time EFFORT` flags. Omitting the model keeps Oracle's current
+browser model; supplying it selects that opaque model value. Omitting effort
+does not pass a thinking-time override, allowing Oracle to inherit its existing
+configuration. Supported effort values are `light`, `standard`, `extended`,
+`extra-high`, `pro`, and `heavy`; model discovery and capability detection stay
+inside Oracle.
+
 ```console
 python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
 ```
