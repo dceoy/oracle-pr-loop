@@ -107,14 +107,28 @@ def test_command_error_keeps_bounded_redacted_completed_output(tmp_path: Path) -
     assert "command-secret-value" not in str(error)
 
 
+@pytest.mark.parametrize("config_only", [False, True], ids=["environment", "config"])
 @pytest.mark.parametrize("token", ["x", "xy", "xyz"])
-def test_short_oracle_remote_env_tokens_are_redacted(token: str) -> None:
+def test_short_oracle_remote_tokens_are_redacted(
+    tmp_path: Path,
+    config_only: bool,
+    token: str,
+) -> None:
     """Oracle remote tokens remain secrets below the generic threshold."""
-    runner = CommandRunner({
-        "PATH": os.environ["PATH"],
-        "ORACLE_REMOTE_TOKEN": token,
-    })
+    source_env = {"PATH": os.environ["PATH"]}
+    if config_only:
+        oracle_dir = tmp_path / ".oracle"
+        oracle_dir.mkdir()
+        (oracle_dir / "config.json").write_text(
+            f'{{"browser": {{"remoteToken": "{token}"}}}}',
+            encoding="utf-8",
+        )
+        source_env["HOME"] = str(tmp_path)
+    else:
+        source_env["ORACLE_REMOTE_TOKEN"] = token
+    runner = CommandRunner(source_env)
 
+    assert runner.oracle_config_remote_host is None
     assert runner.contains_secret(token)
     assert runner.contains_secret(token.encode())
     assert runner.redact(f"token={token}") == "token=[REDACTED]"
@@ -150,68 +164,58 @@ def test_oracle_remote_token_only_in_config_file_is_still_redacted(
     assert runner.redact(f"token={config_only_token}") == "token=[REDACTED]"
 
 
-@pytest.mark.parametrize("token", ["x", "xy", "xyz"])
-def test_short_oracle_remote_config_tokens_are_redacted(
+@pytest.mark.parametrize("config_only", [False, True], ids=["environment", "config"])
+def test_oracle_remote_token_is_trimmed_before_registration(
     tmp_path: Path,
-    token: str,
+    config_only: bool,
 ) -> None:
-    """Config-backed Oracle remote tokens remain secrets at any length."""
-    oracle_dir = tmp_path / ".oracle"
-    oracle_dir.mkdir()
-    (oracle_dir / "config.json").write_text(
-        f'{{"browser": {{"remoteToken": "{token}"}}}}',
-        encoding="utf-8",
-    )
-    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    """A whitespace-padded token registers as Oracle's trimmed value."""
+    token = "config-file-only-secret-token" if config_only else "remote-secret-token"
+    source_env = {"PATH": os.environ["PATH"]}
+    if config_only:
+        oracle_dir = tmp_path / ".oracle"
+        oracle_dir.mkdir()
+        (oracle_dir / "config.json").write_text(
+            f'{{"browser": {{"remoteToken": " {token} "}}}}',
+            encoding="utf-8",
+        )
+        source_env["HOME"] = str(tmp_path)
+    else:
+        source_env["ORACLE_REMOTE_TOKEN"] = f" {token} "
+    runner = CommandRunner(source_env)
 
     assert runner.oracle_config_remote_host is None
     assert runner.contains_secret(token)
-    assert runner.contains_secret(token.encode())
     assert runner.redact(f"token={token}") == "token=[REDACTED]"
 
 
-def test_oracle_remote_token_from_env_is_trimmed_before_registration() -> None:
-    """A whitespace-padded env token registers as the trimmed value Oracle uses."""
-    runner = CommandRunner({
-        "PATH": os.environ["PATH"],
-        "ORACLE_REMOTE_TOKEN": " remote-secret-token ",
-    })
-
-    assert runner.contains_secret("remote-secret-token")
-    assert runner.redact("token=remote-secret-token") == "token=[REDACTED]"
-
-
-def test_oracle_remote_token_from_env_whitespace_only_is_not_registered() -> None:
-    """A whitespace-only env token is not a secret, matching Oracle's trimming.
+@pytest.mark.parametrize("config_only", [False, True], ids=["environment", "config"])
+def test_oracle_remote_token_whitespace_only_is_not_registered(
+    tmp_path: Path,
+    config_only: bool,
+) -> None:
+    """A whitespace-only token is not a secret, matching Oracle's trimming.
 
     Oracle authenticates with no token in this case, so registering the
     raw whitespace string as a secret would make `redact()` rewrite every
     run of matching whitespace in unrelated output.
     """
-    runner = CommandRunner({
-        "PATH": os.environ["PATH"],
-        "ORACLE_REMOTE_TOKEN": "    ",
-    })
-
-    assert runner.contains_secret("    ") is False
-    assert runner.redact("a    b") == "a    b"
-
-
-def test_oracle_config_remote_token_is_trimmed_before_registration(
-    tmp_path: Path,
-) -> None:
-    """A whitespace-padded config token registers as the trimmed value Oracle uses."""
-    oracle_dir = tmp_path / ".oracle"
-    oracle_dir.mkdir()
-    (oracle_dir / "config.json").write_text(
-        '{"browser": {"remoteToken": " config-file-only-secret-token "}}',
-        encoding="utf-8",
-    )
-    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    source_env = {"PATH": os.environ["PATH"]}
+    if config_only:
+        oracle_dir = tmp_path / ".oracle"
+        oracle_dir.mkdir()
+        (oracle_dir / "config.json").write_text(
+            '{"browser": {"remoteToken": "    "}}',
+            encoding="utf-8",
+        )
+        source_env["HOME"] = str(tmp_path)
+    else:
+        source_env["ORACLE_REMOTE_TOKEN"] = "    "
+    runner = CommandRunner(source_env)
 
     assert runner.oracle_config_remote_host is None
-    assert runner.contains_secret("config-file-only-secret-token")
-    assert runner.redact("token=config-file-only-secret-token") == "token=[REDACTED]"
+    assert runner.contains_secret("    ") is False
+    assert runner.redact("a    b") == "a    b"
 
 
 def test_oracle_config_remote_values_are_refreshed_on_access(tmp_path: Path) -> None:
@@ -240,17 +244,32 @@ def test_oracle_config_remote_values_are_refreshed_on_access(tmp_path: Path) -> 
     assert runner.contains_secret("initial-secret-token")
 
 
-def test_oracle_config_remote_host_is_trimmed(tmp_path: Path) -> None:
-    """A whitespace-padded config host is trimmed to the value Oracle uses."""
+@pytest.mark.parametrize(
+    ("raw_host", "expected_host"),
+    [
+        pytest.param("  10.0.0.9:9473  ", "10.0.0.9:9473", id="spaces"),
+        pytest.param(
+            r"\ufeff10.0.0.9:9473\ufeff",
+            "10.0.0.9:9473",
+            id="bom",
+        ),
+    ],
+)
+def test_oracle_config_remote_host_is_trimmed(
+    tmp_path: Path,
+    raw_host: str,
+    expected_host: str,
+) -> None:
+    """Whitespace and BOM padding are trimmed like Oracle's `trim()`."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
     (oracle_dir / "config.json").write_text(
-        '{"browser": {"remoteHost": "  10.0.0.9:9473  "}}',
+        f'{{"browser": {{"remoteHost": "{raw_host}"}}}}',
         encoding="utf-8",
     )
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
-    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.oracle_config_remote_host == expected_host
 
 
 def test_oracle_config_remote_host_whitespace_only_is_treated_as_unset(
@@ -268,51 +287,33 @@ def test_oracle_config_remote_host_whitespace_only_is_treated_as_unset(
     assert runner.oracle_config_remote_host is None
 
 
-def test_oracle_remote_token_from_env_bom_padded_is_trimmed_before_registration() -> (
-    None
-):
-    """A BOM-padded env token registers as the value Oracle's `trim()` uses.
+@pytest.mark.parametrize("config_only", [False, True], ids=["environment", "config"])
+def test_oracle_remote_token_bom_padded_is_trimmed_before_registration(
+    tmp_path: Path,
+    config_only: bool,
+) -> None:
+    """A BOM-padded token registers as Oracle's `trim()` value.
 
     Python's `str.strip()` does not treat U+FEFF as whitespace, unlike
     JavaScript's `String.prototype.trim()`, which Oracle's resolver uses.
     """
-    runner = CommandRunner({
-        "PATH": os.environ["PATH"],
-        "ORACLE_REMOTE_TOKEN": "\ufeffremote-secret-token\ufeff",
-    })
-
-    assert runner.contains_secret("remote-secret-token")
-    assert runner.redact("token=remote-secret-token") == "token=[REDACTED]"
-
-
-def test_oracle_config_remote_token_bom_padded_is_trimmed_before_registration(
-    tmp_path: Path,
-) -> None:
-    """A BOM-padded config token registers as the value Oracle's `trim()` uses."""
-    oracle_dir = tmp_path / ".oracle"
-    oracle_dir.mkdir()
-    (oracle_dir / "config.json").write_text(
-        '{"browser": {"remoteToken": "\\ufeffconfig-secret-token\\ufeff"}}',
-        encoding="utf-8",
-    )
-    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    token = "config-secret-token" if config_only else "remote-secret-token"
+    source_env = {"PATH": os.environ["PATH"]}
+    if config_only:
+        oracle_dir = tmp_path / ".oracle"
+        oracle_dir.mkdir()
+        (oracle_dir / "config.json").write_text(
+            f'{{"browser": {{"remoteToken": "\\ufeff{token}\\ufeff"}}}}',
+            encoding="utf-8",
+        )
+        source_env["HOME"] = str(tmp_path)
+    else:
+        source_env["ORACLE_REMOTE_TOKEN"] = f"\ufeff{token}\ufeff"
+    runner = CommandRunner(source_env)
 
     assert runner.oracle_config_remote_host is None
-    assert runner.contains_secret("config-secret-token")
-    assert runner.redact("token=config-secret-token") == "token=[REDACTED]"
-
-
-def test_oracle_config_remote_host_bom_padded_is_trimmed(tmp_path: Path) -> None:
-    """A BOM-padded config host is trimmed to the value Oracle's `trim()` uses."""
-    oracle_dir = tmp_path / ".oracle"
-    oracle_dir.mkdir()
-    (oracle_dir / "config.json").write_text(
-        '{"browser": {"remoteHost": "\\ufeff10.0.0.9:9473\\ufeff"}}',
-        encoding="utf-8",
-    )
-    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
-
-    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+    assert runner.contains_secret(token)
+    assert runner.redact(f"token={token}") == "token=[REDACTED]"
 
 
 def test_oracle_config_remote_host_is_none_when_config_file_is_absent(
