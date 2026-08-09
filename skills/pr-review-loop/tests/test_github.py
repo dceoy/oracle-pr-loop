@@ -11,12 +11,22 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from scripts.artifacts import TemporaryFileWriter
 from scripts.github import (
+    MAX_ANCHOR_PATCH_BYTES,
+    MAX_GITHUB_DIFF_BYTES,
+    MAX_GITHUB_DIFF_LINES,
+    MAX_GITHUB_FILE_DIFF_BYTES,
+    MAX_GITHUB_FILE_DIFF_LINES,
     MAX_ISSUE_BODY_BYTES,
     MAX_ISSUE_COMMENT_BYTES,
     MAX_ISSUE_COMMENTS,
     MAX_ISSUE_COMMENTS_TOTAL_BYTES,
     GitHubClient,
     IssueClient,
+    _diff_sections,
+    _diff_size_safe_paths,
+    diff_anchors,
+    diff_base_paths,
+    diff_blob_shas,
     resolve_issue_target,
     resolve_target,
 )
@@ -26,6 +36,7 @@ from scripts.models import (
     JsonValue,
     LooprError,
     PullRequest,
+    ReviewComment,
 )
 from scripts.oracle import build_review_bundle
 from scripts.process import CommandResult, CommandRunner
@@ -76,6 +87,58 @@ def _sample_pr(
         head_repository="owner/repository",
         changed_paths=paths,
         raw={},
+    )
+
+
+def _repo_with_added_files(
+    tmp_path: Path,
+    contents: dict[str, bytes],
+) -> tuple[str, Path, str, str]:
+    """Create a repository whose head adds the supplied exact file bytes."""
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "added-files-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    _git(git, ["commit", "--allow-empty", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    for path, content in contents.items():
+        file_path = repo / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(content)
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    return git, repo, base, head
+
+
+def _synthetic_diff_header(path: str, line_count: int = 1) -> bytes:
+    """Build one synthetic diff header with a controllable hunk size."""
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "new file mode 100644\n"
+        "index 0000000000000000000000000000000000000000.."
+        "1111111111111111111111111111111111111111\n"
+        "--- /dev/null\n"
+        f"+++ b/{path}\n"
+        f"@@ -0,0 +{line_count} @@\n"
+    ).encode()
+
+
+def _synthetic_diff_section(path: str, payload_bytes: int) -> bytes:
+    """Build one small-text diff section with a controllable byte size."""
+    return _synthetic_diff_header(path) + b"+" + (b"x" * payload_bytes) + b"\n"
+
+
+def _synthetic_diff_section_with_lines(
+    path: str,
+    body_lines: tuple[bytes, ...],
+) -> bytes:
+    """Build one synthetic added-file section from exact body lines."""
+    return _synthetic_diff_header(path, len(body_lines)) + b"".join(
+        b"+" + line + b"\n" for line in body_lines
     )
 
 
@@ -1078,3 +1141,956 @@ def test_issue_client_ensure_commit_object_rejects_missing_sha(
         client.ensure_commit_object("a" * 40)
 
     assert captured.value.category == "git"
+
+
+SAMPLE_PATCH = """diff --git a/file.py b/file.py
+index 1111111..2222222 100644
+--- a/file.py
++++ b/file.py
+@@ -1,4 +1,4 @@
+ alpha
+-beta
++bravo
+ gamma
+diff --git a/gone.py b/gone.py
+deleted file mode 100644
+index 3333333..0000000
+--- a/gone.py
++++ /dev/null
+@@ -1,2 +0,0 @@
+-one
+-two
+diff --git a/old.py b/new.py
+similarity index 80%
+rename from old.py
+rename to new.py
+index 4444444..5555555 100644
+--- a/old.py
++++ b/new.py
+@@ -3,2 +3,2 @@ def anchor() -> None:
+-stale
++fresh
+ tail
+diff --git a/ignored.py b/ignored.py
+index 6666666..7777777 100644
+--- a/ignored.py
++++ b/ignored.py
+@@ -1 +1 @@
+-before
++after
+"""
+
+
+def test_diff_anchors_maps_each_line_kind_to_its_own_side() -> None:
+    """Added and context lines anchor RIGHT only; only removed lines anchor LEFT."""
+    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py", "gone.py", "new.py"}))
+
+    assert anchors == frozenset({
+        ("file.py", "RIGHT", 1),
+        ("file.py", "LEFT", 2),
+        ("file.py", "RIGHT", 2),
+        ("file.py", "RIGHT", 3),
+        ("gone.py", "LEFT", 1),
+        ("gone.py", "LEFT", 2),
+        ("new.py", "LEFT", 3),
+        ("new.py", "RIGHT", 3),
+        ("new.py", "RIGHT", 4),
+    })
+
+
+def test_diff_anchors_rejects_a_context_line_as_a_left_anchor() -> None:
+    """A context line is never a valid LEFT anchor, only RIGHT."""
+    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py"}))
+
+    assert ("file.py", "LEFT", 1) not in anchors
+    assert ("file.py", "LEFT", 3) not in anchors
+    assert ("file.py", "RIGHT", 1) in anchors
+    assert ("file.py", "RIGHT", 3) in anchors
+
+
+def test_diff_anchors_excludes_paths_outside_the_validated_inventory() -> None:
+    """A diff section for a path the snapshot did not list yields no anchors."""
+    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py"}))
+
+    assert {path for path, _side, _line in anchors} == {"file.py"}
+    assert ("old.py", "LEFT", 3) not in anchors
+
+
+def test_diff_anchors_ignores_unsafe_and_unreadable_header_paths() -> None:
+    """Traversing, quoted, or prefix-less diff headers contribute no anchors."""
+    patch = (
+        "diff --git a/../escape.py b/../escape.py\n"
+        "--- a/../escape.py\n"
+        "+++ b/../escape.py\n"
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+        'diff --git "a/quoted\\tname.py" "b/quoted\\tname.py"\n'
+        '--- "a/quoted\\tname.py"\n'
+        '+++ "b/quoted\\tname.py"\n'
+        "@@ -1 +1 @@\n"
+        "-before\n"
+        "+after\n"
+    )
+
+    assert diff_anchors(patch, frozenset({"../escape.py", "quoted\tname.py"})) == (
+        frozenset()
+    )
+
+
+def test_diff_base_paths_maps_a_rename_to_its_pre_rename_path() -> None:
+    """A rename's head path maps to its own section's base path, not itself."""
+    base_paths = diff_base_paths(
+        SAMPLE_PATCH, frozenset({"file.py", "gone.py", "new.py"})
+    )
+
+    assert base_paths == {
+        "file.py": "file.py",
+        "gone.py": "gone.py",
+        "new.py": "old.py",
+    }
+
+
+def test_diff_anchors_reads_a_header_path_containing_a_space() -> None:
+    """Git's tab separator after a spaced path must not look like a control char."""
+    patch = (
+        "diff --git a/foo bar.py b/foo bar.py\n"
+        "index a29bdeb..c0d0fb4 100644\n"
+        "--- a/foo bar.py\t\n"
+        "+++ b/foo bar.py\t\n"
+        "@@ -1 +1,2 @@\n"
+        " line1\n"
+        "+line2\n"
+    )
+
+    assert diff_anchors(patch, frozenset({"foo bar.py"})) == frozenset({
+        ("foo bar.py", "RIGHT", 1),
+        ("foo bar.py", "RIGHT", 2),
+    })
+
+
+def test_diff_size_safe_paths_treats_file_limit_equality_as_unsafe() -> None:
+    """A file exactly at GitHub's byte limit cannot receive an inline anchor."""
+    path = "file.py"
+    empty_section = _synthetic_diff_section(path, 0)
+    below = _synthetic_diff_section(
+        path,
+        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section) - 1,
+    )
+    at_limit = _synthetic_diff_section(
+        path,
+        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section),
+    )
+
+    assert len(below) == MAX_GITHUB_FILE_DIFF_BYTES - 1
+    assert len(at_limit) == MAX_GITHUB_FILE_DIFF_BYTES
+    assert _diff_size_safe_paths(
+        below,
+        below.decode(),
+        frozenset({path}),
+    ) == frozenset({path})
+    assert (
+        _diff_size_safe_paths(
+            at_limit,
+            at_limit.decode(),
+            frozenset({path}),
+        )
+        == frozenset()
+    )
+
+
+def test_diff_size_safe_paths_preserves_nonfinal_section_separator_bytes() -> None:
+    """A non-final section at the byte limit remains ineligible."""
+    large_path = "large.py"
+    small_path = "small.py"
+    empty_section = _synthetic_diff_section(large_path, 0)
+    large_section = _synthetic_diff_section(
+        large_path,
+        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section),
+    )
+    small_section = _synthetic_diff_section(small_path, 0)
+    patch = large_section + small_section
+    sections = _diff_sections(patch, patch.decode())
+
+    assert len(sections) == 2
+    assert sections[0][0] == large_path
+    assert len(sections[0][1]) == MAX_GITHUB_FILE_DIFF_BYTES
+    assert _diff_size_safe_paths(
+        patch,
+        patch.decode(),
+        frozenset({large_path, small_path}),
+    ) == frozenset({small_path})
+
+
+def test_diff_size_safe_paths_treats_aggregate_limit_equality_as_unsafe() -> None:
+    """An aggregate patch at the byte limit cannot receive inline anchors."""
+    paths = ("one.py", "two.py", "three.py")
+    empty_sections = tuple(_synthetic_diff_section(path, 0) for path in paths)
+    target_lengths = (
+        MAX_GITHUB_DIFF_BYTES // 3,
+        MAX_GITHUB_DIFF_BYTES // 3,
+        MAX_GITHUB_DIFF_BYTES - 2 * (MAX_GITHUB_DIFF_BYTES // 3),
+    )
+    at_limit = b"".join(
+        _synthetic_diff_section(path, target - len(empty_section))
+        for path, target, empty_section in zip(
+            paths,
+            target_lengths,
+            empty_sections,
+            strict=True,
+        )
+    )
+    below_limit = at_limit[:-1]
+
+    assert len(at_limit) == MAX_GITHUB_DIFF_BYTES
+    assert len(below_limit) == MAX_GITHUB_DIFF_BYTES - 1
+    assert at_limit.count(b"\n") < MAX_GITHUB_DIFF_LINES
+    assert all(
+        len(section) < MAX_GITHUB_FILE_DIFF_BYTES
+        for _path, section in _diff_sections(at_limit, at_limit.decode())
+    )
+    assert all(
+        section.count(b"\n") < MAX_GITHUB_FILE_DIFF_LINES
+        for _path, section in _diff_sections(at_limit, at_limit.decode())
+    )
+    assert _diff_size_safe_paths(
+        below_limit,
+        below_limit.decode(),
+        frozenset(paths),
+    ) == frozenset(paths)
+    assert (
+        _diff_size_safe_paths(
+            at_limit,
+            at_limit.decode(),
+            frozenset(paths),
+        )
+        == frozenset()
+    )
+
+
+def test_diff_size_safe_paths_ignores_header_like_lines_inside_hunks() -> None:
+    """Hunk content cannot relabel an oversized diff section's path."""
+    large_path = "large.py"
+    small_path = "small.py"
+    large_section = _synthetic_diff_section_with_lines(
+        large_path,
+        (
+            b"x" * MAX_GITHUB_FILE_DIFF_BYTES,
+            b"++ b/small.py",
+        ),
+    )
+    patch = large_section + _synthetic_diff_section(small_path, 0)
+
+    sections = _diff_sections(patch, patch.decode())
+    assert sections[0][0] == large_path
+    assert _diff_size_safe_paths(
+        patch,
+        patch.decode(),
+        frozenset({large_path, small_path}),
+    ) == frozenset({small_path})
+
+
+def test_client_diff_anchors_reads_the_frozen_base_to_head_diff(
+    tmp_path: Path,
+) -> None:
+    """Anchors come from the immutable base/head objects, not the worktree."""
+    _git_exe, repo, base, head = _repo_with_two_commits(tmp_path)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    assert client.diff_anchors(pull_request) == frozenset({
+        ("file.py", "LEFT", 1),
+        ("file.py", "RIGHT", 1),
+    })
+
+
+def test_client_diff_anchors_drops_only_a_file_over_github_file_byte_limit(
+    tmp_path: Path,
+) -> None:
+    """A large file loses inline anchors while a small file remains eligible."""
+    _git_exe, repo, base, head = _repo_with_added_files(
+        tmp_path,
+        {
+            "large.txt": b"x" * (MAX_GITHUB_FILE_DIFF_BYTES + 1) + b"\n",
+            "small.py": b"safe\n",
+        },
+    )
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("large.txt", "small.py"))
+    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+    text = patch.decode()
+    section_sizes = {
+        path: len(section)
+        for path, section in _diff_sections(patch, text)
+        if path is not None
+    }
+
+    assert len(patch) < MAX_GITHUB_DIFF_BYTES
+    assert patch.count(b"\n") < MAX_GITHUB_DIFF_LINES
+    assert section_sizes["large.txt"] >= MAX_GITHUB_FILE_DIFF_BYTES
+    assert section_sizes["small.py"] < MAX_GITHUB_FILE_DIFF_BYTES
+    anchors = client.diff_anchors(pull_request)
+    assert ("small.py", "RIGHT", 1) in anchors
+    assert not any(path == "large.txt" for path, _side, _line in anchors)
+
+
+def test_client_diff_anchors_drops_all_files_when_aggregate_bytes_are_unsafe(
+    tmp_path: Path,
+) -> None:
+    """Several individually eligible files lose anchors past the aggregate cap."""
+    content = b"x" * (MAX_GITHUB_FILE_DIFF_BYTES - 2048) + b"\n"
+    paths = tuple(f"large-{index}.txt" for index in range(1, 4))
+    _git_exe, repo, base, head = _repo_with_added_files(
+        tmp_path,
+        dict.fromkeys(paths, content),
+    )
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=paths)
+    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+    text = patch.decode()
+    sections = _diff_sections(patch, text)
+
+    assert len(patch) >= MAX_GITHUB_DIFF_BYTES
+    assert len(patch) < MAX_ANCHOR_PATCH_BYTES
+    assert patch.count(b"\n") < MAX_GITHUB_DIFF_LINES
+    assert all(len(section) < MAX_GITHUB_FILE_DIFF_BYTES for _path, section in sections)
+    assert client.diff_anchors(pull_request) == frozenset()
+
+
+def test_client_diff_anchors_drops_all_files_when_aggregate_lines_are_unsafe(
+    tmp_path: Path,
+) -> None:
+    """Several small files lose anchors past the aggregate line cap."""
+    line_count = MAX_GITHUB_DIFF_LINES // 2
+    paths = ("many-one.txt", "many-two.txt")
+    _git_exe, repo, base, head = _repo_with_added_files(
+        tmp_path,
+        dict.fromkeys(paths, b"x\n" * line_count),
+    )
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=paths)
+    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+    text = patch.decode()
+    sections = _diff_sections(patch, text)
+
+    assert len(patch) < MAX_GITHUB_DIFF_BYTES
+    assert patch.count(b"\n") >= MAX_GITHUB_DIFF_LINES
+    assert all(
+        len(section) < MAX_GITHUB_FILE_DIFF_BYTES
+        and section.count(b"\n") < MAX_GITHUB_FILE_DIFF_LINES
+        for _path, section in sections
+    )
+    assert client.diff_anchors(pull_request) == frozenset()
+
+
+def test_client_diff_anchors_rejects_a_context_line_as_left(tmp_path: Path) -> None:
+    """A real diff's unchanged context line yields no LEFT anchor for GitHub.
+
+    GitHub's create-review API accepts LEFT only for a removed line; sending
+    it a context line's base-file position produces an HTTP 422 for the whole
+    atomic review, so this must never be treated as a valid anchor.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "context-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\nbeta\ngamma\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("alpha\nBRAVO\ngamma\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert ("file.py", "LEFT", 1) not in anchors
+    assert ("file.py", "LEFT", 3) not in anchors
+    assert ("file.py", "RIGHT", 1) in anchors
+    assert ("file.py", "RIGHT", 3) in anchors
+    assert ("file.py", "LEFT", 2) in anchors
+    assert ("file.py", "RIGHT", 2) in anchors
+
+
+def test_client_diff_anchors_ignores_repository_local_diff_config(
+    tmp_path: Path,
+) -> None:
+    """Repository-local `diff.*` config cannot change anchors from Git's defaults.
+
+    `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` already exclude global and
+    system config, but not this repository's own `.git/config`. A
+    `diff.noprefix` or oversized `diff.context`/`diff.algorithm` setting there
+    must not corrupt the header paths `diff_anchors` reads or expose context
+    lines beyond Git's default 3-line window, either of which could produce
+    an anchor GitHub's own diff does not contain. A low `diff.renameLimit`
+    must not silently turn a rename's small hunk into whole-file delete/add
+    anchors, and `diff.indentHeuristic=false` must not move a hunk boundary.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "configured-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    lines = [f"line{index}" for index in range(1, 13)]
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    lines[5] = "CHANGED"
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "diff.noprefix", "true"], cwd=repo)
+    _git(git, ["config", "diff.context", "10"], cwd=repo)
+    _git(git, ["config", "diff.interHunkContext", "10"], cwd=repo)
+    _git(git, ["config", "diff.algorithm", "patience"], cwd=repo)
+    _git(git, ["config", "diff.indentHeuristic", "false"], cwd=repo)
+    _git(git, ["config", "diff.renameLimit", "1"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, line) for path, _side, line in anchors} == {
+        ("file.py", line) for line in range(3, 10)
+    }
+    assert ("file.py", "LEFT", 1) not in anchors
+    assert ("file.py", "LEFT", 12) not in anchors
+
+
+def test_client_diff_anchors_ignores_a_low_repository_local_rename_limit(
+    tmp_path: Path,
+) -> None:
+    """A low `diff.renameLimit` must not turn a rename into delete+add anchors.
+
+    Git's exhaustive inexact-rename search silently gives up once the number
+    of rename candidates exceeds `diff.renameLimit`, reporting the rename as
+    an unrelated whole-file deletion and whole-file addition instead. That
+    would replace a small rename hunk's anchors with anchors spanning every
+    line of both files, so this repository-local setting must have no effect
+    on the anchor set `patch()` produces.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "rename-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    body = "\n".join(f"line{index}" for index in range(1, 9))
+    for index in range(1, 11):
+        (repo / f"file{index}.py").write_text(f"{body}\n")
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    for index in range(1, 11):
+        source = repo / f"file{index}.py"
+        source.rename(repo / f"moved{index}.py")
+    (repo / "moved1.py").write_text(f"{body}\nCHANGED\n")
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-am", "rename"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "diff.renameLimit", "1"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("moved1.py",))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors} == {
+        ("moved1.py", "RIGHT"),
+    }
+
+
+def test_client_diff_anchors_reads_a_quoted_non_ascii_path(tmp_path: Path) -> None:
+    """A repository-local `core.quotePath=true` must not hide a UTF-8 path.
+
+    With that setting, Git C-quotes a non-ASCII path in the `---`/`+++`
+    headers (wrapping it in double quotes and octal-escaping each non-ASCII
+    byte), which `_header_path()` cannot parse as a `a/`/`b/`-prefixed path.
+    Left unpinned, that would silently drop every anchor for the file to the
+    aggregate body instead of the safe fallback the design intends only for
+    genuinely unsafe paths.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "quoted-path-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    path = "日本語.py"
+    (repo / path).write_text("line1\nline2\n")
+    _git(git, ["add", path], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / path).write_text("line1\nCHANGED\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "core.quotePath", "true"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=(path,))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert (path, "RIGHT", 2) in anchors
+
+
+def test_client_diff_anchors_keeps_anchors_after_a_suppressed_blank_context_line(
+    tmp_path: Path,
+) -> None:
+    """A repository-local `diff.suppressBlankEmpty=true` must not truncate a hunk.
+
+    With that setting, Git emits an empty context line with no leading
+    space instead of a lone space, which `diff_anchors` cannot distinguish
+    from the hunk's end. Left unpinned, that would silently drop every
+    anchor after the blank line, including the actually-changed line the
+    hunk exists to report.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "blank-context-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    lines = [f"line{index}" for index in range(1, 13)]
+    lines[2] = ""
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    lines[5] = "CHANGED"
+    (repo / "file.py").write_text("\n".join(lines) + "\n")
+    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "diff.suppressBlankEmpty", "true"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head)
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, line) for path, _side, line in anchors} == {
+        ("file.py", line) for line in range(3, 10)
+    }
+
+
+def test_client_diff_anchors_drops_a_locally_attribute_forced_text_hunk(
+    tmp_path: Path,
+) -> None:
+    """A local `diff` attribute forcing a binary blob to text yields no anchor.
+
+    GitHub only ever resolves `.gitattributes` from the tracked commits it
+    diffs; it has no access to `$GIT_DIR/info/attributes`, so a local rule
+    such as `file.bin diff` can make `patch()` emit a textual hunk for
+    NUL-containing content that GitHub's own diff still renders as binary.
+    Anchoring a comment to such a hunk would make the create-review API
+    reject the whole atomic review with a 422, so `diff_anchors` must read
+    each anchor's blob back by its content-addressed object id and drop it
+    when that content is actually binary, regardless of what local
+    attribute forced a hunk. An ordinary modified file and a deleted file
+    changed in the same commit must both still keep their anchors: a
+    deletion's `index <sha>..0000000` line puts its one real blob id on the
+    old/LEFT side, the opposite side from an added file, so this also
+    guards against the filter checking the wrong side of that pair.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\n")
+    (repo / "gone.py").write_text("one\ntwo\n")
+    _git(git, ["add", "file.py", "gone.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("BRAVO\n")
+    (repo / "file.bin").write_bytes(b"bin\x00ary")
+    (repo / "gone.py").unlink()
+    _git(git, ["add", "file.py", "file.bin", "gone.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".git" / "info" / "attributes").write_text("file.bin diff\n")
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("file.py", "file.bin", "gone.py"))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors} == {
+        ("file.py", "LEFT"),
+        ("file.py", "RIGHT"),
+        ("gone.py", "LEFT"),
+    }
+
+
+def test_client_diff_anchors_drops_a_head_tree_attribute_off_the_worktree(
+    tmp_path: Path,
+) -> None:
+    """A `-diff` attribute committed at head drops anchors, off the worktree.
+
+    `patch()` resolves `.gitattributes` from whatever ref the local
+    worktree happens to have checked out, not from the base or head commit
+    it diffs. A PR whose head commit adds `file.txt -diff` while the
+    worktree stays checked out at base therefore still renders `file.txt`
+    as an ordinary textual hunk — the content itself has no NUL byte, so
+    the content check alone would accept it — even though GitHub resolves
+    that same tracked attribute from head and would refuse to anchor a
+    comment there. `diff_anchors` must check the base and head trees
+    themselves, independently of the checked-out worktree, and drop every
+    anchor for such a path while keeping anchors for an ordinary file
+    changed in the same commit.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "tree-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.txt").write_text("line1\nline2\nline3\n")
+    (repo / "other.py").write_text("alpha\n")
+    _git(git, ["add", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".gitattributes").write_text("file.txt -diff\n")
+    (repo / "file.txt").write_text("line1\nCHANGED\nline3\n")
+    (repo / "other.py").write_text("BRAVO\n")
+    _git(git, ["add", ".gitattributes", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["checkout", "-q", base], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(
+        base, head, paths=("file.txt", "other.py", ".gitattributes")
+    )
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors if path == "file.txt"} == (
+        set()
+    )
+    assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
+
+
+def test_client_diff_anchors_ignores_a_local_override_of_a_head_tree_diff_unset(
+    tmp_path: Path,
+) -> None:
+    """A local `info/attributes` rule cannot unmask a tracked `-diff` path.
+
+    `$GIT_DIR/info/attributes` outranks a tree passed via `check-attr
+    --source`, so a local rule forcing `diff` back to `set` for a path the
+    head tree marks `-diff` could otherwise make `paths_with_diff_unset`
+    miss it -- not merely drop a valid anchor, but keep one GitHub's
+    create-review API would reject, since GitHub never resolves attributes
+    from this clone's `$GIT_DIR`. `diff_anchors` must still drop every
+    anchor for such a path while keeping anchors for an ordinary file
+    changed in the same commit.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "masked-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.txt").write_text("line1\nline2\nline3\n")
+    (repo / "other.py").write_text("alpha\n")
+    _git(git, ["add", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".gitattributes").write_text("file.txt -diff\n")
+    (repo / "file.txt").write_text("line1\nCHANGED\nline3\n")
+    (repo / "other.py").write_text("BRAVO\n")
+    _git(git, ["add", ".gitattributes", "file.txt", "other.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / ".git" / "info" / "attributes").write_text("file.txt diff\n")
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(
+        base, head, paths=("file.txt", "other.py", ".gitattributes")
+    )
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors if path == "file.txt"} == (
+        set()
+    )
+    assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
+
+
+def test_client_diff_anchors_checks_the_base_side_path_for_a_rename(
+    tmp_path: Path,
+) -> None:
+    """A base-only `-diff` rule on the pre-rename path must still drop anchors.
+
+    `diff_anchors` addresses a rename's anchors, including its `LEFT`
+    lines, under the file's head-side path. A base tree's `-diff` rule is
+    keyed to whatever path it names; a rule such as `old.txt -diff` only
+    matches `old.txt`, never `new.txt`. Checking the base tree's attribute
+    with the head-side path `new.txt` instead of the diff's own base-side
+    path `old.txt` would never match that rule, letting an anchor through
+    that GitHub's create-review API would still refuse because the base
+    tree itself marks the file `-diff`.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "rename-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "old.txt").write_text("line1\nline2\nline3\n")
+    (repo / ".gitattributes").write_text("old.txt -diff\n")
+    _git(git, ["add", "old.txt", ".gitattributes"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "old.txt").rename(repo / "new.txt")
+    (repo / "new.txt").write_text("line1\nCHANGED\nline3\n")
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-am", "rename"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("new.txt",))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert anchors == frozenset()
+
+
+def test_client_diff_anchors_degrades_to_no_anchors_without_check_attr_source(
+    tmp_path: Path,
+) -> None:
+    """An unsupported `check-attr --source` degrades to no anchors, not a crash.
+
+    `--source` was introduced in Git 2.40; the 2.25-2.39 `git-check-attr`
+    rejects it as an unknown option, and this skill's public contract
+    requires only "Git", with no minimum version. A `git` shim ahead of the
+    real one on `PATH` reproduces that exact rejection for `check-attr
+    --source` while forwarding every other subcommand to the real `git`, so
+    `diff_anchors` runs against a genuine subprocess failure rather than a
+    stubbed exception. It must treat that failure the same way
+    `blob_is_binary` treats an unreadable blob -- fail closed by dropping
+    every anchor it cannot verify -- rather than letting a Git precondition
+    error abort an otherwise publishable review. The same PR snapshot still
+    yields anchors against the real, unshimmed `git`, so this also proves
+    the failure path is exercised rather than vacuously satisfied.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "old-git-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("BRAVO\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    pull_request = _sample_pr(base, head, paths=("file.py",))
+
+    real_client = GitHubClient(CommandRunner(), repo)
+    assert real_client.diff_anchors(pull_request) != frozenset()
+
+    shim_dir = tmp_path / "old-git-bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in\n'
+        '  *" check-attr "*"--source"*)\n'
+        '    echo "error: unknown option \\`source\'" >&2\n'
+        "    exit 129\n"
+        "    ;;\n"
+        "esac\n"
+        f'exec "{git}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    old_source_env = dict(os.environ)
+    old_source_env["PATH"] = f"{shim_dir}{os.pathsep}{old_source_env.get('PATH', '')}"
+    old_git_client = GitHubClient(CommandRunner(old_source_env), repo)
+
+    assert old_git_client.diff_anchors(pull_request) == frozenset()
+
+
+def test_client_patch_ignores_a_default_global_attributes_file(
+    tmp_path: Path,
+) -> None:
+    """A default `$HOME/.config/git/attributes` rule cannot force a text hunk.
+
+    Git consults this file even with no `core.attributesFile` config
+    present anywhere, so `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` do not
+    redirect it away. `patch()` must pin `core.attributesFile=/dev/null`
+    directly so a `diff` attribute placed there cannot turn a binary blob
+    into a textual hunk the way `$GIT_DIR/info/attributes` still can
+    (covered instead by the content check in the test above, since no
+    config override reaches that file).
+    """
+    git = shutil.which("git")
+    assert git is not None
+    fake_home = tmp_path / "home"
+    (fake_home / ".config" / "git").mkdir(parents=True)
+    (fake_home / ".config" / "git" / "attributes").write_text("file.bin diff\n")
+    repo = tmp_path / "global-attr-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    (repo / "file.py").write_text("alpha\n")
+    _git(git, ["add", "file.py"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    (repo / "file.py").write_text("BRAVO\n")
+    (repo / "file.bin").write_bytes(b"bin\x00ary")
+    _git(git, ["add", "file.py", "file.bin"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    runner = CommandRunner({**os.environ, "HOME": str(fake_home)})
+    client = GitHubClient(runner, repo)
+    pull_request = _sample_pr(base, head, paths=("file.py", "file.bin"))
+
+    patch = client.patch(pull_request, max_output=1024 * 1024)
+
+    assert b"Binary files /dev/null and b/file.bin differ" in patch
+    anchors = client.diff_anchors(pull_request)
+    assert {(path, side) for path, side, _line in anchors} == {
+        ("file.py", "LEFT"),
+        ("file.py", "RIGHT"),
+    }
+
+
+def test_diff_blob_shas_maps_each_allowed_path_to_its_full_index_ids() -> None:
+    """`diff_blob_shas` reads the `--full-index` header, not any path lookup."""
+    patch = (
+        "diff --git a/file.py b/file.py\n"
+        f"index {'1' * 40}..{'2' * 40} 100644\n"
+        "--- a/file.py\n"
+        "+++ b/file.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "diff --git a/new.py b/new.py\n"
+        "new file mode 100644\n"
+        f"index {'0' * 40}..{'3' * 40}\n"
+        "--- /dev/null\n"
+        "+++ b/new.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+added\n"
+    )
+
+    shas = diff_blob_shas(patch, frozenset({"file.py", "new.py"}))
+
+    assert shas == {
+        "file.py": ("1" * 40, "2" * 40),
+        "new.py": ("0" * 40, "3" * 40),
+    }
+
+
+def test_post_review_publishes_inline_comments_in_the_same_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One create-review request carries the body and every inline comment."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+    captured: dict[str, JsonObject] = {}
+
+    def fake_text(
+        _args: list[str],
+        *,
+        input_text: str | None = None,
+        **_kwargs: object,
+    ) -> str:
+        assert input_text is not None
+        captured["payload"] = json.loads(input_text)
+        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
+
+    monkeypatch.setattr(client, "_text", fake_text)
+
+    client.post_review(
+        pull_request,
+        "REQUEST_CHANGES",
+        "review body",
+        (
+            ReviewComment(path="file.py", line=7, side="RIGHT", body="inline one"),
+            ReviewComment(path="file.py", line=3, side="LEFT", body="inline two"),
+        ),
+    )
+
+    assert captured["payload"] == {
+        "commit_id": pull_request.head_sha,
+        "body": "review body",
+        "event": "REQUEST_CHANGES",
+        "comments": [
+            {"path": "file.py", "line": 7, "side": "RIGHT", "body": "inline one"},
+            {"path": "file.py", "line": 3, "side": "LEFT", "body": "inline two"},
+        ],
+    }
+
+
+def test_post_review_serializes_unicode_without_ascii_escaping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    r"""Unicode review text is sent as UTF-8, not inflated by `\uXXXX` escapes."""
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+    captured: dict[str, str] = {}
+
+    def fake_text(
+        _args: list[str],
+        *,
+        input_text: str | None = None,
+        **_kwargs: object,
+    ) -> str:
+        assert input_text is not None
+        captured["input_text"] = input_text
+        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
+
+    monkeypatch.setattr(client, "_text", fake_text)
+
+    client.post_review(pull_request, "COMMENT", "レビュー本文" * 100)
+
+    assert "レビュー" in captured["input_text"]
+    assert "\\u" not in captured["input_text"]
+
+
+def test_post_review_rejects_a_request_exceeding_the_command_input_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request too large for the command transport fails before any write.
+
+    Each comment body is already bounded individually by `review.py`, but a
+    large number of individually valid comments can still serialize past the
+    command runner's input cap; that must fail closed locally rather than as
+    a confusing subprocess error, and without ever touching the network.
+    """
+    client = GitHubClient(CommandRunner(), tmp_path)
+    pull_request = _sample_pr("a" * 40, "b" * 40)
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> str:
+        msg = "the oversized request must never reach the transport"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(client, "_text", fail_if_called)
+    oversized_comments = tuple(
+        ReviewComment(path="file.py", line=index, side="RIGHT", body="x" * 65_000)
+        for index in range(1, 70)
+    )
+
+    with pytest.raises(LooprError) as captured:
+        client.post_review(pull_request, "COMMENT", "body", oversized_comments)
+
+    assert captured.value.category == "input"

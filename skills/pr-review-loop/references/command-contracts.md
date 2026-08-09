@@ -49,6 +49,30 @@ Success fields are `schema_version`, `command`, `repository`, `pr_number`,
 changes-request result has non-empty findings and an implementation prompt.
 Each finding contains `id`, `title`, `description`, and `required_change`.
 
+Each blocking finding is `{id, title, description, required_change, location}`,
+where `location` is `null` for a global or cross-file finding or
+`{path, line, side}` with `side` of `LEFT` (base file) or `RIGHT` (head file)
+for a line-specific one. `side` is `RIGHT` for an added or unchanged line
+(head file) or `LEFT` for a removed line (base file); an unchanged context line
+is always `RIGHT`, matching GitHub's own review-comment semantics.
+
+The command freezes repository/PR/base/head identity, builds evidence from
+immutable Git objects, validates Oracle output strictly, cleans its private
+temporary files, and posts one review anchored with the reviewed `commit_id`.
+Publication is inline-first: every proposed `location` is revalidated against
+the frozen base-to-head diff, and a finding whose exact path/side/line the
+reviewed diff contains becomes an inline review comment submitted in that same
+create-review request. A finding is never relocated to a nearby line; an
+absent, malformed, stale, or non-diff anchor simply leaves its finding in the
+aggregate body, alongside the verdict and any global reasoning. Each finding
+is published exactly once, either inline or in the body. Self-authored PRs use
+a `COMMENT` event; other PRs use the corresponding formal event. The returned
+`verdict` is Oracle's canonical `APPROVE` or `REQUEST_CHANGES` result and is
+not inferred from GitHub's formal review state. A detected post-write race
+returns stale-state failure; formal stale reviews are dismissed where GitHub
+permits, while stale `COMMENT` reviews remain as commit-anchored audit
+comments.
+
 The command requires an open, non-draft, same-repository GitHub.com PR, exact
 base/head binding, unambiguous `origin`, Oracle, and GitHub permissions. It
 freezes identity, builds immutable Git evidence, validates Oracle output, and

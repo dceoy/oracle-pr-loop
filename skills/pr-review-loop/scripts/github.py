@@ -6,7 +6,9 @@ import json
 import operator
 import os
 import re
+import tempfile
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -20,13 +22,16 @@ from .models import (
     LooprError,
     PullRequest,
     PullRequestIdentity,
+    ReviewComment,
 )
-from .process import CommandError
+from .process import MAX_INPUT, CommandError
 
 if TYPE_CHECKING:
     from .process import CommandRunner
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+HUNK_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+INDEX_RE = re.compile(r"\Aindex ([0-9a-f]{40})\.\.([0-9a-f]{40})")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 OWNER_REPO_PART_COUNT = 2
 LS_TREE_FIELD_COUNT = 4
@@ -36,6 +41,15 @@ MAX_ISSUE_COMMENTS = 30
 MAX_ISSUE_COMMENT_BYTES = 20_000
 MAX_ISSUE_COMMENTS_TOTAL_BYTES = 300_000
 MAX_ISSUE_BODY_BYTES = 200_000
+MAX_ANCHOR_PATCH_BYTES = 2 * 1024 * 1024
+MAX_ANCHOR_BLOB_BYTES = 2 * 1024 * 1024
+MAX_ANCHOR_ATTR_BYTES = 2 * 1024 * 1024
+MAX_GITHUB_DIFF_BYTES = 1 * 1024 * 1024
+MAX_GITHUB_DIFF_LINES = 20_000
+MAX_GITHUB_FILE_DIFF_BYTES = 500 * 1024
+MAX_GITHUB_FILE_DIFF_LINES = 20_000
+NULL_SHA = "0" * 40
+BODY_MARKERS = frozenset({" ", "+", "-", "\\"})
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
     "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
@@ -297,6 +311,289 @@ def validate_path(path: str) -> str:
     return path
 
 
+def _header_path(value: str, prefix: str) -> str | None:
+    """Return one safe diff-header path, or None when it names no usable file.
+
+    Git appends a tab after the path in `---`/`+++` lines when the path
+    contains a space, to separate it from a trailing timestamp field; that
+    separator is dropped here so it is never mistaken for an unsafe control
+    character in the path itself.
+
+    Returns:
+        The prefix-stripped path, or None for /dev/null, a quoted path, or a
+        path that is unsafe to address.
+    """
+    path = value.split("\t", 1)[0]
+    if not path.startswith(prefix):
+        return None
+    try:
+        return validate_path(path.removeprefix(prefix))
+    except LooprError:
+        return None
+
+
+@dataclass
+class _DiffCursor:
+    """Mutable scan position inside one unified-diff file section."""
+
+    path: str | None = None
+    old_line: int = 0
+    new_line: int = 0
+    in_hunk: bool = False
+
+
+def _scan_body_line(
+    marker: str,
+    cursor: _DiffCursor,
+    anchors: set[tuple[str, str, int]],
+    allowed_paths: frozenset[str],
+) -> None:
+    """Record the anchors one hunk body line contributes and advance the cursor."""
+    if marker == "\\":
+        return
+    path = cursor.path
+    if path is not None and path in allowed_paths:
+        if marker == "-":
+            anchors.add((path, "LEFT", cursor.old_line))
+        if marker in {" ", "+"}:
+            anchors.add((path, "RIGHT", cursor.new_line))
+    if marker in {" ", "-"}:
+        cursor.old_line += 1
+    if marker in {" ", "+"}:
+        cursor.new_line += 1
+
+
+def diff_anchors(
+    patch: str, allowed_paths: frozenset[str]
+) -> frozenset[tuple[str, str, int]]:
+    """Enumerate every `(path, side, line)` GitHub can anchor a comment to.
+
+    Only lines that the frozen base-to-head patch itself contains are
+    enumerated, matching GitHub's own line-comment semantics: added and
+    unchanged/context lines on `RIGHT` with their head-file line numbers, and
+    only removed lines on `LEFT` with their base-file line numbers. A context
+    line is never a valid `LEFT` anchor. A file is addressed by the path it
+    has at head, which is the path GitHub's review API expects, so a rename's
+    `LEFT` lines and a deletion's lines stay addressable. Any path outside
+    allowed_paths, and any diff section this scanner cannot read
+    unambiguously, contributes no anchors.
+
+    Returns:
+        The anchors the reviewed diff supports.
+    """
+    anchors: set[tuple[str, str, int]] = set()
+    cursor = _DiffCursor()
+    old_path: str | None = None
+    for line in patch.split("\n"):
+        marker = line[:1]
+        if cursor.in_hunk and marker in BODY_MARKERS:
+            _scan_body_line(marker, cursor, anchors, allowed_paths)
+            continue
+        cursor.in_hunk = False
+        if line.startswith("diff --git "):
+            old_path, cursor.path = None, None
+        elif line.startswith("--- "):
+            old_path = _header_path(line.removeprefix("--- "), "a/")
+        elif line.startswith("+++ "):
+            cursor.path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+        elif (match := HUNK_RE.match(line)) is not None and cursor.path is not None:
+            cursor.old_line = int(match.group(1))
+            cursor.new_line = int(match.group(2))
+            cursor.in_hunk = True
+    return frozenset(anchors)
+
+
+def diff_base_paths(patch: str, allowed_paths: frozenset[str]) -> dict[str, str]:
+    """Map each allowed head path to the base path its own diff section names.
+
+    `diff_anchors` addresses every anchor, including a rename's `LEFT`
+    lines, by the file's head-side path. A rename's base-side path is a
+    different string, so validating that file's `diff` attribute at the
+    base commit against the head-side path would check the wrong
+    `.gitattributes` pattern and miss a base-only `-diff` rule declared
+    for the old name.
+
+    Returns:
+        Each allowed head path mapped to its own section's base path, or
+        to itself when the section names no base path at all (an
+        addition) or the same path on both sides (no rename).
+    """
+    base_paths: dict[str, str] = {}
+    old_path: str | None = None
+    for line in patch.split("\n"):
+        if line.startswith("diff --git "):
+            old_path = None
+        elif line.startswith("--- "):
+            old_path = _header_path(line.removeprefix("--- "), "a/")
+        elif line.startswith("+++ "):
+            head_path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+            if head_path is not None and head_path in allowed_paths:
+                base_paths[head_path] = old_path or head_path
+    return base_paths
+
+
+def _physical_line_count(value: bytes) -> int:
+    """Count LF-delimited physical lines in one exact byte sequence.
+
+    Returns:
+        The number of physical lines in ``value``.
+    """
+    return value.count(b"\n") + int(bool(value and not value.endswith(b"\n")))
+
+
+def _diff_section_bytes(raw_lines: list[bytes], start: int, end: int) -> bytes:
+    """Return one section, retaining its separator before the next one.
+
+    Returns:
+        The exact bytes belonging to the section.
+    """
+    value = b"\n".join(raw_lines[start:end])
+    if end < len(raw_lines):
+        value += b"\n"
+    return value
+
+
+def _advance_diff_section_state(
+    line: str,
+    old_path: str | None,
+    head_path: str | None,
+    in_hunk: bool,
+) -> tuple[str | None, str | None, bool]:
+    """Update one section's paths and hunk state from one diff line.
+
+    Returns:
+        The updated base path, head path, and hunk-state flag.
+    """
+    if in_hunk:
+        if line[:1] in BODY_MARKERS:
+            return old_path, head_path, True
+        in_hunk = False
+    if line.startswith("--- "):
+        old_path = _header_path(line.removeprefix("--- "), "a/")
+    elif line.startswith("+++ "):
+        head_path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+    elif HUNK_RE.match(line) is not None:
+        in_hunk = True
+    return old_path, head_path, in_hunk
+
+
+def _diff_sections(
+    patch: bytes,
+    text: str,
+) -> tuple[tuple[str | None, bytes], ...]:
+    """Return each canonical diff section with its head-side path and bytes.
+
+    The text and byte views are split on LF together so the section sizes are
+    measured from the exact bytes Git emitted, while the existing safe header
+    parser determines the same head-side path used by ``diff_anchors``.
+    """
+    raw_lines = patch.split(b"\n")
+    text_lines = text.split("\n")
+    if len(raw_lines) != len(text_lines):
+        return ()
+
+    sections: list[tuple[str | None, bytes]] = []
+    section_start: int | None = None
+    old_path: str | None = None
+    head_path: str | None = None
+    in_hunk = False
+    for index, line in enumerate(text_lines):
+        if line.startswith("diff --git "):
+            if section_start is not None:
+                sections.append((
+                    head_path,
+                    _diff_section_bytes(raw_lines, section_start, index),
+                ))
+            section_start = index
+            old_path = None
+            head_path = None
+            in_hunk = False
+            continue
+        if section_start is None:
+            continue
+        old_path, head_path, in_hunk = _advance_diff_section_state(
+            line,
+            old_path,
+            head_path,
+            in_hunk,
+        )
+
+    if section_start is not None:
+        sections.append((
+            head_path,
+            _diff_section_bytes(raw_lines, section_start, len(raw_lines)),
+        ))
+    return tuple(sections)
+
+
+def _diff_size_safe_paths(
+    patch: bytes,
+    text: str,
+    allowed_paths: frozenset[str],
+) -> frozenset[str]:
+    """Return changed paths whose local diff remains fully GitHub-visible.
+
+    GitHub can omit portions of a pull-request diff once the aggregate or a
+    single file reaches its byte or line limit. Inline comments for those
+    paths are therefore rejected before publication; the aggregate review
+    body remains responsible for their findings. Equality with any limit is
+    treated as unsafe because the server may truncate at that boundary.
+    """
+    if len(patch) >= MAX_GITHUB_DIFF_BYTES or _physical_line_count(patch) >= (
+        MAX_GITHUB_DIFF_LINES
+    ):
+        return frozenset()
+
+    oversized_paths: set[str] = set()
+    for path, section in _diff_sections(patch, text):
+        if path in allowed_paths and (
+            len(section) >= MAX_GITHUB_FILE_DIFF_BYTES
+            or _physical_line_count(section) >= MAX_GITHUB_FILE_DIFF_LINES
+        ):
+            oversized_paths.add(path)
+    return frozenset(path for path in allowed_paths if path not in oversized_paths)
+
+
+def diff_blob_shas(
+    patch: str, allowed_paths: frozenset[str]
+) -> dict[str, tuple[str, str]]:
+    """Map each allowed head path to its base/head full blob object ids.
+
+    `--full-index` makes every file section's `index <old>..<new>` header
+    name the exact pre-image/post-image blob Git diffed, independently of
+    whatever attribute-driven text/binary decision produced the hunks that
+    follow it. A caller can read each id back directly by object id (see
+    `blob_is_binary`) to confirm that content, rather than trusting whatever
+    text/binary call the attribute-influenced hunk already made.
+
+    Returns:
+        Each allowed path's `(old_sha, new_sha)`, using `NULL_SHA` for a
+        side with no blob (an addition or deletion).
+    """
+    shas: dict[str, tuple[str, str]] = {}
+    pending: tuple[str, str] | None = None
+    old_path: str | None = None
+    in_hunk = False
+    for line in patch.split("\n"):
+        marker = line[:1]
+        if in_hunk and marker in BODY_MARKERS:
+            continue
+        in_hunk = False
+        if line.startswith("diff --git "):
+            pending, old_path = None, None
+        elif (match := INDEX_RE.match(line)) is not None:
+            pending = (match.group(1), match.group(2))
+        elif line.startswith("--- "):
+            old_path = _header_path(line.removeprefix("--- "), "a/")
+        elif line.startswith("+++ "):
+            path = _header_path(line.removeprefix("+++ "), "b/") or old_path
+            if path is not None and path in allowed_paths and pending is not None:
+                shas[path] = pending
+        elif HUNK_RE.match(line) is not None:
+            in_hunk = True
+    return shas
+
+
 def parse_json_object(text: str, *, category: str) -> JsonObject:
     """Decode exactly one JSON object without repairing malformed data.
 
@@ -553,7 +850,13 @@ class _ImmutableGitMixin:
         })
         return env
 
-    def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
+    def git_bytes(
+        self,
+        args: list[str],
+        *,
+        max_output: int,
+        input_text: str | None = None,
+    ) -> bytes:
         """Read immutable Git data with a strict output bound.
 
         Returns:
@@ -568,6 +871,7 @@ class _ImmutableGitMixin:
                 cwd=self.repo_dir,
                 env=self._git_env(),
                 max_output=max_output,
+                input_text=input_text,
             ).stdout
         except CommandError as exc:
             raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
@@ -720,6 +1024,156 @@ class _ImmutableGitMixin:
                 "Git blob size changed during immutable evidence read",
             )
         return data
+
+    def blob_is_binary(self, sha: str, *, max_output: int) -> bool:
+        """Return whether the blob at sha contains a NUL byte.
+
+        Reading an object by its content-addressed id resolves it straight
+        from the object store, with no attribute lookup of any kind, so no
+        local `diff` attribute override can make binary content read back as
+        text here. A blob Git cannot read, or one too large to sample within
+        max_output, is treated as binary so a caller never trusts anchors
+        tied to it without an actual content check. This deliberately scans
+        further (the whole blob, up to max_output) than Git's own default
+        heuristic (a fixed leading sample) and refuses instead of sampling a
+        prefix when a blob exceeds max_output: both only ever cost a
+        legitimate text file its inline anchors, never risk anchoring a
+        comment GitHub's create-review API would reject.
+
+        Returns:
+            Whether the blob is unreadable, oversized, or contains a NUL
+            byte.
+        """
+        try:
+            data = self.git_bytes(["cat-file", "blob", sha], max_output=max_output)
+        except LooprError:
+            return True
+        return b"\0" in data
+
+    def _check_attr_diff_isolated(
+        self, sha: str, paths: frozenset[str], *, max_output: int
+    ) -> bytes:
+        """Run `check-attr --source=sha diff` against an isolated Git directory.
+
+        The isolated directory is a throwaway bare repository whose
+        `objects/info/alternates` points at this clone's real object store
+        (resolved from `git rev-parse --git-common-dir`), so `--source` can
+        resolve sha's tree while no local `$GIT_DIR/info/attributes` --
+        this clone's own or a linked worktree's shared one -- exists to
+        contend with it.
+
+        Returns:
+            The command's raw `-z`-delimited stdout.
+        """
+        common_dir = Path(
+            self
+            .git_bytes(["rev-parse", "--git-common-dir"], max_output=4096)
+            .decode("utf-8", "strict")
+            .strip()
+        )
+        if not common_dir.is_absolute():
+            common_dir = self.repo_dir / common_dir
+        objects_dir = common_dir.resolve(strict=True) / "objects"
+        with tempfile.TemporaryDirectory(prefix="looprattrs-") as tmp_dir:
+            isolated_git_dir = Path(tmp_dir) / "attrs.git"
+            self.git_bytes(
+                ["init", "--quiet", "--bare", "--template=", str(isolated_git_dir)],
+                max_output=4096,
+            )
+            alternates = isolated_git_dir / "objects" / "info" / "alternates"
+            alternates.parent.mkdir(parents=True, exist_ok=True)
+            alternates.write_text(f"{objects_dir}\n", encoding="utf-8")
+            return self.git_bytes(
+                [
+                    "--git-dir",
+                    str(isolated_git_dir),
+                    "-c",
+                    "core.attributesFile=/dev/null",
+                    "check-attr",
+                    "--source",
+                    sha,
+                    "-z",
+                    "--stdin",
+                    "diff",
+                ],
+                max_output=max_output,
+                input_text="".join(f"{path}\0" for path in paths),
+            )
+
+    def paths_with_diff_unset(
+        self, sha: str, paths: frozenset[str], *, max_output: int
+    ) -> frozenset[str]:
+        """Return every path whose `diff` attribute is `unset` in the tree at sha.
+
+        `--source=sha` resolves tracked `.gitattributes` blobs from the
+        frozen commit tree itself, not the ambient worktree, so a checkout
+        left on an unrelated ref (for example, still on the PR's base while
+        its head declares `<path> -diff`) cannot hide an attribute the
+        reviewed tree actually declares. `$GIT_DIR/info/attributes` outranks
+        every other attribute source, including a tree passed via
+        `--source`, so a local rule there (present only in this clone, never
+        visible to GitHub) could otherwise force `diff` back to `set` for a
+        path the reviewed tree itself marks `-diff` -- masking a real
+        non-diffable path rather than merely missing one, and letting an
+        anchor through that GitHub's create-review API would reject.
+        `check-attr` therefore never runs against this clone's own Git
+        directory: a throwaway bare repository, created fresh for this call
+        with an empty `info/` directory and an `objects/info/alternates`
+        pointing at this clone's own object store (resolved from `git
+        rev-parse --git-common-dir`, so a linked worktree's shared
+        `info/attributes` is bypassed too, not just this checkout's), gives
+        `--source` a tree to resolve with no local attribute file able to
+        contend with it. `-c core.attributesFile=/dev/null` closes the
+        remaining default-global-attributes gap, since the throwaway
+        directory's own freshly created config cannot be assumed to lack
+        one.
+
+        `--source` itself requires Git 2.40; an older `check-attr` rejects
+        it as an unknown option and the command fails before reporting
+        anything, and this skill's public contract requires only "Git",
+        with no minimum version. Treating every candidate path as `unset`
+        when the command -- or building its isolated Git directory --
+        fails is the same fail-closed answer `blob_is_binary` gives an
+        unreadable blob: it only ever drops anchors this call cannot
+        verify, instead of raising a precondition error that would abort
+        an otherwise publishable review.
+
+        Returns:
+            The subset of paths whose `diff` attribute resolves to `unset`
+            at sha, or every path given when `check-attr` itself failed.
+
+        Raises:
+            LooprError: `check-attr` returned a malformed or non-UTF-8
+                `-z` record.
+        """
+        if not paths:
+            return frozenset()
+        try:
+            output = self._check_attr_diff_isolated(sha, paths, max_output=max_output)
+        except (LooprError, OSError, UnicodeDecodeError):
+            return frozenset(paths)
+        fields = output.split(b"\0")
+        if fields and fields[-1] == b"":
+            fields = fields[:-1]
+        if len(fields) % 3 != 0:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "git",
+                "git check-attr returned a malformed -z record",
+            )
+        unset: set[str] = set()
+        for index in range(0, len(fields), 3):
+            path_bytes, _attribute, value = fields[index : index + 3]
+            if value == b"unset":
+                try:
+                    unset.add(path_bytes.decode("utf-8", "strict"))
+                except UnicodeDecodeError as exc:
+                    raise LooprError(
+                        EXIT_PRECONDITION,
+                        "git",
+                        "git check-attr returned a non-UTF-8 path",
+                    ) from exc
+        return frozenset(unset)
 
 
 class GitHubClient(_ImmutableGitMixin):
@@ -1036,21 +1490,169 @@ class GitHubClient(_ImmutableGitMixin):
         )
 
     def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Read the exact base-to-head merge-base patch.
+        """Read the exact base-to-head merge-base patch in canonical form.
+
+        Every format-affecting option is pinned explicitly to Git's own
+        defaults, so a repository-local `diff.*` setting (`GIT_CONFIG_GLOBAL`
+        and `GIT_CONFIG_NOSYSTEM` already exclude global/system config, but
+        not the repository's own `.git/config`) cannot change the headers or
+        hunk context `diff_anchors` reads, or silently diverge from the diff
+        GitHub's own review API validates comment anchors against.
+        `--indent-heuristic` pins Git's own default hunk-boundary shifting so
+        a local `diff.indentHeuristic=false` cannot move a hunk's boundary.
+        `-l0` pins rename detection to always run its exhaustive search, so a
+        local `diff.renameLimit` cannot silently fall back to reporting a
+        rename as an unrelated delete-and-add pair, which would replace a
+        small rename hunk's anchors with whole-file delete/add anchors.
+        `-c core.attributesFile=/dev/null` closes the global-attributes gap
+        `GIT_CONFIG_GLOBAL` leaves open: Git consults a default global
+        attributes file (`$XDG_CONFIG_HOME/git/attributes`, else
+        `$HOME/.config/git/attributes`) even with no global config present,
+        and a `diff` attribute there can make binary content read back as a
+        textual hunk. `$GIT_DIR/info/attributes` and any system attributes
+        file have no equivalent config override, so `diff_anchors`
+        additionally verifies every anchor's blob by content, independently
+        of any attribute.
+        `-c core.quotePath=false` pins Git's own default of emitting a raw
+        `a/`/`b/` header even for a non-ASCII path; a repository-local
+        `core.quotePath=true` would otherwise C-quote that header (wrapping
+        it in double quotes and octal-escaping each non-ASCII byte), which
+        `_header_path()` cannot parse as a prefixed path, and so drops every
+        anchor for that file to the aggregate body.
+        `-c diff.suppressBlankEmpty=false` pins Git's own default of a lone
+        space on an empty context line; a repository-local
+        `diff.suppressBlankEmpty=true` would otherwise emit that line with no
+        leading character at all, which `diff_anchors` cannot distinguish
+        from the end of the hunk and so drops every anchor that follows it.
 
         Returns:
             The patch's raw bytes.
         """
         return self.git_bytes(
             [
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                "core.quotePath=false",
+                "-c",
+                "diff.suppressBlankEmpty=false",
                 "diff",
+                "--no-color",
                 "--no-ext-diff",
                 "--no-textconv",
                 "--full-index",
                 "--find-renames",
+                "-l0",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--unified=3",
+                "--inter-hunk-context=0",
+                "--diff-algorithm=myers",
+                "--indent-heuristic",
                 f"{pull_request.base_sha}...{pull_request.head_sha}",
             ],
             max_output=max_output,
+        )
+
+    def diff_anchors(
+        self, pull_request: PullRequest
+    ) -> frozenset[tuple[str, str, int]]:
+        """Enumerate the comment anchors the frozen base-to-head diff supports.
+
+        A local `diff` attribute (from `$GIT_DIR/info/attributes`, global or
+        system attributes, or an uncommitted worktree `.gitattributes` edit)
+        can make `patch()` emit a textual hunk for content GitHub's own diff
+        still treats as binary, since GitHub never sees any attribute source
+        outside the repository's tracked, committed tree. Anchoring a
+        comment to such a hunk would make GitHub's create-review API reject
+        the whole atomic review with a 422, so every anchor's blob is read
+        back by its content-addressed object id — a lookup no attribute
+        source can influence — and dropped unless that content actually
+        lacks a NUL byte.
+
+        That content check alone is not enough: a tracked `.gitattributes`
+        edit committed at base or head, but not checked out in the ambient
+        worktree `patch()` ran against, can mark a path `-diff` in the
+        reviewed tree while leaving it looking like ordinary text both in
+        `patch()`'s hunk and in the blob's own bytes. GitHub resolves that
+        same tracked attribute from base and head directly, so it would
+        still refuse to anchor a comment there. Every candidate path is
+        therefore also checked against the base and head trees themselves,
+        independently of the worktree, and dropped whenever either tree
+        marks it `-diff`.
+
+        A rename's anchors are addressed by the file's head-side path (see
+        `diff_anchors`), but a `-diff` rule the base tree declares for that
+        file is keyed to its base-side path, which can differ from the
+        head-side path across the rename. The base tree is therefore
+        checked with each candidate's own base-side path from
+        `diff_base_paths`, not with the head-side path used to address the
+        anchor, so a base-only rule on the pre-rename name still drops the
+        anchor.
+
+        Returns:
+            The anchors, restricted to the snapshot's validated changed
+            paths, confirmed non-binary by content, and not marked `-diff`
+            in either the base or head tree.
+
+        Raises:
+            LooprError: The patch is not UTF-8.
+        """
+        patch = self.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
+        try:
+            text = patch.decode("utf-8", "strict")
+        except UnicodeDecodeError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "patch is not UTF-8",
+            ) from exc
+        allowed_paths = frozenset(pull_request.changed_paths)
+        size_safe_paths = _diff_size_safe_paths(patch, text, allowed_paths)
+        if not size_safe_paths:
+            return frozenset()
+        anchors = diff_anchors(text, size_safe_paths)
+        shas = diff_blob_shas(text, size_safe_paths)
+        binary_by_sha: dict[str, bool] = {}
+
+        def is_binary(sha: str) -> bool:
+            if sha == NULL_SHA:
+                return False
+            if sha not in binary_by_sha:
+                binary_by_sha[sha] = self.blob_is_binary(
+                    sha, max_output=MAX_ANCHOR_BLOB_BYTES
+                )
+            return binary_by_sha[sha]
+
+        candidate_paths = frozenset(path for path, _side, _line in anchors)
+        base_paths = diff_base_paths(text, candidate_paths)
+        head_paths_by_base_path: dict[str, list[str]] = {}
+        for head_path in candidate_paths:
+            head_paths_by_base_path.setdefault(
+                base_paths.get(head_path, head_path), []
+            ).append(head_path)
+        base_forced = self.paths_with_diff_unset(
+            pull_request.base_sha,
+            frozenset(head_paths_by_base_path),
+            max_output=MAX_ANCHOR_ATTR_BYTES,
+        )
+        attribute_forced = frozenset(
+            head_path
+            for base_path in base_forced
+            for head_path in head_paths_by_base_path[base_path]
+        ) | self.paths_with_diff_unset(
+            pull_request.head_sha,
+            candidate_paths,
+            max_output=MAX_ANCHOR_ATTR_BYTES,
+        )
+
+        return frozenset(
+            (path, side, line)
+            for path, side, line in anchors
+            if path not in attribute_forced
+            and not is_binary(
+                shas.get(path, (NULL_SHA, NULL_SHA))[1 if side == "RIGHT" else 0]
+            )
         )
 
     def tracked_paths(self, pull_request: PullRequest) -> tuple[str, ...]:
@@ -1066,8 +1668,13 @@ class GitHubClient(_ImmutableGitMixin):
         pull_request: PullRequest,
         event: str,
         body: str,
+        comments: tuple[ReviewComment, ...] = (),
     ) -> tuple[int, JsonObject]:
-        """Post one aggregate review anchored to the frozen head SHA.
+        """Post one review, with any inline comments, anchored to the frozen head.
+
+        The aggregate body and every inline comment are published by the same
+        create-review request, so publication stays a single atomic write that
+        GitHub either accepts whole or rejects whole.
 
         Returns:
             The posted review's ID and the raw GitHub response.
@@ -1080,6 +1687,15 @@ class GitHubClient(_ImmutableGitMixin):
             "body": body,
             "event": event,
         }
+        if comments:
+            payload["comments"] = [comment.as_payload() for comment in comments]
+        serialized = json.dumps(payload, ensure_ascii=False)
+        if len(serialized.encode("utf-8")) > MAX_INPUT:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "input",
+                "serialized review request exceeds the command input bound",
+            )
         data = parse_json_object(
             self._text(
                 [
@@ -1095,7 +1711,7 @@ class GitHubClient(_ImmutableGitMixin):
                     "--input",
                     "-",
                 ],
-                input_text=json.dumps(payload),
+                input_text=serialized,
             ),
             category="github_schema",
         )

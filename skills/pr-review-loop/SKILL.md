@@ -90,27 +90,48 @@ follow the PR workflow below; the PR commands have no Issue-specific state.
 
 ## Triaging blocking findings
 
-`review` returns blocking findings and an implementation prompt. Do not
+`review` returns `blocking_findings` as an array of `{id, title, description,
+required_change, location}` plus one `implementation_prompt`. `location` is
+`null` for a global or cross-file finding, or `{path, line, side}` when the
+finding is anchored to a diff line; anchored findings are published as inline
+review comments and unanchored ones stay in the aggregate review body. Do not
 implement every finding verbatim; triage each distinct defect against the
 exact reviewed head and current code.
 
 For every distinct finding:
 
-1. Compare it with the exact reviewed head, not a stale mental model of the
-   diff.
-2. Deduplicate findings describing the same underlying defect, matching the
-   finding ID first and then the file/behavior.
-3. Classify it as exactly one of:
+1. Compare it against the exact reviewed `head_sha` and the current code, not
+   a stale mental model of the diff.
+2. Deduplicate findings that describe the same underlying defect (merge by
+   matching `id` first, then by matching file/behavior); track one disposition
+   per distinct defect even if several findings named it.
+3. Classify the distinct finding as exactly one of:
    - `fix` — valid and applicable; implement the smallest sufficient change;
-   - `already_addressed` — current code already satisfies it; record the
-     evidence;
+   - `already_addressed` — current code already satisfies the requested
+     behavior; note the evidence (file/line or behavior) rather than editing;
    - `outdated` — the referenced problem no longer exists at the reviewed
-     head; record why;
-   - `clarify` — the request is ambiguous or requires unavailable information;
-   - `defer` — valid but out of scope or unsafe to address in this pull
-     request.
-4. Edit only for `fix` findings and keep each edit scoped to that finding.
-5. Never fabricate a fix or approval for `clarify` or `defer` findings.
+     head; note why;
+   - `clarify` — the requested change is ambiguous, contradictory, or needs
+     information the host does not have;
+   - `defer` — the concern is valid but out of scope for this pull request, or
+     cannot be safely addressed now.
+4. Edit code only for `fix` findings, and keep every edit scoped to blocking
+   findings — no incidental cleanup.
+5. Run normal repository QA after edits.
+6. Never fabricate a fix or manufacture an approval for `clarify` or `defer`
+   findings; leave them for the user or a follow-up.
+7. Call `submit` only when triage produced at least one real workspace patch
+   to submit.
+8. After a successful `submit`, run a fresh `review` before deciding the PR is
+   done.
+9. If triage produced no `fix` disposition — every blocking finding resolved
+   to `already_addressed`, `outdated`, `clarify`, or `defer` — stop the loop
+   instead of calling `submit` or re-running `review` on the unchanged head.
+   Report each disposition with its evidence. A formal GitHub
+   `REQUEST_CHANGES` review may then be handed to the user or a maintainer; a
+   self-authored `COMMENT` publication remains the commit-anchored audit of
+   Oracle's canonical result. This skill never dismisses or overrides either
+   publication on the host's behalf.
 
 ## Iteration and stop conditions
 
@@ -125,3 +146,35 @@ exact repository and head binding at every iteration.
 
 The [command contract](references/command-contracts.md) defines invocation
 syntax, JSON fields, exit classes, preconditions, and command side effects.
+
+## Internal commands
+
+```console
+python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
+```
+
+`bootstrap` requires an open, same-repository GitHub Issue and Oracle with an authenticated browser profile. It emits one JSON object bound to the Issue's `updatedAt` and the base branch's exact commit SHA, and never edits, commits, pushes, or creates a pull request.
+
+```console
+python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
+```
+
+`review` requires an open, non-draft, same-repository GitHub.com PR; exact base/head binding; Oracle with an authenticated browser profile; and ordinary GitHub CLI authentication. It emits one JSON object on stdout and never edits, commits, pushes, or launches an implementation agent. Oracle/ChatGPT supplies the independent `APPROVE` or `REQUEST_CHANGES` verdict; the authenticated GitHub user publishes a commit-anchored comment for self-authored PRs and the corresponding formal event otherwise. The structured verdict does not depend on GitHub's formal review state.
+
+The review prompt permits supplemental, advisory repository context from a connected GitHub app when it is selected and authorized, but the `review` invocation does not itself coordinate app selection or verify a resulting app/tool invocation; see `references/command-contracts.md` for the unchanged trust boundary. Oracle's documented CDP/browser-tools and DevTools/MCP helpers can support an operator-run ChatGPT-side preflight, while existing browser tooling, operator-assisted orchestration, or upstream Oracle integration are possible routes to a reproducible end-to-end review smoke test. Pasted `@GitHub` characters are ordinary prompt text, not app selection. Account connection and authorization are external prerequisites, and the deterministic attachment-only review path remains the only guaranteed runtime behavior until an end-to-end invocation is demonstrated.
+
+```console
+python3 skills/pr-review-loop/scripts/cli.py submit \
+  --pr <NUMBER_OR_URL> \
+  --expected-head <SHA>
+```
+
+`submit` requires local `HEAD` and the remote PR head to equal `--expected-head`. It rejects repository mismatches, forks, drafts, conflicts, whitespace failures, empty patches, unsafe refs, known credentials, gitlink changes, and stale state. It stages the complete patch, creates one hook-free unsigned commit, pushes with an explicit force-with-lease, and confirms the resulting PR head.
+
+## Contract
+
+All three commands require Python 3, Git, GitHub CLI, a matching `origin`, and ordinary GitHub authentication. Operational failures return non-zero status with a structured error object; diagnostics go only to stderr. Oracle input and output files are command-scoped private temporary files and are not retained.
+
+GitHub Enterprise and fork PRs are unsupported. CI status is not an approval gate. Production code must not launch, select, or detect Codex CLI, Claude Code, Cursor CLI, or another implementation agent.
+
+See `references/command-contracts.md` for public JSON/exit contracts and `references/operations.md` for the compact cross-client smoke-test and recovery procedure.

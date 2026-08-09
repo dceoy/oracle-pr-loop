@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, override
 
 import pytest
 from scripts import review as review_module
@@ -11,9 +11,11 @@ from scripts.models import (
     EXIT_ORACLE,
     EXIT_RACE,
     JsonObject,
+    JsonValue,
     LooprError,
     OracleReview,
     PullRequest,
+    ReviewComment,
 )
 from scripts.process import CommandRunner
 from scripts.review import execute_review
@@ -47,6 +49,20 @@ def sample_pr(*, base_sha: str = SHA_A, head_sha: str = SHA_B) -> PullRequest:
     )
 
 
+def finding(
+    identifier: str,
+    location: JsonValue = None,
+) -> JsonObject:
+    """Return one validated-shape blocking finding with the given location."""
+    return {
+        "id": identifier,
+        "title": f"Title {identifier}",
+        "description": f"Description {identifier}.",
+        "required_change": f"Change {identifier}.",
+        "location": location,
+    }
+
+
 def approve_review(pull_request: PullRequest) -> OracleReview:
     """Return a valid APPROVE result for a frozen snapshot."""
     return OracleReview(
@@ -69,6 +85,7 @@ class FakeGitHubClient:
     instance: ClassVar[FakeGitHubClient | None] = None
     snapshots: ClassVar[list[PullRequest]] = []
     authenticated_login_value: ClassVar[str] = "reviewer"
+    anchors: ClassVar[frozenset[tuple[str, str, int]]] = frozenset()
 
     def __init__(
         self,
@@ -81,6 +98,7 @@ class FakeGitHubClient:
         self.post_count = 0
         self.posted_events: list[str] = []
         self.posted_bodies: list[str] = []
+        self.posted_comments: list[tuple[ReviewComment, ...]] = []
         type(self).instance = self
         self._snapshots = list(type(self).snapshots)
 
@@ -93,6 +111,13 @@ class FakeGitHubClient:
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         """Treat fake SHAs as available commit objects."""
+
+    def diff_anchors(
+        self,
+        _pull_request: PullRequest,
+    ) -> frozenset[tuple[str, str, int]]:
+        """Return the configured anchors of the frozen fake diff."""
+        return type(self).anchors
 
     def review_event(self, pull_request: PullRequest, verdict: str) -> str:
         """Use formal events unless the fake authenticated user authored it."""
@@ -108,11 +133,13 @@ class FakeGitHubClient:
         pull_request: PullRequest,
         event: str,
         body: str,
+        comments: tuple[ReviewComment, ...] = (),
     ) -> tuple[int, JsonObject]:
         """Record a posted review anchored to the supplied head."""
         self.post_count += 1
         self.posted_events.append(event)
         self.posted_bodies.append(body)
+        self.posted_comments.append(comments)
         return 123, {"id": 123, "commit_id": pull_request.head_sha}
 
     def verify_posted(
@@ -159,13 +186,13 @@ def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize(
     ("oracle_verdict", "expected_findings"),
-    [("APPROVE", ()), ("REQUEST_CHANGES", ({"id": "F1"},))],
+    [("APPROVE", ()), ("REQUEST_CHANGES", (finding("F1"),))],
 )
 def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     oracle_verdict: str,
-    expected_findings: tuple[dict[str, str], ...],
+    expected_findings: tuple[JsonObject, ...],
 ) -> None:
     """A PR author can publish either canonical Oracle verdict as a comment."""
     initial = sample_pr()
@@ -267,7 +294,7 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
             approve_review(pull_request),
             verdict="REQUEST_CHANGES",
             review_body="Approved.",
-            blocking_findings=({"id": "F1"},),
+            blocking_findings=(finding("F1"),),
             implementation_prompt="Fix F1.",
         )
 
@@ -420,6 +447,10 @@ class _StableGitHubClient:
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         pass
 
+    @staticmethod
+    def diff_anchors(_pull_request: PullRequest) -> frozenset[tuple[str, str, int]]:
+        return frozenset()
+
     def review_event(self, pull_request: PullRequest, verdict: str) -> str:
         return "COMMENT" if pull_request.author == self.authenticated_login else verdict
 
@@ -432,6 +463,7 @@ class _StableGitHubClient:
         pull_request: PullRequest,
         _event: str,
         _body: str,
+        _comments: tuple[ReviewComment, ...] = (),
     ) -> tuple[int, JsonObject]:
         return 123, {"id": 123, "commit_id": pull_request.head_sha}
 
@@ -486,3 +518,456 @@ def test_post_write_snapshot_interrupt_dismisses_review(
 
     assert _InterruptingGitHubClient.instance is not None
     assert _InterruptingGitHubClient.instance.dismissed == [123]
+
+
+def _install_findings(
+    monkeypatch: pytest.MonkeyPatch,
+    findings: tuple[JsonObject, ...],
+    anchors: frozenset[tuple[str, str, int]],
+) -> None:
+    """Install a REQUEST_CHANGES verdict carrying findings over a fake diff."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
+    monkeypatch.setattr(FakeGitHubClient, "anchors", anchors)
+    install_orchestration_fakes(monkeypatch)
+
+    def parse_findings(_raw: str, pull_request: PullRequest) -> OracleReview:
+        return replace(
+            approve_review(pull_request),
+            verdict="REQUEST_CHANGES",
+            review_body="Overall: changes required.",
+            blocking_findings=findings,
+            implementation_prompt="Fix the findings.",
+        )
+
+    monkeypatch.setattr(review_module, "parse_review", parse_findings)
+
+
+def _published(tmp_path: Path) -> FakeGitHubClient:
+    """Run one review and return the GitHub transport that published it."""
+    execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        thinking_time="heavy",
+        runner=CommandRunner(),
+    )
+    github = FakeGitHubClient.instance
+    assert github is not None
+    return github
+
+
+def test_line_specific_finding_becomes_one_inline_comment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A finding anchored to a real diff line is published inline, not in the body."""
+    location: JsonObject = {"path": "file.py", "line": 7, "side": "RIGHT"}
+    _install_findings(
+        monkeypatch,
+        (finding("F1", location),),
+        frozenset({("file.py", "RIGHT", 7)}),
+    )
+
+    github = _published(tmp_path)
+
+    comments = github.posted_comments[0]
+    assert [(item.path, item.side, item.line) for item in comments] == [
+        ("file.py", "RIGHT", 7)
+    ]
+    assert "Title F1" in comments[0].body
+    assert "Change F1." in comments[0].body
+    assert "Title F1" not in github.posted_bodies[0]
+
+
+def test_multiple_anchored_findings_share_one_review_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every anchored finding rides the same single create-review write."""
+    _install_findings(
+        monkeypatch,
+        (
+            finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),
+            finding("F2", {"path": "file.py", "line": 3, "side": "LEFT"}),
+            finding("F3", {"path": "file.py", "line": 9, "side": "RIGHT"}),
+        ),
+        frozenset({
+            ("file.py", "RIGHT", 7),
+            ("file.py", "LEFT", 3),
+            ("file.py", "RIGHT", 9),
+        }),
+    )
+
+    github = _published(tmp_path)
+
+    assert github.post_count == 1
+    assert [
+        (item.path, item.side, item.line) for item in github.posted_comments[0]
+    ] == [
+        ("file.py", "RIGHT", 7),
+        ("file.py", "LEFT", 3),
+        ("file.py", "RIGHT", 9),
+    ]
+
+
+def test_global_findings_stay_in_the_aggregate_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A null-location finding is published in the body with no inline comment."""
+    _install_findings(monkeypatch, (finding("F1"),), frozenset())
+
+    github = _published(tmp_path)
+
+    body = github.posted_bodies[0]
+    assert github.posted_comments[0] == ()
+    assert "Findings without a diff anchor" in body
+    assert "Title F1" in body
+    assert "Overall: changes required." in body
+
+
+@pytest.mark.parametrize(
+    ("oracle_verdict", "expected_findings"),
+    [("APPROVE", ()), ("REQUEST_CHANGES", (finding("F1"),))],
+)
+def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    oracle_verdict: str,
+    expected_findings: tuple[JsonObject, ...],
+) -> None:
+    """``diff_anchors()`` never runs when no finding can be published inline.
+
+    An ``APPROVE`` verdict carries zero findings, and this ``REQUEST_CHANGES``
+    verdict's only finding has a null location; either way, no finding could
+    ever receive an inline anchor, so the diff/blob/attribute validation work
+    in ``diff_anchors()`` must not run at all.
+    """
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
+    install_orchestration_fakes(monkeypatch)
+
+    def parse_verdict(_raw: str, pull_request: PullRequest) -> OracleReview:
+        return replace(
+            approve_review(pull_request),
+            verdict=oracle_verdict,
+            blocking_findings=expected_findings,
+            implementation_prompt=("Fix F1." if expected_findings else None),
+        )
+
+    monkeypatch.setattr(review_module, "parse_review", parse_verdict)
+
+    class ForbidAnchorDiscoveryGitHubClient(FakeGitHubClient):
+        @override
+        def diff_anchors(
+            self,
+            _pull_request: PullRequest,
+        ) -> frozenset[tuple[str, str, int]]:
+            msg = "diff_anchors() must not run when no finding requests a location"
+            raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        review_module, "GitHubClient", ForbidAnchorDiscoveryGitHubClient
+    )
+
+    result = execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        thinking_time="heavy",
+        runner=CommandRunner(),
+    )
+
+    assert result.verdict == oracle_verdict
+
+
+def test_mixed_findings_are_partitioned_without_duplication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Each finding appears exactly once, inline or in the body, never both."""
+    _install_findings(
+        monkeypatch,
+        (
+            finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),
+            finding("F2"),
+        ),
+        frozenset({("file.py", "RIGHT", 7)}),
+    )
+
+    github = _published(tmp_path)
+
+    body = github.posted_bodies[0]
+    comments = github.posted_comments[0]
+    assert [item.line for item in comments] == [7]
+    assert "Title F1" in comments[0].body
+    assert "Title F2" not in comments[0].body
+    assert "Title F1" not in body
+    assert "Title F2" in body
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        {"path": "file.py", "line": 8, "side": "RIGHT"},
+        {"path": "file.py", "line": 7, "side": "LEFT"},
+        {"path": "other.py", "line": 7, "side": "RIGHT"},
+        {"path": "file.py", "line": 7, "side": "MIDDLE"},
+        {"path": "file.py", "line": "7", "side": "RIGHT"},
+        {"path": "file.py", "line": True, "side": "RIGHT"},
+        "file.py:7",
+    ],
+)
+def test_unanchorable_location_never_attaches_to_another_line(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    location: JsonValue,
+) -> None:
+    """A stale, ambiguous, or malformed anchor degrades to aggregate output."""
+    _install_findings(
+        monkeypatch,
+        (finding("F1", location),),
+        frozenset({("file.py", "RIGHT", 7)}),
+    )
+
+    github = _published(tmp_path)
+
+    assert github.posted_comments[0] == ()
+    assert "Title F1" in github.posted_bodies[0]
+
+
+def test_context_line_left_location_degrades_to_aggregate_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A LEFT location for an unchanged context line is never sent as inline.
+
+    The reviewed diff's anchor set (as `GitHubClient.diff_anchors` would
+    report it) contains this context line only as `RIGHT`, matching GitHub's
+    own review-comment semantics; a proposed `LEFT` location for it must not
+    validate, or GitHub would reject the whole atomic review with HTTP 422.
+    """
+    _install_findings(
+        monkeypatch,
+        (finding("F1", {"path": "file.py", "line": 1, "side": "LEFT"}),),
+        frozenset({("file.py", "RIGHT", 1)}),
+    )
+
+    github = _published(tmp_path)
+
+    assert github.posted_comments[0] == ()
+    assert "Title F1" in github.posted_bodies[0]
+
+
+@pytest.mark.parametrize(
+    ("side", "line"),
+    [("RIGHT", 12), ("LEFT", 4), ("RIGHT", 5)],
+)
+def test_added_deleted_and_context_lines_anchor_on_their_own_side(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    side: str,
+    line: int,
+) -> None:
+    """Added, deleted, and modified-file context lines each anchor as themselves."""
+    _install_findings(
+        monkeypatch,
+        (finding("F1", {"path": "file.py", "line": line, "side": side}),),
+        frozenset({
+            ("file.py", "RIGHT", 12),
+            ("file.py", "LEFT", 4),
+            ("file.py", "RIGHT", 5),
+        }),
+    )
+
+    github = _published(tmp_path)
+
+    comments = github.posted_comments[0]
+    assert [(item.side, item.line) for item in comments] == [(side, line)]
+
+
+def test_one_oversized_inline_comment_is_bounded_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A single inline comment over GitHub's per-comment body limit fails closed."""
+    oversized = finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"})
+    oversized["description"] = "x" * 70_000
+    _install_findings(monkeypatch, (oversized,), frozenset({("file.py", "RIGHT", 7)}))
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_ORACLE
+    assert captured.value.category == "oracle_schema"
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.post_count == 0
+
+
+def test_many_individually_bounded_inline_comments_are_not_rejected_in_aggregate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """GitHub bounds each comment body independently, not their combined size.
+
+    Each of these findings is well within GitHub's per-comment body limit on
+    its own, but their combined size exceeds it; the publication must not
+    reject the whole review over a limit GitHub's create-review contract does
+    not impose.
+    """
+    findings = tuple(
+        finding(f"F{index}", {"path": "file.py", "line": index, "side": "RIGHT"})
+        | {"description": "x" * 40_000}
+        for index in range(1, 4)
+    )
+    anchors = frozenset(("file.py", "RIGHT", index) for index in range(1, 4))
+    _install_findings(monkeypatch, findings, anchors)
+
+    github = _published(tmp_path)
+
+    assert len(github.posted_comments[0]) == len(findings)
+
+
+def test_post_write_race_dismisses_review_carrying_inline_comments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Inline publication keeps the stale-review dismissal safeguard intact."""
+    initial = sample_pr()
+    changed = sample_pr(head_sha=SHA_C)
+    _install_findings(
+        monkeypatch,
+        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
+        frozenset({("file.py", "RIGHT", 7)}),
+    )
+    FakeGitHubClient.snapshots = [initial, initial, changed]
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.posted_comments[0] != ()
+    assert FakeGitHubClient.instance.dismissed == [123]
+
+
+def test_pre_post_race_blocks_inline_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A head change before posting prevents any inline comment from being written."""
+    initial = sample_pr()
+    changed = sample_pr(head_sha=SHA_C)
+    _install_findings(
+        monkeypatch,
+        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
+        frozenset({("file.py", "RIGHT", 7)}),
+    )
+    FakeGitHubClient.snapshots = [initial, changed]
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.post_count == 0
+
+
+def test_head_change_during_anchor_discovery_blocks_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A head change while ``diff_anchors()`` runs is caught before the write.
+
+    ``_publication()`` runs the bounded diff plus per-blob/attribute
+    validation subprocesses inside ``diff_anchors()``. The pre-write
+    freshness snapshot must be taken after that work completes, immediately
+    before ``post_review()``, so a drift introduced during anchor discovery
+    is still caught instead of silently posting a review against a commit
+    that is no longer current.
+    """
+    _install_findings(
+        monkeypatch,
+        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
+        frozenset({("file.py", "RIGHT", 7)}),
+    )
+
+    class DriftDuringAnchorsGitHubClient(FakeGitHubClient):
+        """Simulate the PR head changing while `diff_anchors()` runs."""
+
+        def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
+            super().__init__(runner, repo_dir)
+            self._drifted = False
+
+        def snapshot(self) -> PullRequest:
+            """Return the original head until anchor discovery causes drift."""
+            return sample_pr(head_sha=SHA_C if self._drifted else SHA_B)
+
+        def diff_anchors(
+            self,
+            pull_request: PullRequest,
+        ) -> frozenset[tuple[str, str, int]]:
+            self._drifted = True
+            return super().diff_anchors(pull_request)
+
+    monkeypatch.setattr(review_module, "GitHubClient", DriftDuringAnchorsGitHubClient)
+    FakeGitHubClient.snapshots = []
+
+    with pytest.raises(LooprError) as captured:
+        execute_review(
+            pr_value="21",
+            repo_dir=tmp_path,
+            thinking_time="heavy",
+            runner=CommandRunner(),
+        )
+
+    assert captured.value.code == EXIT_RACE
+    assert captured.value.category == "stale_state"
+    assert DriftDuringAnchorsGitHubClient.instance is not None
+    assert DriftDuringAnchorsGitHubClient.instance.post_count == 0
+
+
+@pytest.mark.parametrize("verdict", ["APPROVE", "REQUEST_CHANGES"])
+def test_formal_event_semantics_are_unchanged_by_inline_comments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    verdict: str,
+) -> None:
+    """APPROVE and REQUEST_CHANGES still select their own formal review event."""
+    findings = (
+        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),)
+        if verdict == "REQUEST_CHANGES"
+        else ()
+    )
+    _install_findings(monkeypatch, findings, frozenset({("file.py", "RIGHT", 7)}))
+    if verdict == "APPROVE":
+        install_orchestration_fakes(monkeypatch)
+
+    result = execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        thinking_time="heavy",
+        runner=CommandRunner(),
+    )
+    github = FakeGitHubClient.instance
+    assert github is not None
+
+    assert result.verdict == verdict
+    assert github.posted_events == [verdict]
+    assert len(github.posted_comments[0]) == len(findings)

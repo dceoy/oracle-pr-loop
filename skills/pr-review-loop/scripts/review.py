@@ -7,7 +7,15 @@ from typing import TYPE_CHECKING
 
 from .artifacts import temporary_file_writer
 from .github import GitHubClient
-from .models import EXIT_ORACLE, EXIT_RACE, JsonValue, LooprError, ReviewResult
+from .models import (
+    EXIT_ORACLE,
+    EXIT_RACE,
+    JsonObject,
+    JsonValue,
+    LooprError,
+    ReviewComment,
+    ReviewResult,
+)
 from .oracle import (
     MAX_ORACLE_ATTACHMENTS,
     PROMPT,
@@ -93,6 +101,7 @@ def execute_review(
             thinking_time,
         )
 
+    body, comments = _publication(github, initial, verdict)
     before_post = github.snapshot()
     if not github.same_snapshot(initial, before_post):
         raise LooprError(
@@ -100,19 +109,8 @@ def execute_review(
             "stale_state",
             "pull request base or head changed before review posting",
         )
-    body = (
-        f"{verdict.review_body}\n\n---\n"
-        f"Reviewed base: `{initial.base_sha}`\n"
-        f"Reviewed head: `{initial.head_sha}`\n"
-    )
-    if len(body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
-        raise LooprError(
-            EXIT_ORACLE,
-            "oracle_schema",
-            "review body with audit footer exceeds GitHub's body limit",
-        )
     event = github.review_event(initial, verdict.verdict)
-    review_id, _ = github.post_review(initial, event, body)
+    review_id, _ = github.post_review(initial, event, body, comments)
 
     try:
         after_post = github.snapshot()
@@ -133,6 +131,145 @@ def execute_review(
         implementation_prompt=verdict.implementation_prompt,
     )
     return result
+
+
+def _publication(
+    github: GitHubClient,
+    pull_request: PullRequest,
+    verdict: OracleReview,
+) -> tuple[str, tuple[ReviewComment, ...]]:
+    """Compose the one bounded review publication for a frozen snapshot.
+
+    Returns:
+        The aggregate body and the inline comments to publish with it.
+
+    Raises:
+        LooprError: The composed body or the inline comments exceed GitHub's
+            body limit.
+    """
+    anchors: frozenset[tuple[str, str, int]] = (
+        github.diff_anchors(pull_request)
+        if any(
+            finding.get("location") is not None for finding in verdict.blocking_findings
+        )
+        else frozenset()
+    )
+    comments, unanchored = _partition_findings(verdict, anchors)
+    body = _aggregate_body(pull_request, verdict, unanchored)
+    if len(body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
+        raise LooprError(
+            EXIT_ORACLE,
+            "oracle_schema",
+            "review body with audit footer exceeds GitHub's body limit",
+        )
+    for comment in comments:
+        if len(comment.body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
+            raise LooprError(
+                EXIT_ORACLE,
+                "oracle_schema",
+                "an inline review comment exceeds GitHub's body limit",
+            )
+    return body, comments
+
+
+def _finding_text(finding: JsonObject) -> str:
+    """Render one blocking finding as the Markdown published for it.
+
+    Returns:
+        The finding's Markdown block, used inline or in the aggregate body.
+    """
+
+    def field(key: str) -> str:
+        value = finding.get(key)
+        return value if isinstance(value, str) else ""
+
+    return (
+        f"**{field('id')}: {field('title')}**\n\n"
+        f"{field('description')}\n\n"
+        f"Required change: {field('required_change')}"
+    )
+
+
+def _validated_anchor(
+    location: JsonValue | None,
+    anchors: frozenset[tuple[str, str, int]],
+) -> tuple[str, str, int] | None:
+    """Match one Oracle-proposed location against the frozen diff's anchors.
+
+    An anchor is accepted only when the reviewed base-to-head diff itself
+    contains that exact path, side, and line. An absent, malformed, stale, or
+    non-diff location is never relocated to a nearby line; it simply yields no
+    anchor, and its finding stays in the aggregate body.
+
+    Returns:
+        The validated anchor, or None when the location names no diff line.
+    """
+    if not isinstance(location, dict):
+        return None
+    path = location.get("path")
+    line = location.get("line")
+    side = location.get("side")
+    if (
+        not isinstance(path, str)
+        or isinstance(line, bool)
+        or not isinstance(line, int)
+        or not isinstance(side, str)
+    ):
+        return None
+    anchor = (path, side, line)
+    return anchor if anchor in anchors else None
+
+
+def _partition_findings(
+    verdict: OracleReview,
+    anchors: frozenset[tuple[str, str, int]],
+) -> tuple[tuple[ReviewComment, ...], tuple[JsonObject, ...]]:
+    """Split blocking findings into inline comments and aggregate-only findings.
+
+    Every finding lands in exactly one of the two collections, so a finding is
+    never published both inline and in the aggregate body.
+
+    Returns:
+        The inline review comments and the findings left for the body.
+    """
+    comments: list[ReviewComment] = []
+    unanchored: list[JsonObject] = []
+    for finding in verdict.blocking_findings:
+        anchor = _validated_anchor(finding.get("location"), anchors)
+        if anchor is None:
+            unanchored.append(finding)
+        else:
+            path, side, line = anchor
+            comments.append(
+                ReviewComment(
+                    path=path,
+                    line=line,
+                    side=side,
+                    body=_finding_text(finding),
+                )
+            )
+    return tuple(comments), tuple(unanchored)
+
+
+def _aggregate_body(
+    pull_request: PullRequest,
+    verdict: OracleReview,
+    unanchored: tuple[JsonObject, ...],
+) -> str:
+    """Compose the review body from the verdict, unanchored findings, and audit footer.
+
+    Returns:
+        The exact body text posted with the review.
+    """
+    sections = [verdict.review_body]
+    if unanchored:
+        findings = "\n\n".join(_finding_text(finding) for finding in unanchored)
+        sections.append(f"## Findings without a diff anchor\n\n{findings}")
+    return (
+        "\n\n".join(sections) + "\n\n---\n"
+        f"Reviewed base: `{pull_request.base_sha}`\n"
+        f"Reviewed head: `{pull_request.head_sha}`\n"
+    )
 
 
 _EXPECTED_REVIEW_STATE = {

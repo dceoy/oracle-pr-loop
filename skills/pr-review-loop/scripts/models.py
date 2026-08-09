@@ -80,6 +80,29 @@ class IssueSnapshot:
 
 
 @dataclass(frozen=True)
+class ReviewComment:
+    """One inline review comment anchored to a validated frozen-diff line."""
+
+    path: str
+    line: int
+    side: str
+    body: str
+
+    def as_payload(self) -> JsonObject:
+        """Return the GitHub create-review comment payload.
+
+        Returns:
+            The comment object accepted by GitHub's create-review API.
+        """
+        return {
+            "path": self.path,
+            "line": self.line,
+            "side": self.side,
+            "body": self.body,
+        }
+
+
+@dataclass(frozen=True)
 class OracleReview:
     """A strictly validated Oracle review verdict."""
 
@@ -89,7 +112,7 @@ class OracleReview:
     head_sha: str
     verdict: str
     review_body: str
-    blocking_findings: tuple[dict[str, str], ...]
+    blocking_findings: tuple[JsonObject, ...]
     implementation_prompt: str | None
     non_blocking_notes: tuple[str, ...]
     raw: JsonObject
@@ -116,7 +139,7 @@ class ReviewResult:
     head_sha: str
     verdict: str
     github_review_id: int
-    blocking_findings: tuple[dict[str, str], ...]
+    blocking_findings: tuple[JsonObject, ...]
     implementation_prompt: str | None
 
     def as_json(self) -> JsonObject:
