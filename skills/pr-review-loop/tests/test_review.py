@@ -23,6 +23,8 @@ from scripts.review import execute_review
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
+
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
@@ -176,12 +178,12 @@ def fake_parse_review(_raw: str, pull_request: PullRequest) -> OracleReview:
     return approve_review(pull_request)
 
 
-def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+def install_orchestration_fakes(mocker: MockerFixture) -> None:
     """Replace external review transports with deterministic fakes."""
-    monkeypatch.setattr(review_module, "GitHubClient", FakeGitHubClient)
-    monkeypatch.setattr(review_module, "build_review_bundle", fake_build_review_bundle)
-    monkeypatch.setattr(review_module, "invoke_oracle", fake_oracle_invocation)
-    monkeypatch.setattr(review_module, "parse_review", fake_parse_review)
+    mocker.patch.object(review_module, "GitHubClient", FakeGitHubClient)
+    mocker.patch.object(review_module, "build_review_bundle", fake_build_review_bundle)
+    mocker.patch.object(review_module, "invoke_oracle", fake_oracle_invocation)
+    mocker.patch.object(review_module, "parse_review", fake_parse_review)
 
 
 @pytest.mark.parametrize(
@@ -189,7 +191,7 @@ def install_orchestration_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     [("APPROVE", ()), ("REQUEST_CHANGES", (finding("F1"),))],
 )
 def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
     oracle_verdict: str,
     expected_findings: tuple[JsonObject, ...],
@@ -197,8 +199,8 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     """A PR author can publish either canonical Oracle verdict as a comment."""
     initial = sample_pr()
     FakeGitHubClient.snapshots = [initial, initial, initial]
-    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
-    install_orchestration_fakes(monkeypatch)
+    mocker.patch.object(FakeGitHubClient, "authenticated_login_value", initial.author)
+    install_orchestration_fakes(mocker)
 
     def parse_verdict(_raw: str, pull_request: PullRequest) -> OracleReview:
         return replace(
@@ -210,7 +212,7 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
             ),
         )
 
-    monkeypatch.setattr(review_module, "parse_review", parse_verdict)
+    mocker.patch.object(review_module, "parse_review", parse_verdict)
 
     result = execute_review(
         pr_value="21",
@@ -261,14 +263,14 @@ def test_execute_review_forwards_oracle_overrides(
 
 
 def test_formal_review_rejects_mismatched_persisted_state(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A formal review whose re-read state does not match the event is rejected."""
     initial = sample_pr()
     FakeGitHubClient.snapshots = [initial, initial, initial]
-    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
-    install_orchestration_fakes(monkeypatch)
+    mocker.patch.object(FakeGitHubClient, "authenticated_login_value", "another-user")
+    install_orchestration_fakes(mocker)
 
     class MismatchedStateGitHubClient(FakeGitHubClient):
         def verify_posted(
@@ -280,7 +282,7 @@ def test_formal_review_rejects_mismatched_persisted_state(
             del self
             return {"state": "COMMENTED"}
 
-    monkeypatch.setattr(review_module, "GitHubClient", MismatchedStateGitHubClient)
+    mocker.patch.object(review_module, "GitHubClient", MismatchedStateGitHubClient)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -297,7 +299,7 @@ def test_formal_review_rejects_mismatched_persisted_state(
 
 
 def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A self-authored comment whose persisted state is not COMMENTED is rejected.
@@ -310,8 +312,8 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
     """
     initial = sample_pr()
     FakeGitHubClient.snapshots = [initial, initial, initial]
-    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
-    install_orchestration_fakes(monkeypatch)
+    mocker.patch.object(FakeGitHubClient, "authenticated_login_value", initial.author)
+    install_orchestration_fakes(mocker)
 
     def parse_contradictory_review(
         _raw: str,
@@ -325,7 +327,7 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
             implementation_prompt="Fix F1.",
         )
 
-    monkeypatch.setattr(review_module, "parse_review", parse_contradictory_review)
+    mocker.patch.object(review_module, "parse_review", parse_contradictory_review)
 
     class WrongStateGitHubClient(FakeGitHubClient):
         def verify_posted(
@@ -337,7 +339,7 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
             del self
             return {"state": "APPROVED"}
 
-    monkeypatch.setattr(review_module, "GitHubClient", WrongStateGitHubClient)
+    mocker.patch.object(review_module, "GitHubClient", WrongStateGitHubClient)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -352,15 +354,15 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
 
 
 def test_self_authored_post_write_race_skips_dismissal(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A stale comment is reported without an impossible formal dismissal."""
     initial = sample_pr()
     changed = sample_pr(head_sha=SHA_C)
     FakeGitHubClient.snapshots = [initial, initial, changed]
-    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", initial.author)
-    install_orchestration_fakes(monkeypatch)
+    mocker.patch.object(FakeGitHubClient, "authenticated_login_value", initial.author)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -376,14 +378,14 @@ def test_self_authored_post_write_race_skips_dismissal(
 
 
 def test_pre_post_snapshot_race_fails_before_review_write(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A base/head change before posting prevents the GitHub write."""
     initial = sample_pr()
     changed = sample_pr(head_sha=SHA_C)
     FakeGitHubClient.snapshots = [initial, changed]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -399,14 +401,14 @@ def test_pre_post_snapshot_race_fails_before_review_write(
 
 
 def test_post_write_race_dismisses_stale_review(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A base/head change after posting dismisses the stale GitHub review."""
     initial = sample_pr()
     changed = sample_pr(head_sha=SHA_C)
     FakeGitHubClient.snapshots = [initial, initial, changed]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -422,13 +424,13 @@ def test_post_write_race_dismisses_stale_review(
 
 
 def test_execute_review_rejects_oversized_posted_body(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """The review body plus audit footer is bounded before the GitHub write."""
     initial = sample_pr()
     FakeGitHubClient.snapshots = [initial, initial]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     def parse_oversized_review(
         _raw: str,
@@ -436,7 +438,7 @@ def test_execute_review_rejects_oversized_posted_body(
     ) -> OracleReview:
         return replace(approve_review(pull_request), review_body="x" * 70_000)
 
-    monkeypatch.setattr(review_module, "parse_review", parse_oversized_review)
+    mocker.patch.object(review_module, "parse_review", parse_oversized_review)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -526,14 +528,14 @@ class _InterruptingGitHubClient(_StableGitHubClient):
 
 
 def test_post_write_snapshot_interrupt_dismisses_review(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A post-write KeyboardInterrupt neutralizes the unreported review."""
-    monkeypatch.setattr(review_module, "GitHubClient", _InterruptingGitHubClient)
-    monkeypatch.setattr(review_module, "build_review_bundle", fake_build_review_bundle)
-    monkeypatch.setattr(review_module, "invoke_oracle", fake_oracle_invocation)
-    monkeypatch.setattr(review_module, "parse_review", fake_parse_review)
+    mocker.patch.object(review_module, "GitHubClient", _InterruptingGitHubClient)
+    mocker.patch.object(review_module, "build_review_bundle", fake_build_review_bundle)
+    mocker.patch.object(review_module, "invoke_oracle", fake_oracle_invocation)
+    mocker.patch.object(review_module, "parse_review", fake_parse_review)
 
     with pytest.raises(KeyboardInterrupt):
         execute_review(
@@ -548,16 +550,16 @@ def test_post_write_snapshot_interrupt_dismisses_review(
 
 
 def _install_findings(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     findings: tuple[JsonObject, ...],
     anchors: frozenset[tuple[str, str, int]],
 ) -> None:
     """Install a REQUEST_CHANGES verdict carrying findings over a fake diff."""
     initial = sample_pr()
     FakeGitHubClient.snapshots = [initial, initial, initial]
-    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
-    monkeypatch.setattr(FakeGitHubClient, "anchors", anchors)
-    install_orchestration_fakes(monkeypatch)
+    mocker.patch.object(FakeGitHubClient, "authenticated_login_value", "another-user")
+    mocker.patch.object(FakeGitHubClient, "anchors", anchors)
+    install_orchestration_fakes(mocker)
 
     def parse_findings(_raw: str, pull_request: PullRequest) -> OracleReview:
         return replace(
@@ -568,7 +570,7 @@ def _install_findings(
             implementation_prompt="Fix the findings.",
         )
 
-    monkeypatch.setattr(review_module, "parse_review", parse_findings)
+    mocker.patch.object(review_module, "parse_review", parse_findings)
 
 
 def _published(tmp_path: Path) -> FakeGitHubClient:
@@ -585,13 +587,13 @@ def _published(tmp_path: Path) -> FakeGitHubClient:
 
 
 def test_line_specific_finding_becomes_one_inline_comment(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A finding anchored to a real diff line is published inline, not in the body."""
     location: JsonObject = {"path": "file.py", "line": 7, "side": "RIGHT"}
     _install_findings(
-        monkeypatch,
+        mocker,
         (finding("F1", location),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
@@ -608,12 +610,12 @@ def test_line_specific_finding_becomes_one_inline_comment(
 
 
 def test_multiple_anchored_findings_share_one_review_submission(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """Every anchored finding rides the same single create-review write."""
     _install_findings(
-        monkeypatch,
+        mocker,
         (
             finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),
             finding("F2", {"path": "file.py", "line": 3, "side": "LEFT"}),
@@ -639,11 +641,11 @@ def test_multiple_anchored_findings_share_one_review_submission(
 
 
 def test_global_findings_stay_in_the_aggregate_body(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A null-location finding is published in the body with no inline comment."""
-    _install_findings(monkeypatch, (finding("F1"),), frozenset())
+    _install_findings(mocker, (finding("F1"),), frozenset())
 
     github = _published(tmp_path)
 
@@ -659,7 +661,7 @@ def test_global_findings_stay_in_the_aggregate_body(
     [("APPROVE", ()), ("REQUEST_CHANGES", (finding("F1"),))],
 )
 def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
     oracle_verdict: str,
     expected_findings: tuple[JsonObject, ...],
@@ -673,8 +675,8 @@ def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
     """
     initial = sample_pr()
     FakeGitHubClient.snapshots = [initial, initial, initial]
-    monkeypatch.setattr(FakeGitHubClient, "authenticated_login_value", "another-user")
-    install_orchestration_fakes(monkeypatch)
+    mocker.patch.object(FakeGitHubClient, "authenticated_login_value", "another-user")
+    install_orchestration_fakes(mocker)
 
     def parse_verdict(_raw: str, pull_request: PullRequest) -> OracleReview:
         return replace(
@@ -684,7 +686,7 @@ def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
             implementation_prompt=("Fix F1." if expected_findings else None),
         )
 
-    monkeypatch.setattr(review_module, "parse_review", parse_verdict)
+    mocker.patch.object(review_module, "parse_review", parse_verdict)
 
     class ForbidAnchorDiscoveryGitHubClient(FakeGitHubClient):
         @override
@@ -695,7 +697,7 @@ def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
             msg = "diff_anchors() must not run when no finding requests a location"
             raise AssertionError(msg)
 
-    monkeypatch.setattr(
+    mocker.patch.object(
         review_module, "GitHubClient", ForbidAnchorDiscoveryGitHubClient
     )
 
@@ -710,12 +712,12 @@ def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
 
 
 def test_mixed_findings_are_partitioned_without_duplication(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """Each finding appears exactly once, inline or in the body, never both."""
     _install_findings(
-        monkeypatch,
+        mocker,
         (
             finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),
             finding("F2"),
@@ -747,13 +749,13 @@ def test_mixed_findings_are_partitioned_without_duplication(
     ],
 )
 def test_unanchorable_location_never_attaches_to_another_line(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
     location: JsonValue,
 ) -> None:
     """A stale, ambiguous, or malformed anchor degrades to aggregate output."""
     _install_findings(
-        monkeypatch,
+        mocker,
         (finding("F1", location),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
@@ -765,7 +767,7 @@ def test_unanchorable_location_never_attaches_to_another_line(
 
 
 def test_context_line_left_location_degrades_to_aggregate_body(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A LEFT location for an unchanged context line is never sent as inline.
@@ -776,7 +778,7 @@ def test_context_line_left_location_degrades_to_aggregate_body(
     validate, or GitHub would reject the whole atomic review with HTTP 422.
     """
     _install_findings(
-        monkeypatch,
+        mocker,
         (finding("F1", {"path": "file.py", "line": 1, "side": "LEFT"}),),
         frozenset({("file.py", "RIGHT", 1)}),
     )
@@ -792,14 +794,14 @@ def test_context_line_left_location_degrades_to_aggregate_body(
     [("RIGHT", 12), ("LEFT", 4), ("RIGHT", 5)],
 )
 def test_added_deleted_and_context_lines_anchor_on_their_own_side(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
     side: str,
     line: int,
 ) -> None:
     """Added, deleted, and modified-file context lines each anchor as themselves."""
     _install_findings(
-        monkeypatch,
+        mocker,
         (finding("F1", {"path": "file.py", "line": line, "side": side}),),
         frozenset({
             ("file.py", "RIGHT", 12),
@@ -815,13 +817,13 @@ def test_added_deleted_and_context_lines_anchor_on_their_own_side(
 
 
 def test_one_oversized_inline_comment_is_bounded_before_publication(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A single inline comment over GitHub's per-comment body limit fails closed."""
     oversized = finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"})
     oversized["description"] = "x" * 70_000
-    _install_findings(monkeypatch, (oversized,), frozenset({("file.py", "RIGHT", 7)}))
+    _install_findings(mocker, (oversized,), frozenset({("file.py", "RIGHT", 7)}))
 
     with pytest.raises(LooprError) as captured:
         execute_review(
@@ -838,7 +840,7 @@ def test_one_oversized_inline_comment_is_bounded_before_publication(
 
 
 def test_many_individually_bounded_inline_comments_are_not_rejected_in_aggregate(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """GitHub bounds each comment body independently, not their combined size.
@@ -854,7 +856,7 @@ def test_many_individually_bounded_inline_comments_are_not_rejected_in_aggregate
         for index in range(1, 4)
     )
     anchors = frozenset(("file.py", "RIGHT", index) for index in range(1, 4))
-    _install_findings(monkeypatch, findings, anchors)
+    _install_findings(mocker, findings, anchors)
 
     github = _published(tmp_path)
 
@@ -862,14 +864,14 @@ def test_many_individually_bounded_inline_comments_are_not_rejected_in_aggregate
 
 
 def test_post_write_race_dismisses_review_carrying_inline_comments(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """Inline publication keeps the stale-review dismissal safeguard intact."""
     initial = sample_pr()
     changed = sample_pr(head_sha=SHA_C)
     _install_findings(
-        monkeypatch,
+        mocker,
         (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
@@ -890,14 +892,14 @@ def test_post_write_race_dismisses_review_carrying_inline_comments(
 
 
 def test_pre_post_race_blocks_inline_publication(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A head change before posting prevents any inline comment from being written."""
     initial = sample_pr()
     changed = sample_pr(head_sha=SHA_C)
     _install_findings(
-        monkeypatch,
+        mocker,
         (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
@@ -917,7 +919,7 @@ def test_pre_post_race_blocks_inline_publication(
 
 
 def test_head_change_during_anchor_discovery_blocks_publication(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """A head change while ``diff_anchors()`` runs is caught before the write.
@@ -930,7 +932,7 @@ def test_head_change_during_anchor_discovery_blocks_publication(
     that is no longer current.
     """
     _install_findings(
-        monkeypatch,
+        mocker,
         (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
@@ -953,7 +955,7 @@ def test_head_change_during_anchor_discovery_blocks_publication(
             self._drifted = True
             return super().diff_anchors(pull_request)
 
-    monkeypatch.setattr(review_module, "GitHubClient", DriftDuringAnchorsGitHubClient)
+    mocker.patch.object(review_module, "GitHubClient", DriftDuringAnchorsGitHubClient)
     FakeGitHubClient.snapshots = []
 
     with pytest.raises(LooprError) as captured:
@@ -972,7 +974,7 @@ def test_head_change_during_anchor_discovery_blocks_publication(
 
 @pytest.mark.parametrize("verdict", ["APPROVE", "REQUEST_CHANGES"])
 def test_formal_event_semantics_are_unchanged_by_inline_comments(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
     verdict: str,
 ) -> None:
@@ -982,9 +984,9 @@ def test_formal_event_semantics_are_unchanged_by_inline_comments(
         if verdict == "REQUEST_CHANGES"
         else ()
     )
-    _install_findings(monkeypatch, findings, frozenset({("file.py", "RIGHT", 7)}))
+    _install_findings(mocker, findings, frozenset({("file.py", "RIGHT", 7)}))
     if verdict == "APPROVE":
-        install_orchestration_fakes(monkeypatch)
+        install_orchestration_fakes(mocker)
 
     result = execute_review(
         pr_value="21",

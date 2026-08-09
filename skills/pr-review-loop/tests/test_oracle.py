@@ -28,6 +28,7 @@ from scripts.process import CommandResult, CommandRunner
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from pytest_mock import MockerFixture
     from scripts.github import GitHubClient, IssueClient
     from scripts.models import JsonObject
 
@@ -117,24 +118,42 @@ def test_bundle_rejects_excessive_instruction_file_inventory(tmp_path: Path) -> 
     assert "instruction-file limit" in str(captured.value)
 
 
-def test_oracle_review_rejects_excessive_attachment_count(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "max_attachments",
+    [
+        pytest.param(MAX_ORACLE_ATTACHMENTS, id="review"),
+        pytest.param(MAX_BOOTSTRAP_ATTACHMENTS, id="bootstrap"),
+    ],
+)
+def test_oracle_rejects_excessive_attachment_count(
+    tmp_path: Path,
+    max_attachments: int,
+) -> None:
     """The Oracle command cannot receive an unbounded number of --file arguments."""
     runner = CommandRunner()
     writer = TemporaryFileWriter(tmp_path / "oracle", runner)
     attachments = tuple(
-        Path(f"attachment-{index}.txt") for index in range(MAX_ORACLE_ATTACHMENTS + 1)
+        Path(f"attachment-{index}.txt") for index in range(max_attachments + 1)
     )
 
     with pytest.raises(LooprError) as captured:
-        _invoke(runner, writer, tmp_path, "prompt", attachments, MAX_ORACLE_ATTACHMENTS)
+        _invoke(runner, writer, tmp_path, "prompt", attachments, max_attachments)
 
     assert captured.value.category == "bundle"
     assert "attachment count" in str(captured.value)
 
 
-def test_oracle_review_rejects_excessive_argument_bytes(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "max_attachments",
+    [
+        pytest.param(MAX_ORACLE_ATTACHMENTS, id="review"),
+        pytest.param(MAX_BOOTSTRAP_ATTACHMENTS, id="bootstrap"),
+    ],
+)
+def test_oracle_rejects_excessive_argument_bytes(
+    mocker: MockerFixture,
     tmp_path: Path,
+    max_attachments: int,
 ) -> None:
     """The complete Oracle argv is byte-bounded before subprocess execution."""
     runner = CommandRunner()
@@ -144,7 +163,7 @@ def test_oracle_review_rejects_excessive_argument_bytes(
     def unexpected_run(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Oracle subprocess must not run with oversized arguments")
 
-    monkeypatch.setattr(runner, "run", unexpected_run)
+    mocker.patch.object(runner, "run", unexpected_run)
 
     with pytest.raises(LooprError) as captured:
         _invoke(
@@ -153,7 +172,7 @@ def test_oracle_review_rejects_excessive_argument_bytes(
             tmp_path,
             "prompt",
             (oversized_path,),
-            MAX_ORACLE_ATTACHMENTS,
+            max_attachments,
         )
 
     assert captured.value.category == "bundle"
@@ -714,57 +733,6 @@ def test_bootstrap_bundle_rejects_credential_in_instruction_file(
     assert captured.value.category == "bundle"
 
 
-def test_bootstrap_generate_rejects_excessive_attachment_count(tmp_path: Path) -> None:
-    """The Oracle command cannot receive an unbounded number of --file arguments."""
-    runner = CommandRunner()
-    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
-    attachments = tuple(
-        Path(f"attachment-{index}.txt")
-        for index in range(MAX_BOOTSTRAP_ATTACHMENTS + 1)
-    )
-
-    with pytest.raises(LooprError) as captured:
-        _invoke(
-            runner,
-            writer,
-            tmp_path,
-            "prompt",
-            attachments,
-            MAX_BOOTSTRAP_ATTACHMENTS,
-        )
-
-    assert captured.value.category == "bundle"
-    assert "attachment count" in str(captured.value)
-
-
-def test_bootstrap_generate_rejects_excessive_argument_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The complete Oracle argv is byte-bounded before subprocess execution."""
-    runner = CommandRunner()
-    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
-    oversized_path = Path("x" * MAX_ORACLE_ARG_BYTES)
-
-    def unexpected_run(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Oracle subprocess must not run with oversized arguments")
-
-    monkeypatch.setattr(runner, "run", unexpected_run)
-
-    with pytest.raises(LooprError) as captured:
-        _invoke(
-            runner,
-            writer,
-            tmp_path,
-            "prompt",
-            (oversized_path,),
-            MAX_BOOTSTRAP_ATTACHMENTS,
-        )
-
-    assert captured.value.category == "bundle"
-    assert "arguments exceed" in str(captured.value)
-
-
 def test_bootstrap_prompt_is_isolated_from_issue_content(tmp_path: Path) -> None:
     """Issue content reaches Oracle only as an attachment, never the prompt text."""
     issue = replace(
@@ -854,32 +822,32 @@ def _finding_review_payload(location: object = None, **overrides: object) -> str
     return json.dumps(payload)
 
 
-def test_parse_review_accepts_a_validated_finding_location() -> None:
-    """A well-formed location survives parsing unchanged and unrepaired."""
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        pytest.param(
+            {"path": "file.py", "line": 7, "side": "RIGHT"},
+            {"path": "file.py", "line": 7, "side": "RIGHT"},
+            id="canonical-path",
+        ),
+        pytest.param(
+            {"path": " file.py", "line": 7, "side": "RIGHT"},
+            {"path": " file.py", "line": 7, "side": "RIGHT"},
+            id="preserved-whitespace",
+        ),
+    ],
+)
+def test_parse_review_accepts_finding_location(
+    location: object,
+    expected: object,
+) -> None:
+    """Valid finding paths are preserved exactly, including whitespace."""
     parsed = parse_review(
-        _finding_review_payload({"path": "file.py", "line": 7, "side": "RIGHT"}),
+        _finding_review_payload(location),
         _sample_pr(),
     )
 
-    assert parsed.blocking_findings[0]["location"] == {
-        "path": "file.py",
-        "line": 7,
-        "side": "RIGHT",
-    }
-
-
-def test_parse_review_preserves_a_location_path_with_surrounding_whitespace() -> None:
-    """A path is never stripped, so it cannot be normalized onto a different file."""
-    parsed = parse_review(
-        _finding_review_payload({"path": " file.py", "line": 7, "side": "RIGHT"}),
-        _sample_pr(),
-    )
-
-    assert parsed.blocking_findings[0]["location"] == {
-        "path": " file.py",
-        "line": 7,
-        "side": "RIGHT",
-    }
+    assert parsed.blocking_findings[0]["location"] == expected
 
 
 def test_parse_review_accepts_a_null_location_for_a_global_finding() -> None:

@@ -15,6 +15,8 @@ from scripts.process import CommandError, CommandRunner
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
+
 
 def test_redactor_matches_credential_aliases() -> None:
     """Credential-like environment names register their values as secrets."""
@@ -86,7 +88,7 @@ def test_runner_rejects_watched_file_overflow(tmp_path: Path) -> None:
 
 
 def test_runner_reaps_child_on_interrupt(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     """KeyboardInterrupt still terminates and reaps the direct child."""
@@ -108,7 +110,7 @@ def test_runner_reaps_child_on_interrupt(
     def raise_interrupt(_seconds: float) -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(
+    mocker.patch.object(
         process_module,
         "subprocess",
         SimpleNamespace(
@@ -117,7 +119,7 @@ def test_runner_reaps_child_on_interrupt(
             TimeoutExpired=subprocess.TimeoutExpired,
         ),
     )
-    monkeypatch.setattr(
+    mocker.patch.object(
         process_module,
         "time",
         SimpleNamespace(monotonic=process_module.time.monotonic, sleep=raise_interrupt),

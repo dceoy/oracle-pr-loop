@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, NoReturn, cast
 
 import pytest
 from scripts import cli
@@ -21,7 +21,6 @@ from scripts.models import (
     LooprError,
     PullRequest,
     ReviewComment,
-    ReviewResult,
 )
 from scripts.oracle import parse_review
 from scripts.process import CommandResult, CommandRunner
@@ -32,6 +31,8 @@ from test_submit import ScenarioRunner, _fixture_repo
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from pytest_mock import MockerFixture
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CANONICAL_SKILL = REPOSITORY_ROOT / "skills" / "pr-review-loop"
@@ -289,16 +290,16 @@ def _stdout_json(capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
 
 
 def _run_review_cli(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
     fixture: AcceptanceFixture,
     pull_request: PullRequest,
     verdict: str,
 ) -> tuple[int, dict[str, object], AcceptanceReviewRunner]:
     AcceptanceGitHubClient.snapshots = [pull_request, pull_request, pull_request]
-    monkeypatch.setattr(review_module, "GitHubClient", AcceptanceGitHubClient)
+    mocker.patch.object(review_module, "GitHubClient", AcceptanceGitHubClient)
     runner = AcceptanceReviewRunner(_oracle_payload(pull_request, verdict=verdict))
-    monkeypatch.setattr(cli, "CommandRunner", lambda: runner)
+    mocker.patch.object(cli, "CommandRunner", return_value=runner)
     status = cli.main([
         "review",
         "--pr",
@@ -310,11 +311,11 @@ def _run_review_cli(
 
 
 def _run_submit_cli(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
     fixture: AcceptanceFixture,
 ) -> tuple[int, dict[str, object]]:
-    monkeypatch.setattr(cli, "CommandRunner", lambda: fixture.runner)
+    mocker.patch.object(cli, "CommandRunner", return_value=fixture.runner)
     status = cli.main([
         "submit",
         "--pr",
@@ -352,7 +353,7 @@ def test_skill_discovery_directories_contain_only_known_skills() -> None:
 
 
 def _assert_review_result(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
     fixture: AcceptanceFixture,
     *,
@@ -363,7 +364,7 @@ def _assert_review_result(
 ) -> AcceptanceReviewRunner:
     pull_request = _review_snapshot(fixture, head_sha=head_sha)
     status, payload, runner = _run_review_cli(
-        monkeypatch,
+        mocker,
         capsys,
         fixture,
         pull_request,
@@ -419,14 +420,14 @@ def test_cross_agent_request_submit_rereview_flow(
     client: str,
     discovery_path: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Every supported host uses the same request/fix/submit/re-review contract."""
     _assert_skill_discovery(client, discovery_path)
     fixture = _acceptance_fixture(tmp_path)
     request_runner = _assert_review_result(
-        monkeypatch,
+        mocker,
         capsys,
         fixture,
         head_sha=fixture.head_sha,
@@ -437,7 +438,7 @@ def test_cross_agent_request_submit_rereview_flow(
 
     (fixture.repo / "file.txt").write_text("fixed\n", encoding="utf-8")
     submit_status, submit_payload = _run_submit_cli(
-        monkeypatch,
+        mocker,
         capsys,
         fixture,
     )
@@ -448,7 +449,7 @@ def test_cross_agent_request_submit_rereview_flow(
 
     resulting_head = cast("str", submit_payload["resulting_head_sha"])
     approve_runner = _assert_review_result(
-        monkeypatch,
+        mocker,
         capsys,
         fixture,
         head_sha=resulting_head,
@@ -459,31 +460,68 @@ def test_cross_agent_request_submit_rereview_flow(
     _assert_host_programs(fixture, request_runner, approve_runner)
 
 
+@pytest.mark.parametrize(
+    ("command", "args", "function_name", "error_code", "category"),
+    [
+        pytest.param(
+            "review",
+            ("review", "--pr", "1"),
+            "execute_review",
+            EXIT_ORACLE,
+            "oracle_schema",
+            id="review",
+        ),
+        pytest.param(
+            "bootstrap",
+            ("bootstrap", "--issue", "7"),
+            "execute_bootstrap",
+            EXIT_RACE,
+            "stale_state",
+            id="bootstrap",
+        ),
+    ],
+)
 def test_operational_failure_uses_stable_nonzero_error_schema(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
+    command: str,
+    args: tuple[str, ...],
+    function_name: str,
+    error_code: int,
+    category: str,
 ) -> None:
-    def fail_review(**_kwargs: object) -> ReviewResult:
-        raise LooprError(EXIT_ORACLE, "oracle_schema", "malformed Oracle output")
+    def fail_command(**_kwargs: object) -> NoReturn:
+        raise LooprError(error_code, category, "command failed")
 
-    monkeypatch.setattr(cli, "execute_review", fail_review)
-    status = cli.main(["review", "--pr", "1"])
+    mocker.patch.object(cli, function_name, fail_command)
+    status = cli.main(list(args))
     payload = _stdout_json(capsys)
     error = cast("dict[str, object]", payload["error"])
 
-    assert status == EXIT_ORACLE
+    assert status == error_code
+    assert payload["command"] == command
     assert set(payload) == {"schema_version", "command", "error"}
-    assert error["category"] == "oracle_schema"
+    assert error["category"] == category
 
 
+@pytest.mark.parametrize(
+    ("args", "command"),
+    [
+        pytest.param(("review",), "review", id="review"),
+        pytest.param(("bootstrap",), "bootstrap", id="bootstrap"),
+    ],
+)
 def test_argument_failure_uses_structured_error_schema(
     capsys: pytest.CaptureFixture[str],
+    args: tuple[str, ...],
+    command: str,
 ) -> None:
-    status = cli.main(["review"])
+    status = cli.main(list(args))
     payload = _stdout_json(capsys)
     error = cast("dict[str, object]", payload["error"])
 
     assert status == EXIT_PRECONDITION
+    assert payload["command"] == command
     assert error["category"] == "input"
 
 
@@ -604,7 +642,7 @@ def test_artifacts_directory_argument_is_removed(
 
 
 def test_bootstrap_cli_emits_the_stable_success_schema(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The public bootstrap command emits exactly one bootstrap JSON object."""
@@ -621,46 +659,13 @@ def test_bootstrap_cli_emits_the_stable_success_schema(
     def fake_bootstrap(**_kwargs: object) -> BootstrapResult:
         return expected
 
-    monkeypatch.setattr(cli, "execute_bootstrap", fake_bootstrap)
+    mocker.patch.object(cli, "execute_bootstrap", fake_bootstrap)
     status = cli.main(["bootstrap", "--issue", "7"])
     payload = _stdout_json(capsys)
 
     assert status == 0
     assert set(payload) == BOOTSTRAP_SUCCESS_KEYS
     assert payload == expected.as_json()
-
-
-def test_bootstrap_operational_failure_uses_stable_nonzero_error_schema(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A bootstrap operational failure uses the shared structured error schema."""
-
-    def fail_bootstrap(**_kwargs: object) -> BootstrapResult:
-        raise LooprError(EXIT_RACE, "stale_state", "issue changed during generation")
-
-    monkeypatch.setattr(cli, "execute_bootstrap", fail_bootstrap)
-    status = cli.main(["bootstrap", "--issue", "7"])
-    payload = _stdout_json(capsys)
-    error = cast("dict[str, object]", payload["error"])
-
-    assert status == EXIT_RACE
-    assert payload["command"] == "bootstrap"
-    assert set(payload) == {"schema_version", "command", "error"}
-    assert error["category"] == "stale_state"
-
-
-def test_bootstrap_argument_failure_uses_structured_error_schema(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A missing --issue argument uses the shared structured error schema."""
-    status = cli.main(["bootstrap"])
-    payload = _stdout_json(capsys)
-    error = cast("dict[str, object]", payload["error"])
-
-    assert status == EXIT_PRECONDITION
-    assert payload["command"] == "bootstrap"
-    assert error["category"] == "input"
 
 
 def test_help_has_no_implementation_agent_dependency() -> None:
@@ -678,13 +683,13 @@ def test_malformed_oracle_output_fails_without_repair() -> None:
 
 
 def test_stale_review_head_fails_before_post(
-    monkeypatch: pytest.MonkeyPatch,
+    mocker: MockerFixture,
     tmp_path: Path,
 ) -> None:
     initial = sample_pr()
     changed = sample_pr(head_sha="c" * 40)
     FakeGitHubClient.snapshots = [initial, changed]
-    install_orchestration_fakes(monkeypatch)
+    install_orchestration_fakes(mocker)
 
     with pytest.raises(LooprError) as captured:
         execute_review(
