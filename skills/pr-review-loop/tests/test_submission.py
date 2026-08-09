@@ -233,6 +233,37 @@ def test_legacy_runtime_artifacts_are_never_staged(tmp_path: Path) -> None:
     assert status.strip().startswith("??")
 
 
+def test_locally_ignored_legacy_artifacts_do_not_break_staging(
+    tmp_path: Path,
+) -> None:
+    """An upgraded checkout with .pr-review-loop/ in .git/info/exclude still submits."""
+    repo, remote, state, _base, head = _fixture_repo(tmp_path)
+    exclude_path = repo / ".git" / "info" / "exclude"
+    exclude_path.write_text(".pr-review-loop/\n", encoding="utf-8")
+    legacy_dir = repo / ".pr-review-loop" / "runs"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "leftover.txt").write_text("stale\n", encoding="utf-8")
+    (repo / "file.txt").write_text("fixed\n", encoding="utf-8")
+    runner = ScenarioRunner(repo, remote, state)
+
+    result = execute_submit(
+        pr_value="1",
+        expected_head=head,
+        repo_dir=repo,
+        runner=runner,
+    )
+
+    assert result.resulting_head_sha == result.commit_sha
+    committed_paths = _git(
+        repo,
+        "show",
+        "--name-only",
+        "--pretty=format:",
+        result.commit_sha,
+    ).splitlines()
+    assert not any(path.startswith(".pr-review-loop") for path in committed_paths)
+
+
 def test_pre_staged_legacy_artifact_fails_before_commit(tmp_path: Path) -> None:
     """A legacy artifact staged before submit runs cannot be committed."""
     repo, remote, state, _base, head = _fixture_repo(tmp_path)

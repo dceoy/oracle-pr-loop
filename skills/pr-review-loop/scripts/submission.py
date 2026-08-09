@@ -37,7 +37,8 @@ POLL_INTERVAL_SECONDS = 2
 RAW_DIFF_HEADER_FIELD_COUNT = 5
 REMOTE_REF_LINE_FIELD_COUNT = 2
 COMMIT_MESSAGE = "loopr: apply reviewed changes"
-LEGACY_ARTIFACTS_PATHSPEC = ":(exclude,top).pr-review-loop"
+LEGACY_ARTIFACTS_PATH = ".pr-review-loop"
+LEGACY_ARTIFACTS_PATHSPEC = f":(exclude,top){LEGACY_ARTIFACTS_PATH}"
 
 
 @dataclass(frozen=True)
@@ -266,11 +267,10 @@ def execute_submit(
         expected_head,
     )
     _require_same_snapshot(initial, github.snapshot(), phase="before staging")
-    _git(
-        command_runner,
-        github.repo_dir,
-        ["add", "--all", "--", ".", LEGACY_ARTIFACTS_PATHSPEC],
-    )
+    add_args = ["add", "--all", "--", "."]
+    if not _legacy_artifacts_already_ignored(command_runner, github.repo_dir):
+        add_args.append(LEGACY_ARTIFACTS_PATHSPEC)
+    _git(command_runner, github.repo_dir, add_args)
     _reject_staged_legacy_artifacts(command_runner, github.repo_dir)
     _git(
         command_runner,
@@ -388,6 +388,37 @@ def execute_submit(
     return result
 
 
+def _legacy_artifacts_already_ignored(
+    runner: CommandRunner,
+    repo_dir: Path,
+) -> bool:
+    """Detect whether an ignore rule already covers the legacy artifacts path.
+
+    Returns:
+        Whether `.pr-review-loop` is already excluded by an existing Git
+        ignore rule (`.gitignore`, `.git/info/exclude`, or equivalent).
+
+    Raises:
+        LooprError: Git could not evaluate the ignore rules.
+    """
+    try:
+        result = runner.run(
+            ["git", "check-ignore", "--quiet", "--", LEGACY_ARTIFACTS_PATH],
+            cwd=repo_dir,
+            env=runner.base_env(),
+            check=False,
+        )
+    except CommandError as exc:
+        raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+    if result.returncode not in {0, 1}:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "git",
+            "could not evaluate ignore rules for .pr-review-loop",
+        )
+    return result.returncode == 0
+
+
 def _reject_staged_legacy_artifacts(
     runner: CommandRunner,
     repo_dir: Path,
@@ -401,12 +432,12 @@ def _reject_staged_legacy_artifacts(
     staged = _git(
         runner,
         repo_dir,
-        ["diff", "--cached", "--name-only", "-z", "--", ".pr-review-loop"],
+        ["diff", "--cached", "--name-only", "-z", "--", LEGACY_ARTIFACTS_PATH],
     )
     tracked = _git(
         runner,
         repo_dir,
-        ["ls-files", "--cached", "-z", "--", ".pr-review-loop"],
+        ["ls-files", "--cached", "-z", "--", LEGACY_ARTIFACTS_PATH],
     )
     if staged or tracked:
         raise LooprError(
