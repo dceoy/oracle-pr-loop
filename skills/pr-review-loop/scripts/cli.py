@@ -89,16 +89,18 @@ def parser() -> argparse.ArgumentParser:
         default=".",
         help="local checkout containing the target repository",
     )
-    bootstrap.add_argument(
-        "--oracle-thinking-time",
-        choices=("light", "standard", "extended", "heavy"),
-        default="heavy",
-    )
-    review.add_argument(
-        "--oracle-thinking-time",
-        choices=("light", "standard", "extended", "heavy"),
-        default="heavy",
-    )
+    for command in (bootstrap, review):
+        command.add_argument(
+            "--oracle-model",
+            metavar="MODEL",
+            help="select an Oracle browser model instead of the current model",
+        )
+        command.add_argument(
+            "--oracle-thinking-time",
+            choices=("light", "standard", "extended", "heavy"),
+            metavar="EFFORT",
+            help="override Oracle browser effort; omitted means inherit",
+        )
     submit.add_argument(
         "--expected-head",
         required=True,
@@ -152,6 +154,7 @@ def _dispatch(
             issue_value=args.issue,
             repo_dir=Path(args.repo_dir),
             thinking_time=args.oracle_thinking_time,
+            model=args.oracle_model,
             runner=runner,
         )
     if command == "review":
@@ -159,6 +162,7 @@ def _dispatch(
             pr_value=args.pr,
             repo_dir=Path(args.repo_dir),
             thinking_time=args.oracle_thinking_time,
+            model=args.oracle_model,
             runner=runner,
         )
     return execute_submit(

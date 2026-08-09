@@ -487,6 +487,104 @@ def test_argument_failure_uses_structured_error_schema(
     assert error["category"] == "input"
 
 
+@pytest.mark.parametrize(
+    ("command", "target"),
+    [("bootstrap", "execute_bootstrap"), ("review", "execute_review")],
+)
+@pytest.mark.parametrize(
+    ("overrides", "expected_model", "expected_effort"),
+    [
+        ((), None, None),
+        (("--oracle-model", "gpt-5.6-sol"), "gpt-5.6-sol", None),
+        (("--oracle-thinking-time", "extended"), None, "extended"),
+        (
+            (
+                "--oracle-model",
+                "gpt-5.6-sol",
+                "--oracle-thinking-time",
+                "heavy",
+            ),
+            "gpt-5.6-sol",
+            "heavy",
+        ),
+    ],
+)
+def test_cli_propagates_oracle_overrides_consistently(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    target: str,
+    overrides: tuple[str, ...],
+    expected_model: str | None,
+    expected_effort: str | None,
+) -> None:
+    """Bootstrap and review pass both optional Oracle values unchanged."""
+    captured: dict[str, object] = {}
+
+    def fake_execute(**kwargs: object) -> object:
+        captured.update(kwargs)
+        if command == "bootstrap":
+            return BootstrapResult(
+                repository="acme/demo",
+                issue_number=1,
+                issue_url="https://github.com/acme/demo/issues/1",
+                issue_updated_at="2026-01-01T00:00:00Z",
+                base_ref="main",
+                base_sha="a" * 40,
+                implementation_prompt="Implement the requested change.",
+            )
+        return ReviewResult(
+            repository="acme/demo",
+            pr_number=1,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            verdict="APPROVE",
+            github_review_id=1,
+            blocking_findings=(),
+            implementation_prompt=None,
+        )
+
+    monkeypatch.setattr(cli, target, fake_execute)
+    identifier_flag = "--issue" if command == "bootstrap" else "--pr"
+    status = cli.main([command, identifier_flag, "1", *overrides])
+    _stdout_json(capsys)
+
+    assert status == 0
+    assert captured["model"] == expected_model
+    assert captured["thinking_time"] == expected_effort
+
+
+@pytest.mark.parametrize(
+    "effort",
+    ["light", "standard", "extended", "heavy"],
+)
+def test_cli_accepts_all_oracle_thinking_time_values(effort: str) -> None:
+    """The CLI accepts every browser effort value delegated to Oracle."""
+    args = cli.parser().parse_args([
+        "review",
+        "--pr",
+        "1",
+        "--oracle-thinking-time",
+        effort,
+    ])
+
+    assert args.oracle_thinking_time == effort
+
+
+@pytest.mark.parametrize("effort", ["extra-high", "pro", "unsupported"])
+def test_cli_rejects_invalid_oracle_thinking_time(
+    capsys: pytest.CaptureFixture[str],
+    effort: str,
+) -> None:
+    """Invalid effort remains a structured input error before dispatch."""
+    status = cli.main(["review", "--pr", "1", "--oracle-thinking-time", effort])
+    payload = _stdout_json(capsys)
+    error = cast("dict[str, object]", payload["error"])
+
+    assert status == EXIT_PRECONDITION
+    assert error["category"] == "input"
+
+
 def test_artifacts_directory_argument_is_removed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

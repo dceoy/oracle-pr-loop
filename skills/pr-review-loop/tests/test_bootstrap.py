@@ -183,12 +183,18 @@ def _configure_stable(issue: IssueSnapshot) -> None:
     FakeIssueClient.statuses = [b"", b""]
 
 
-def _execute(tmp_path: Path) -> BootstrapResult:
+def _execute(
+    tmp_path: Path,
+    *,
+    thinking_time: str | None = "heavy",
+    model: str | None = None,
+) -> BootstrapResult:
     """Execute bootstrap with the current fake configuration."""
     return execute_bootstrap(
         issue_value="7",
         repo_dir=tmp_path,
-        thinking_time="heavy",
+        thinking_time=thinking_time,
+        model=model,
         runner=CommandRunner(),
     )
 
@@ -218,6 +224,27 @@ def test_execute_bootstrap_returns_result_bound_to_issue_and_base(
         ["status", "--porcelain", "--untracked-files=all"],
     ]
     assert "artifacts_dir" not in result.as_json()
+
+
+def test_execute_bootstrap_forwards_oracle_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bootstrap forwards model and effort values to the shared Oracle call."""
+    issue = sample_issue()
+    _configure_stable(issue)
+    install_orchestration_fakes(monkeypatch)
+    calls: list[tuple[object, object]] = []
+
+    def record_oracle(*args: object, **kwargs: object) -> str:
+        calls.append((args[3], kwargs.get("model")))
+        return "raw"
+
+    monkeypatch.setattr(bootstrap_module, "invoke_oracle", record_oracle)
+
+    _execute(tmp_path, thinking_time="extended", model="gpt-5.6-sol")
+
+    assert calls == [("extended", "gpt-5.6-sol")]
 
 
 def test_execute_bootstrap_rejects_stale_issue_update(

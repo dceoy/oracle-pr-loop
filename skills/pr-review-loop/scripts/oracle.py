@@ -711,15 +711,56 @@ def build_bootstrap_bundle(
     )
 
 
+def _oracle_command(
+    raw_path: Path,
+    thinking_time: str | None,
+    model: str | None,
+    prompt: str,
+    attachments: tuple[Path, ...],
+    slug: str,
+) -> list[str]:
+    """Build the bounded Oracle argv for one browser invocation.
+
+    Returns:
+        The command arguments in Oracle invocation order.
+    """
+    command = [
+        "oracle",
+        "--engine",
+        "browser",
+        "--browser-manual-login",
+        "--browser-model-strategy",
+        "select" if model is not None else "current",
+    ]
+    if model is not None:
+        command.extend(("--model", model))
+    if thinking_time is not None:
+        command.extend(("--browser-thinking-time", thinking_time))
+    command.extend((
+        "--browser-archive",
+        "auto",
+        "--slug",
+        slug,
+        "--write-output",
+        str(raw_path),
+        "--prompt",
+        prompt,
+    ))
+    for attachment in attachments:
+        command.extend(("--file", str(attachment)))
+    return command
+
+
 def invoke_oracle(
     runner: CommandRunner,
     writer: TemporaryFileWriter,
     repo_dir: Path,
-    thinking_time: str,
+    thinking_time: str | None,
     prompt: str,
     attachments: tuple[Path, ...],
     slug: str,
     *,
+    model: str | None = None,
     max_attachments: int,
 ) -> str:
     """Invoke Oracle once and return its raw, bounded, credential-free output.
@@ -739,26 +780,14 @@ def invoke_oracle(
             "Oracle attachment count exceeds the command bound",
         )
     raw_path = writer.root / "oracle-raw.json"
-    command = [
-        "oracle",
-        "--engine",
-        "browser",
-        "--browser-manual-login",
-        "--browser-model-strategy",
-        "current",
-        "--browser-thinking-time",
+    command = _oracle_command(
+        raw_path,
         thinking_time,
-        "--browser-archive",
-        "auto",
-        "--slug",
-        slug,
-        "--write-output",
-        str(raw_path),
-        "--prompt",
+        model,
         prompt,
-    ]
-    for attachment in attachments:
-        command.extend(("--file", str(attachment)))
+        attachments,
+        slug,
+    )
     _validate_oracle_command(command)
     try:
         runner.run(

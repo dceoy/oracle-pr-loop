@@ -233,6 +233,33 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     )
 
 
+def test_execute_review_forwards_oracle_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review forwards model and effort values to the shared Oracle call."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    install_orchestration_fakes(monkeypatch)
+    calls: list[tuple[object, object]] = []
+
+    def record_oracle(*args: object, **kwargs: object) -> str:
+        calls.append((args[3], kwargs.get("model")))
+        return "raw"
+
+    monkeypatch.setattr(review_module, "invoke_oracle", record_oracle)
+
+    execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        thinking_time="extra-high",
+        model="gpt-5.6-sol",
+        runner=CommandRunner(),
+    )
+
+    assert calls == [("extra-high", "gpt-5.6-sol")]
+
+
 def test_formal_review_rejects_mismatched_persisted_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

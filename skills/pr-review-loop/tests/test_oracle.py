@@ -42,16 +42,20 @@ def _invoke(
     prompt: str,
     attachments: tuple[Path, ...],
     max_attachments: int,
+    *,
+    thinking_time: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Invoke the test transport with stable bounds and a test slug."""
     return invoke_oracle(
         runner,
         writer,
         repo_dir,
-        "heavy",
+        thinking_time,
         prompt,
         attachments,
         "test-slug",
+        model=model,
         max_attachments=max_attachments,
     )
 
@@ -603,6 +607,67 @@ class _FakeOracleRunner(CommandRunner):
             watch_path.write_text(self.payload, encoding="utf-8")
             return CommandResult(argv, 0, b"", "")
         pytest.fail(f"unexpected command: {argv}")
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking_time", "strategy", "model_args", "effort_args"),
+    [
+        (None, None, "current", (), ()),
+        (
+            "gpt-5.6-sol",
+            None,
+            "select",
+            ("--model", "gpt-5.6-sol"),
+            (),
+        ),
+        (None, "extended", "current", (), ("--browser-thinking-time", "extended")),
+        (
+            "gpt-5.6-sol",
+            "heavy",
+            "select",
+            ("--model", "gpt-5.6-sol"),
+            ("--browser-thinking-time", "heavy"),
+        ),
+    ],
+)
+def test_invoke_oracle_preserves_or_overrides_browser_settings(
+    tmp_path: Path,
+    model: str | None,
+    thinking_time: str | None,
+    strategy: str,
+    model_args: tuple[str, ...],
+    effort_args: tuple[str, ...],
+) -> None:
+    """Oracle receives only the explicitly requested model and effort flags."""
+    runner = _FakeOracleRunner("raw")
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+
+    assert (
+        _invoke(
+            runner,
+            writer,
+            tmp_path,
+            "prompt",
+            (),
+            MAX_ORACLE_ATTACHMENTS,
+            thinking_time=thinking_time,
+            model=model,
+        )
+        == "raw"
+    )
+
+    command = runner.commands[0]
+    strategy_index = command.index("--browser-model-strategy")
+    assert command[strategy_index + 1] == strategy
+    assert (
+        command[strategy_index + 2 : strategy_index + 2 + len(model_args)] == model_args
+    )
+    assert "--model" in command if model is not None else "--model" not in command
+    if effort_args:
+        effort_index = command.index("--browser-thinking-time")
+        assert command[effort_index : effort_index + 2] == effort_args
+    else:
+        assert "--browser-thinking-time" not in command
 
 
 def test_bootstrap_bundle_rejects_excessive_instruction_file_inventory(
