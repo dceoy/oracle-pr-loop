@@ -1141,6 +1141,12 @@ class GitHubClient(_ImmutableGitMixin):
         not the repository's own `.git/config`) cannot change the headers or
         hunk context `diff_anchors` reads, or silently diverge from the diff
         GitHub's own review API validates comment anchors against.
+        `--indent-heuristic` pins Git's own default hunk-boundary shifting so
+        a local `diff.indentHeuristic=false` cannot move a hunk's boundary.
+        `-l0` pins rename detection to always run its exhaustive search, so a
+        local `diff.renameLimit` cannot silently fall back to reporting a
+        rename as an unrelated delete-and-add pair, which would replace a
+        small rename hunk's anchors with whole-file delete/add anchors.
 
         Returns:
             The patch's raw bytes.
@@ -1153,11 +1159,13 @@ class GitHubClient(_ImmutableGitMixin):
                 "--no-textconv",
                 "--full-index",
                 "--find-renames",
+                "-l0",
                 "--src-prefix=a/",
                 "--dst-prefix=b/",
                 "--unified=3",
                 "--inter-hunk-context=0",
                 "--diff-algorithm=myers",
+                "--indent-heuristic",
                 f"{pull_request.base_sha}...{pull_request.head_sha}",
             ],
             max_output=max_output,

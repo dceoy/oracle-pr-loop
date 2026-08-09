@@ -1253,7 +1253,9 @@ def test_client_diff_anchors_ignores_repository_local_diff_config(
     `diff.noprefix` or oversized `diff.context`/`diff.algorithm` setting there
     must not corrupt the header paths `diff_anchors` reads or expose context
     lines beyond Git's default 3-line window, either of which could produce
-    an anchor GitHub's own diff does not contain.
+    an anchor GitHub's own diff does not contain. A low `diff.renameLimit`
+    must not silently turn a rename's small hunk into whole-file delete/add
+    anchors, and `diff.indentHeuristic=false` must not move a hunk boundary.
     """
     git = shutil.which("git")
     assert git is not None
@@ -1275,6 +1277,8 @@ def test_client_diff_anchors_ignores_repository_local_diff_config(
     _git(git, ["config", "diff.context", "10"], cwd=repo)
     _git(git, ["config", "diff.interHunkContext", "10"], cwd=repo)
     _git(git, ["config", "diff.algorithm", "patience"], cwd=repo)
+    _git(git, ["config", "diff.indentHeuristic", "false"], cwd=repo)
+    _git(git, ["config", "diff.renameLimit", "1"], cwd=repo)
     client = GitHubClient(CommandRunner(), repo)
     pull_request = _sample_pr(base, head)
 
@@ -1285,6 +1289,49 @@ def test_client_diff_anchors_ignores_repository_local_diff_config(
     }
     assert ("file.py", "LEFT", 1) not in anchors
     assert ("file.py", "LEFT", 12) not in anchors
+
+
+def test_client_diff_anchors_ignores_a_low_repository_local_rename_limit(
+    tmp_path: Path,
+) -> None:
+    """A low `diff.renameLimit` must not turn a rename into delete+add anchors.
+
+    Git's exhaustive inexact-rename search silently gives up once the number
+    of rename candidates exceeds `diff.renameLimit`, reporting the rename as
+    an unrelated whole-file deletion and whole-file addition instead. That
+    would replace a small rename hunk's anchors with anchors spanning every
+    line of both files, so this repository-local setting must have no effect
+    on the anchor set `patch()` produces.
+    """
+    git = shutil.which("git")
+    assert git is not None
+    repo = tmp_path / "rename-repo"
+    repo.mkdir()
+    _git(git, ["init", "-q"], cwd=repo)
+    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
+    _git(git, ["config", "user.name", "Test"], cwd=repo)
+    body = "\n".join(f"line{index}" for index in range(1, 9))
+    for index in range(1, 11):
+        (repo / f"file{index}.py").write_text(f"{body}\n")
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
+    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    for index in range(1, 11):
+        source = repo / f"file{index}.py"
+        source.rename(repo / f"moved{index}.py")
+    (repo / "moved1.py").write_text(f"{body}\nCHANGED\n")
+    _git(git, ["add", "-A"], cwd=repo)
+    _git(git, ["commit", "-q", "-am", "rename"], cwd=repo)
+    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
+    _git(git, ["config", "diff.renameLimit", "1"], cwd=repo)
+    client = GitHubClient(CommandRunner(), repo)
+    pull_request = _sample_pr(base, head, paths=("moved1.py",))
+
+    anchors = client.diff_anchors(pull_request)
+
+    assert {(path, side) for path, side, _line in anchors} == {
+        ("moved1.py", "RIGHT"),
+    }
 
 
 def test_post_review_publishes_inline_comments_in_the_same_request(
