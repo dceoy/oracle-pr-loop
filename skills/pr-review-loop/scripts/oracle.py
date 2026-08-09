@@ -681,6 +681,7 @@ def _bounded_text_attachment(
         (attachment, len(data)),
     )
 
+
 def _build_attachment_bundle(
     writer: TemporaryFileWriter,
     runner: CommandRunner,
