@@ -1312,3 +1312,57 @@ def test_oracle_invocation_omits_manual_login_with_remote_transport(
     assert "--browser-manual-login" not in oracle_argv
     assert "--engine" in oracle_argv
     assert "browser" in oracle_argv
+
+
+def _write_oracle_config_remote_host(home: Path, remote_host: str) -> None:
+    """Write a `.oracle/config.json` declaring `browser.remoteHost` under home."""
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        json.dumps({"browser": {"remoteHost": remote_host}}),
+        encoding="utf-8",
+    )
+
+
+def test_oracle_invocation_rejects_config_remote_host_without_matching_env(
+    tmp_path: Path,
+) -> None:
+    """A config-only `browser.remoteHost` cannot silently override local mode."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    with pytest.raises(LooprError, match="remoteHost"):
+        oracle.generate(issue, "main", SHA_A, bundle)
+    assert runner.commands == []
+
+
+def test_oracle_invocation_allows_config_remote_host_matching_exported_env(
+    tmp_path: Path,
+) -> None:
+    """A config-declared `browser.remoteHost` mirrored via env is accepted."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": str(home), "ORACLE_REMOTE_HOST": "10.0.0.9:9473"},
+    )
+    oracle = BootstrapOracleClient(runner, github, writer, "heavy")
+
+    bundle = oracle.build_bundle(issue, SHA_A)
+    oracle.generate(issue, "main", SHA_A, bundle)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv

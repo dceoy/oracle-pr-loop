@@ -681,7 +681,6 @@ def _bounded_text_attachment(
         (attachment, len(data)),
     )
 
-
 def _build_attachment_bundle(
     writer: TemporaryFileWriter,
     runner: CommandRunner,
@@ -838,6 +837,35 @@ def build_bootstrap_bundle(
         ),
     )
 
+def _effective_oracle_remote_host(
+    runner: CommandRunner,
+    env: Mapping[str, str],
+) -> str | None:
+    """Resolve the remote host Oracle will actually use, or None for local.
+
+    Oracle resolves `browser.remoteHost` from its own config file ahead of
+    `ORACLE_REMOTE_HOST`, so a config-declared host that disagrees with the
+    exported one would otherwise route the run to an unverified endpoint.
+
+    Returns:
+        The agreed-upon remote host, or None when neither source sets one.
+
+    Raises:
+        LooprError: the config file declares a `browser.remoteHost` that
+            does not match the exported `ORACLE_REMOTE_HOST`.
+    """
+    env_remote_host = env.get("ORACLE_REMOTE_HOST")
+    config_remote_host = runner.oracle_config_remote_host
+    if config_remote_host and config_remote_host != env_remote_host:
+        raise LooprError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "Oracle's config file declares a browser.remoteHost that does "
+            "not match the exported ORACLE_REMOTE_HOST; align them or "
+            "remove the config-backed remote-transport fields",
+        )
+    return env_remote_host or config_remote_host
+
 
 def _oracle_command(
     raw_path: Path,
@@ -916,6 +944,7 @@ def invoke_oracle(
         )
     raw_path = writer.root / "oracle-raw.json"
     env = runner.oracle_env()
+    remote_host = _effective_oracle_remote_host(runner, env)
     command = _oracle_command(
         raw_path,
         thinking_time,
@@ -923,7 +952,7 @@ def invoke_oracle(
         prompt,
         attachments,
         slug,
-        manual_login=not bool(env.get("ORACLE_REMOTE_HOST")),
+        manual_login=not bool(remote_host),
     )
     _validate_oracle_command(command)
     environment = env

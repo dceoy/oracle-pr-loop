@@ -112,7 +112,7 @@ export ORACLE_REMOTE_TOKEN='...'  # token printed by `oracle serve`; it rotates 
 oracle --engine browser --prompt "Reply with ready"
 ```
 
-`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` to every Oracle invocation, and `ORACLE_REMOTE_HOST` is its only signal for remote transport; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. Export both variables in the environment `pr-review-loop` runs in: persisting `browser.remoteHost`/`browser.remoteToken` only to `~/.oracle/config.json` is not a supported path, since `pr-review-loop` cannot see that file — it would still pass `--browser-manual-login`, and the token would not be redacted from logs or rejected in attachments and patches.
+`pr-review-loop` forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` to every Oracle invocation, and treats `ORACLE_REMOTE_HOST` as its supported signal for remote transport; `bootstrap` and `review` never add `--remote-host`/`--remote-token` flags or any other custom Oracle transport. Export both variables in the environment `pr-review-loop` runs in. `pr-review-loop` also reads `<ORACLE_HOME_DIR or HOME>/.oracle/config.json` — the same file Oracle itself consults ahead of these environment variables — so a config-declared `browser.remoteToken` is still registered for redaction/rejection, and `bootstrap`/`review` refuse to run if a config-declared `browser.remoteHost` disagrees with the exported `ORACLE_REMOTE_HOST` (including when only the config declares one), rather than silently letting the config value override the exported endpoint.
 
 ## Recovery
 

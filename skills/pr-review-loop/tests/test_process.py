@@ -105,13 +105,30 @@ def test_command_error_keeps_bounded_redacted_completed_output(tmp_path: Path) -
     assert "command-secret-value" not in str(error)
 
 
-def test_oracle_remote_token_only_in_config_file_is_not_redacted() -> None:
-    """A token never exported to the environment is invisible to redaction."""
-    runner = CommandRunner({"PATH": os.environ["PATH"]})
+def test_oracle_remote_token_only_in_config_file_is_still_redacted(
+    tmp_path: Path,
+) -> None:
+    """A token declared only in Oracle's config file is still a known secret."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteToken": "config-file-only-secret-token"}}',
+        encoding="utf-8",
+    )
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
     config_only_token = "config-file-only-secret-token"
 
-    assert not runner.contains_secret(config_only_token)
-    assert runner.redact(f"token={config_only_token}") == f"token={config_only_token}"
+    assert runner.contains_secret(config_only_token)
+    assert runner.redact(f"token={config_only_token}") == "token=[REDACTED]"
+
+
+def test_oracle_config_remote_host_is_none_when_config_file_is_absent(
+    tmp_path: Path,
+) -> None:
+    """A missing Oracle config file leaves the config-backed remote host unset."""
+    runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+    assert runner.oracle_config_remote_host is None
 
 
 def test_runner_rejects_output_overflow(tmp_path: Path) -> None:

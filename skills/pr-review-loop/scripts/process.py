@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- this module is the sole, argv-validated, shell=False subprocess boundary
@@ -10,10 +11,12 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, NoReturn
+from typing import TYPE_CHECKING, BinaryIO, NoReturn, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from .models import JsonObject
 
 MAX_OUTPUT = 24 * 1024 * 1024
 MAX_INPUT = 4 * 1024 * 1024
@@ -76,6 +79,43 @@ class CommandRunner:
                 )
             )
         }
+        config_remote_host, config_remote_token = self._read_oracle_config_remote()
+        self.oracle_config_remote_host = config_remote_host
+        if config_remote_token and len(config_remote_token) >= MIN_SECRET_LENGTH:
+            self.secrets.add(config_remote_token)
+
+    def _read_oracle_config_remote(self) -> tuple[str | None, str | None]:
+        """Read Oracle's own remote-transport fields from its config file.
+
+        Oracle resolves `browser.remoteHost`/`browser.remoteToken` from
+        `<home>/.oracle/config.json` ahead of `ORACLE_REMOTE_HOST`/
+        `ORACLE_REMOTE_TOKEN`, so this module must know the config-declared
+        values too rather than trusting its own env export alone.
+
+        Returns:
+            The config-declared (remote host, remote token); each is None if
+            unset, or if the config file is absent, unreadable, or malformed.
+        """
+        home = self.source_env.get("ORACLE_HOME_DIR") or self.source_env.get("HOME")
+        if not home:
+            return (None, None)
+        config_path = Path(home) / ".oracle" / "config.json"
+        try:
+            raw_config: object = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return (None, None)
+        if not isinstance(raw_config, dict):
+            return (None, None)
+        config = cast("JsonObject", raw_config)
+        browser_config = config.get("browser")
+        if not isinstance(browser_config, dict):
+            return (None, None)
+        host = browser_config.get("remoteHost")
+        token = browser_config.get("remoteToken")
+        return (
+            host if isinstance(host, str) and host else None,
+            token if isinstance(token, str) and token else None,
+        )
 
     def redact(self, text: str) -> str:
         """Replace every known secret value in text.
