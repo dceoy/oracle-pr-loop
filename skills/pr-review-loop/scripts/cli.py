@@ -18,7 +18,7 @@ from .models import (
     EXIT_PRECONDITION,
     BootstrapResult,
     JsonObject,
-    LooprError,
+    ReviewLoopError,
     ReviewResult,
     SubmitResult,
 )
@@ -35,12 +35,12 @@ class StructuredArgumentParser(argparse.ArgumentParser):
 
     @typing.override
     def error(self, message: str) -> NoReturn:
-        """Convert argparse validation failures into LooprError.
+        """Convert argparse validation failures into ReviewLoopError.
 
         Raises:
-            LooprError: Always.
+            ReviewLoopError: Always.
         """
-        raise LooprError(EXIT_PRECONDITION, "input", message)
+        raise ReviewLoopError(EXIT_PRECONDITION, "input", message)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -116,17 +116,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         The process exit code.
     """
     command = _requested_command(argv)
-    # Fallback runner for a LooprError raised by argument parsing itself,
-    # before `--repo-dir` is known; replaced below once parsing succeeds so
-    # Oracle's config-file inspection resolves a relative `ORACLE_HOME_DIR`
-    # against the same cwd Oracle itself will be launched with.
+    # Fallback runner for an argument-parsing failure before `--repo-dir` is
+    # known; replaced below once parsing succeeds so Oracle config inspection
+    # resolves relative paths against the same cwd Oracle itself will use.
     runner = CommandRunner()
     try:
         args = parser().parse_args(argv)
         command = args.command
         runner = CommandRunner(repo_dir=Path(args.repo_dir))
         result = _dispatch(command, args, runner)
-    except LooprError as exc:
+    except ReviewLoopError as exc:
         message = runner.redact(str(exc))
         _emit_error(command, exc.category, message)
         sys.stderr.write(f"pr-review-loop {command}: {message}\n")

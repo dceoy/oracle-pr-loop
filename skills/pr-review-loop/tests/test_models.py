@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from scripts.models import BootstrapResult, LooprError, ReviewResult, SubmitResult
+from scripts.models import (
+    BootstrapResult,
+    ReviewLoopError,
+    ReviewResult,
+    SubmitResult,
+)
 
 
-def test_loop_error_keeps_machine_fields() -> None:
+def test_review_loop_error_keeps_machine_fields() -> None:
     """Stable failures retain their exit code, category, and message."""
-    error = LooprError(6, "stale_state", "head changed")
+    error = ReviewLoopError(6, "stale_state", "head changed")
 
     assert error.code == 6
     assert error.category == "stale_state"

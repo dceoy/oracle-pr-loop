@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from .artifacts import temporary_file_writer
 from .github import IssueClient
-from .models import EXIT_PRECONDITION, EXIT_RACE, BootstrapResult, LooprError
+from .models import EXIT_PRECONDITION, EXIT_RACE, BootstrapResult, ReviewLoopError
 from .oracle import (
     BOOTSTRAP_PROMPT,
     MAX_BOOTSTRAP_ATTACHMENTS,
@@ -35,9 +35,9 @@ def execute_bootstrap(
         The stable bootstrap command result.
 
     Raises:
-        LooprError: The Issue, base branch, local workspace, temporary files,
-            or Oracle output violated a precondition, or the issue, base
-            branch, or local workspace changed during prompt generation.
+        ReviewLoopError: The Issue, base branch, local workspace, temporary
+            files, or Oracle output violated a precondition, or the issue,
+            base branch, or local workspace changed during prompt generation.
     """
     command_runner = runner if runner is not None else CommandRunner(repo_dir=repo_dir)
     issue_client = IssueClient(command_runner, repo_dir)
@@ -65,7 +65,8 @@ def execute_bootstrap(
             base_sha=base_sha,
         )
         slug = (
-            f"loopr-bootstrap-{initial.number}-{base_sha[:12]}-{uuid.uuid4().hex[:8]}"
+            f"pr-review-loop-bootstrap-{initial.number}-"
+            f"{base_sha[:12]}-{uuid.uuid4().hex[:8]}"
         )
         raw = invoke_oracle(
             command_runner,
@@ -93,7 +94,7 @@ def execute_bootstrap(
         or after_head != base_sha
         or _worktree_is_dirty(issue_client)
     ):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_RACE,
             "stale_state",
             "issue, base branch, or local workspace changed during prompt generation",
@@ -130,16 +131,16 @@ def _ensure_base_available(
     """Require the base commit to be present locally, with an actionable failure.
 
     Raises:
-        LooprError: base_sha does not name a local commit object.
+        ReviewLoopError: base_sha does not name a local commit object.
     """
     try:
         issue_client.ensure_commit_object(base_sha)
-    except LooprError as exc:
+    except ReviewLoopError as exc:
         message = (
             f"base commit {base_sha} for branch {base_ref} is not available "
             f"locally; run `git fetch origin {base_ref}` and retry"
         )
-        raise LooprError(exc.code, exc.category, message) from exc
+        raise ReviewLoopError(exc.code, exc.category, message) from exc
 
 
 def _local_head(issue_client: IssueClient) -> str:
@@ -189,7 +190,7 @@ def _ensure_workspace_bound_to_base(
     detached) would let that first commit land on `base_ref` itself.
 
     Raises:
-        LooprError: local `HEAD` is not base_sha, the checkout is detached
+        ReviewLoopError: local `HEAD` is not base_sha, the checkout is detached
             or sitting on base_ref itself, or tracked or untracked changes
             are pending.
     """
@@ -200,7 +201,7 @@ def _ensure_workspace_bound_to_base(
             f"branch {base_ref}; run `git fetch origin {base_ref}` then "
             f"`git switch -c <branch> {base_sha}` before running bootstrap"
         )
-        raise LooprError(EXIT_PRECONDITION, "workspace", message)
+        raise ReviewLoopError(EXIT_PRECONDITION, "workspace", message)
     local_branch = _local_branch(issue_client)
     if local_branch in {"HEAD", base_ref}:
         state = (
@@ -213,9 +214,9 @@ def _ensure_workspace_bound_to_base(
             f"{base_sha}` before running bootstrap so the first "
             "implementation commit lands on its own branch"
         )
-        raise LooprError(EXIT_PRECONDITION, "workspace", message)
+        raise ReviewLoopError(EXIT_PRECONDITION, "workspace", message)
     if _worktree_is_dirty(issue_client):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "workspace",
             "local checkout has uncommitted tracked changes or untracked "
