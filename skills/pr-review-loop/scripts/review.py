@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .artifacts import temporary_file_writer
 from .github import GitHubClient
@@ -110,7 +110,7 @@ def execute_review(
         )
 
     body, comments = _publication(github, initial, verdict)
-    before_post = github.snapshot()
+    before_post = cast("PullRequest", github.identity_snapshot())
     if not github.same_snapshot(initial, before_post):
         raise ReviewLoopError(
             EXIT_RACE,
@@ -121,7 +121,7 @@ def execute_review(
     review_id, _ = github.post_review(initial, event, body, comments)
 
     try:
-        after_post = github.snapshot()
+        after_post = cast("PullRequest", github.identity_snapshot())
         verified = github.verify_posted(initial, review_id, body)
         _require_fresh_state(github, initial, after_post, verified, event)
     except BaseException as exc:
