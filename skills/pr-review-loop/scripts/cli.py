@@ -29,6 +29,9 @@ from .submit import execute_submit
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+CLI_COMMAND = "pr-review-loop"
+COMMANDS = frozenset({"bootstrap", "review", "submit"})
+
 
 class StructuredArgumentParser(argparse.ArgumentParser):
     """Raise structured command errors instead of terminating with prose."""
@@ -51,20 +54,31 @@ def parser() -> argparse.ArgumentParser:
         `submit` commands.
     """
     root = StructuredArgumentParser(
-        description="Bootstrap, review, or submit one exact GitHub pull request."
+        description=(
+            "Bootstrap one exact GitHub Issue, or review or submit one exact "
+            "GitHub pull request."
+        )
     )
     subcommands = root.add_subparsers(dest="command", required=True)
     bootstrap = subcommands.add_parser(
         "bootstrap",
         help="turn one open GitHub Issue into a bounded implementation prompt",
+        description=(
+            "Turn one exact open GitHub Issue into a bounded implementation prompt."
+        ),
     )
     review = subcommands.add_parser(
         "review",
         help="review and post one exact pull-request snapshot",
+        description="Review and post one exact GitHub pull-request snapshot.",
     )
     submit = subcommands.add_parser(
         "submit",
-        help="validate, commit, and lease-protect a workspace patch",
+        help="validate, commit, and lease-protect a pull-request workspace patch",
+        description=(
+            "Validate, commit, and lease-protect the workspace patch for one exact "
+            "GitHub pull request."
+        ),
     )
 
     for command in (review, submit):
@@ -116,9 +130,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         The process exit code.
     """
     command = _requested_command(argv)
-    # Fallback runner for an argument-parsing failure before `--repo-dir` is
-    # known; replaced below once parsing succeeds so Oracle config inspection
-    # resolves relative paths against the same cwd Oracle itself will use.
     runner = CommandRunner()
     try:
         args = parser().parse_args(argv)
@@ -178,11 +189,16 @@ def _dispatch(
 
 
 def _requested_command(argv: Sequence[str] | None) -> str:
-    """Return a bounded command label before argparse validation runs."""
+    """Return the attributable command before full argparse validation.
+
+    A recognized first token remains attributable even when later option parsing
+    fails. Missing or unknown subcommands use the documented top-level command
+    label rather than pretending the failure belongs to a real subcommand.
+    """
     values = list(sys.argv[1:] if argv is None else argv)
-    if values and values[0] in {"bootstrap", "review", "submit"}:
+    if values and values[0] in COMMANDS:
         return values[0]
-    return "unknown"
+    return CLI_COMMAND
 
 
 def _emit_error(command: str, category: str, message: str) -> None:
