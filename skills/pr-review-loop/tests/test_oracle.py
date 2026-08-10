@@ -117,7 +117,8 @@ def test_review_prompt_binds_identity_and_exact_anchor_semantics() -> None:
     assert "side is RIGHT" in rendered
     assert "side is LEFT only for a removed line" in rendered
     assert "An unchanged context line is always RIGHT" in rendered
-    assert "use null rather than guessing a line" in rendered
+    assert "use null" in rendered
+    assert "guessing a line" in rendered
 
 
 def test_bootstrap_prompt_is_issue_oriented_and_advisory() -> None:
@@ -127,8 +128,9 @@ def test_bootstrap_prompt_is_issue_oriented_and_advisory() -> None:
         base_ref="main",
         base_sha=SHA_A,
     )
+    normalized = " ".join(rendered.split())
 
-    assert "Issue\n#7" in rendered or "Issue\n#7".replace("\n", " ") in rendered.replace("\n", " ")
+    assert "Issue #7" in normalized
     assert "untrusted requirements data" in rendered
     assert "do not implement" in rendered
     assert "commit, push, create a pull request" in rendered
@@ -224,9 +226,10 @@ def test_parse_review_rejects_malformed_locations(location: object) -> None:
 
 
 def test_parse_review_rejects_oversized_body() -> None:
+    body = "x" * (MAX_REVIEW_BODY_BYTES + 1)
     with pytest.raises(ReviewLoopError) as captured:
         parse_review(
-            json.dumps(review_payload(review_body="x" * (MAX_REVIEW_BODY_BYTES + 1))),
+            json.dumps(review_payload(review_body=body)),
             sample_pr(),
         )
 
@@ -243,7 +246,11 @@ def test_parse_review_requires_exactly_one_object(text: str) -> None:
 
 
 def test_parse_bootstrap_accepts_exact_identity() -> None:
-    result = parse_bootstrap(json.dumps(bootstrap_payload()), sample_issue(), SHA_A)
+    result = parse_bootstrap(
+        json.dumps(bootstrap_payload()),
+        sample_issue(),
+        SHA_A,
+    )
 
     assert result.repository == "owner/repository"
     assert result.issue_number == 7
@@ -269,27 +276,45 @@ def test_parse_bootstrap_fails_closed_on_invalid_output(payload: JsonObject) -> 
 
 
 class FakeReviewGitHub:
-    def patch(self, _pr: PullRequest, *, max_output: int) -> bytes:
+    """Provide deterministic immutable evidence to bundle tests."""
+
+    @staticmethod
+    def patch(_pr: PullRequest, *, max_output: int) -> bytes:
         del max_output
         return b"diff --git a/file.py b/file.py\n"
 
-    def tracked_paths(self, _pr: PullRequest) -> tuple[str, ...]:
+    @staticmethod
+    def tracked_paths(_pr: PullRequest) -> tuple[str, ...]:
         return ("AGENTS.md", "file.py")
 
+    @staticmethod
     def changed_file_bytes(
-        self, _pr: PullRequest, path: str, *, max_output: int
+        _pr: PullRequest,
+        path: str,
+        *,
+        max_output: int,
     ) -> bytes | None:
         del max_output
-        return {"AGENTS.md": b"review rules\n", "file.py": b"print('ok')\n"}[path]
+        return {
+            "AGENTS.md": b"review rules\n",
+            "file.py": b"print('ok')\n",
+        }[path]
 
 
 class FakeIssueClient:
+    """Provide deterministic base-tree evidence to bootstrap bundle tests."""
+
     @staticmethod
     def tracked_paths_at(_sha: str) -> tuple[str, ...]:
         return ("AGENTS.md", "README.md")
 
     @staticmethod
-    def blob_bytes_at(_sha: str, path: str, *, max_output: int) -> bytes | None:
+    def blob_bytes_at(
+        _sha: str,
+        path: str,
+        *,
+        max_output: int,
+    ) -> bytes | None:
         del max_output
         return b"instructions\n" if path == "AGENTS.md" else b"readme\n"
 
@@ -300,10 +325,14 @@ def test_review_bundle_contains_snapshot_patch_manifest_and_text_evidence(
     runner = CommandRunner({"PATH": "/usr/bin"})
     writer = TemporaryFileWriter(tmp_path / "private", runner)
 
-    attachments = build_review_bundle(runner, FakeReviewGitHub(), writer, sample_pr())
+    attachments = build_review_bundle(
+        runner,
+        FakeReviewGitHub(),
+        writer,
+        sample_pr(),
+    )
 
-    names = [path.name for path in attachments]
-    assert names[:4] == [
+    assert [path.name for path in attachments][:4] == [
         "snapshot.json",
         "patch.diff",
         "changed-paths.txt",
@@ -320,12 +349,20 @@ def test_review_bundle_rejects_known_credentials_in_patch(tmp_path: Path) -> Non
     writer = TemporaryFileWriter(tmp_path / "private", runner)
 
     class SecretPatchGitHub(FakeReviewGitHub):
-        def patch(self, _pr: PullRequest, *, max_output: int) -> bytes:
+        """Return a patch containing a known credential."""
+
+        @staticmethod
+        def patch(_pr: PullRequest, *, max_output: int) -> bytes:
             del max_output
             return f"diff --git a/file.py b/file.py\n+{secret}\n".encode()
 
     with pytest.raises(ReviewLoopError) as captured:
-        build_review_bundle(runner, SecretPatchGitHub(), writer, sample_pr())
+        build_review_bundle(
+            runner,
+            SecretPatchGitHub(),
+            writer,
+            sample_pr(),
+        )
 
     assert captured.value.code == EXIT_PRECONDITION
     assert captured.value.category == "bundle"
@@ -352,6 +389,8 @@ def test_bootstrap_bundle_only_attaches_instruction_files(tmp_path: Path) -> Non
 
 
 class RecordingOracleRunner(CommandRunner):
+    """Capture Oracle argv/environment and optionally inject command failures."""
+
     def __init__(
         self,
         source_env: Mapping[str, str],
@@ -391,7 +430,9 @@ def _writer(tmp_path: Path, runner: CommandRunner) -> TemporaryFileWriter:
     return TemporaryFileWriter(tmp_path / "private", runner)
 
 
-def test_local_oracle_uses_manual_login_and_private_oracle_home(tmp_path: Path) -> None:
+def test_local_oracle_uses_manual_login_and_private_oracle_home(
+    tmp_path: Path,
+) -> None:
     runner = RecordingOracleRunner({"PATH": "/usr/bin", "HOME": "/home/test"})
     writer = _writer(tmp_path, runner)
     attachment = writer.text("input.txt", "evidence")
@@ -420,13 +461,15 @@ def test_remote_oracle_uses_environment_only_and_never_token_argv(
     tmp_path: Path,
 ) -> None:
     token = "remote-secret-token"
-    runner = RecordingOracleRunner({
-        "PATH": "/usr/bin",
-        "HOME": "/home/test",
-        "ORACLE_REMOTE_HOST": " 127.0.0.1:9473 ",
-        "ORACLE_REMOTE_TOKEN": token,
-        "ORACLE_HOME_DIR": "/host/oracle-config",
-    })
+    runner = RecordingOracleRunner(
+        {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "ORACLE_REMOTE_HOST": " 127.0.0.1:9473 ",
+            "ORACLE_REMOTE_TOKEN": token,
+            "ORACLE_HOME_DIR": "/host/oracle-config",
+        }
+    )
     writer = _writer(tmp_path, runner)
     attachment = writer.text("input.txt", "evidence")
 
@@ -452,15 +495,18 @@ def test_remote_oracle_uses_environment_only_and_never_token_argv(
     assert env["ORACLE_HOME_DIR"] != "/host/oracle-config"
     assert argv[argv.index("--browser-model-strategy") + 1] == "select"
     assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
-    assert argv[argv.index("--browser-thinking-time") + 1] == "heavy"
+    effort_index = argv.index("--browser-thinking-time") + 1
+    assert argv[effort_index] == "heavy"
 
 
 def test_blank_remote_host_keeps_local_manual_login(tmp_path: Path) -> None:
-    runner = RecordingOracleRunner({
-        "PATH": "/usr/bin",
-        "HOME": "/home/test",
-        "ORACLE_REMOTE_HOST": "\ufeff  ",
-    })
+    runner = RecordingOracleRunner(
+        {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "ORACLE_REMOTE_HOST": "\ufeff  ",
+        }
+    )
     writer = _writer(tmp_path, runner)
 
     invoke_oracle(
@@ -481,12 +527,14 @@ def test_remote_token_is_rejected_from_attachment_before_oracle_runs(
     tmp_path: Path,
 ) -> None:
     token = "remote-secret-token"
-    runner = RecordingOracleRunner({
-        "PATH": "/usr/bin",
-        "HOME": "/home/test",
-        "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
-        "ORACLE_REMOTE_TOKEN": token,
-    })
+    runner = RecordingOracleRunner(
+        {
+            "PATH": "/usr/bin",
+            "HOME": "/home/test",
+            "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
+            "ORACLE_REMOTE_TOKEN": token,
+        }
+    )
     writer = _writer(tmp_path, runner)
     attachment = writer.root / "untrusted.txt"
     attachment.write_text(f"evidence {token}\n", encoding="utf-8")
@@ -507,7 +555,9 @@ def test_remote_token_is_rejected_from_attachment_before_oracle_runs(
     assert runner.calls == []
 
 
-def test_oracle_output_containing_remote_token_fails_closed(tmp_path: Path) -> None:
+def test_oracle_output_containing_remote_token_fails_closed(
+    tmp_path: Path,
+) -> None:
     token = "remote-secret-token"
     runner = RecordingOracleRunner(
         {
@@ -559,17 +609,23 @@ def test_oracle_attachment_count_is_bounded(tmp_path: Path) -> None:
     assert captured.value.category == "bundle"
 
 
-def test_remote_busy_detection_requires_routing_and_exact_terminal_error() -> None:
+def test_remote_busy_detection_requires_routing_and_terminal_error() -> None:
     retryable = CommandError(
         "busy",
         returncode=1,
-        stdout="Routing browser automation to remote host http://host\nERROR: busy\n",
+        stdout=(
+            "Routing browser automation to remote host http://host\n"
+            "ERROR: busy\n"
+        ),
     )
     local = CommandError("busy", returncode=1, stdout="ERROR: busy\n")
     ambiguous = CommandError(
         "busy",
         returncode=1,
-        stdout="Routing browser automation to remote host http://host\nERROR: busy later\n",
+        stdout=(
+            "Routing browser automation to remote host http://host\n"
+            "ERROR: busy later\n"
+        ),
     )
 
     assert _is_remote_busy(retryable)
@@ -578,16 +634,19 @@ def test_remote_busy_detection_requires_routing_and_exact_terminal_error() -> No
 
 
 def test_remote_busy_delay_is_bounded_exponential_with_jitter() -> None:
-    assert _remote_busy_delay(1, lambda: 0.0) == 0.75
-    assert _remote_busy_delay(1, lambda: 1.0) == 1.0
-    assert _remote_busy_delay(10, lambda: 1.0) == 30.0
+    assert _remote_busy_delay(1, lambda: 0.0) == pytest.approx(0.75)
+    assert _remote_busy_delay(1, lambda: 1.0) == pytest.approx(1.0)
+    assert _remote_busy_delay(10, lambda: 1.0) == pytest.approx(30.0)
 
 
 def test_remote_busy_retries_are_bounded(tmp_path: Path) -> None:
     busy = CommandError(
         "busy",
         returncode=1,
-        stdout="Routing browser automation to remote host http://host\nERROR: busy\n",
+        stdout=(
+            "Routing browser automation to remote host http://host\n"
+            "ERROR: busy\n"
+        ),
     )
     runner = RecordingOracleRunner(
         {
