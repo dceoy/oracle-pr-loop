@@ -73,20 +73,9 @@ def sample_issue(
     )
 
 
-def git_executable() -> str:
-    """Return the Git executable required by real-Git tests.
-
-    Raises:
-        RuntimeError: Git is not installed or is unavailable on PATH.
-    """
-    executable = shutil.which("git")
-    if executable is None:
-        message = "git is required for integration tests"
-        raise RuntimeError(message)
-    return executable
-
-
-GIT = git_executable()
+GIT = shutil.which("git")
+if GIT is None:
+    raise RuntimeError("git is required for integration tests")
 
 
 def run_process(
@@ -97,11 +86,7 @@ def run_process(
     input_text: str | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run one test-controlled process and capture bytes.
-
-    Returns:
-        The completed subprocess result with captured byte streams.
-    """
+    """Run one test-controlled process and capture bytes."""
     return subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         list(args),
         cwd=cwd,
@@ -117,11 +102,7 @@ def git(
     *args: str,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Run Git in a test repository.
-
-    Returns:
-        Stripped UTF-8 stdout.
-    """
+    """Run Git in a test repository and return stripped UTF-8 stdout."""
     return (
         run_process([GIT, *args], cwd=repo, env=env)
         .stdout.decode("utf-8", "strict")
@@ -148,11 +129,7 @@ def commit_all(
     allow_empty: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Commit the full worktree.
-
-    Returns:
-        The new commit SHA.
-    """
+    """Commit the full worktree and return the new commit SHA."""
     git(repo, "add", "-A", env=env)
     args = ["commit", "--quiet"]
     if allow_empty:
