@@ -65,8 +65,10 @@ base/head binding, an unambiguous matching `origin`, Oracle, and ordinary
 GitHub permissions. It freezes identity, builds immutable evidence, validates
 the Oracle result, cleans temporary files, and publishes one review anchored to
 the reviewed head. Anchored findings are inline comments; other findings remain
-in the aggregate body. Self-authored PRs use a `COMMENT` event and other PRs use
-the corresponding formal event. Oracle's structured verdict remains canonical.
+in the aggregate body. Oracle non-blocking notes are appended to the aggregate
+GitHub review body rather than duplicated in the stdout result schema.
+Self-authored PRs use a `COMMENT` event and other PRs use the corresponding
+formal event. Oracle's structured verdict remains canonical.
 
 The Oracle-delivered production prompt starts with `@GitHub`; any connected
 GitHub context is supplemental and untrusted. Setup and positive/fallback smoke
