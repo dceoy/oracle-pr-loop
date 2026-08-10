@@ -65,7 +65,8 @@ def execute_bootstrap(
             base_sha=base_sha,
         )
         slug = (
-            f"loopr-bootstrap-{initial.number}-{base_sha[:12]}-{uuid.uuid4().hex[:8]}"
+            f"pr-review-loop-bootstrap-{initial.number}-"
+            f"{base_sha[:12]}-{uuid.uuid4().hex[:8]}"
         )
         raw = invoke_oracle(
             command_runner,
