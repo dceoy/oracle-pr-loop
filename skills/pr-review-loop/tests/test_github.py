@@ -1,78 +1,43 @@
-"""Focused regression tests for immutable GitHub and Git evidence safety."""
+"""GitHub identity, immutable evidence, and frozen-diff analysis tests."""
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise Git directly
-from typing import TYPE_CHECKING, cast
+from dataclasses import replace
+from pathlib import Path
+from typing import TYPE_CHECKING, override
 
 import pytest
-from scripts.artifacts import TemporaryFileWriter
+from scripts import github as github_module
 from scripts.github import (
-    MAX_ANCHOR_PATCH_BYTES,
     MAX_GITHUB_DIFF_BYTES,
-    MAX_GITHUB_DIFF_LINES,
-    MAX_GITHUB_FILE_DIFF_BYTES,
-    MAX_GITHUB_FILE_DIFF_LINES,
-    MAX_ISSUE_BODY_BYTES,
-    MAX_ISSUE_COMMENT_BYTES,
-    MAX_ISSUE_COMMENTS,
-    MAX_ISSUE_COMMENTS_TOTAL_BYTES,
     GitHubClient,
-    IssueClient,
-    _diff_sections,
-    _diff_size_safe_paths,
-    diff_anchors,
-    diff_base_paths,
-    diff_blob_shas,
+    _bounded_comments,
+    analyze_frozen_diff,
+    normalize_repo,
+    parse_json_object,
+    require_boolean,
+    require_integer,
+    require_object,
+    require_string,
     resolve_issue_target,
     resolve_target,
+    validate_path,
+    validate_ref,
 )
-from scripts.models import (
-    EXIT_PRECONDITION,
-    JsonObject,
-    JsonValue,
-    LooprError,
-    PullRequest,
-    ReviewComment,
-)
-from scripts.oracle import build_review_bundle
-from scripts.process import CommandResult, CommandRunner
+from scripts.models import EXIT_GITHUB, EXIT_PRECONDITION, JsonObject, PullRequest, ReviewLoopError
+from scripts.process import CommandRunner
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-    from pathlib import Path
-
     from pytest_mock import MockerFixture
 
-
-def _git(
-    git: str,
-    args: list[str],
-    *,
-    cwd: Path,
-    input_text: str | None = None,
-) -> str:
-    """Run one test-controlled Git command and return stripped stdout."""
-    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed test argv
-        [git, *args],
-        cwd=cwd,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return result.stdout.strip()
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+SHA_C = "c" * 40
+NULL_SHA = "0" * 40
 
 
-def _sample_pr(
-    base_sha: str,
-    head_sha: str,
-    paths: tuple[str, ...] = ("file.py",),
-) -> PullRequest:
-    """Return one valid frozen pull-request snapshot for local Git tests."""
+def sample_pr(*, changed_paths: tuple[str, ...] = ("file.py",)) -> PullRequest:
     return PullRequest(
         repository="owner/repository",
         number=21,
@@ -83,2033 +48,461 @@ def _sample_pr(
         state="OPEN",
         is_draft=False,
         base_ref="main",
-        base_sha=base_sha,
+        base_sha=SHA_A,
         head_ref="feature",
-        head_sha=head_sha,
+        head_sha=SHA_B,
         head_repository="owner/repository",
-        changed_paths=paths,
-        raw={},
+        changed_paths=changed_paths,
     )
 
 
-def _repo_with_added_files(
-    tmp_path: Path,
-    contents: dict[str, bytes],
-) -> tuple[str, Path, str, str]:
-    """Create a repository whose head adds the supplied exact file bytes."""
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "added-files-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    _git(git, ["commit", "--allow-empty", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    for path, content in contents.items():
-        file_path = repo / path
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_bytes(content)
-    _git(git, ["add", "-A"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    return git, repo, base, head
-
-
-def _synthetic_diff_header(path: str, line_count: int = 1) -> bytes:
-    """Build one synthetic diff header with a controllable hunk size."""
+def patch_for(
+    *,
+    old_path: str = "file.py",
+    new_path: str = "file.py",
+    old_sha: str = SHA_A,
+    new_sha: str = SHA_B,
+    body: str = " context\n-old\n+new\n",
+    hunk: str = "@@ -1,2 +1,2 @@",
+) -> bytes:
     return (
-        f"diff --git a/{path} b/{path}\n"
-        "new file mode 100644\n"
-        "index 0000000000000000000000000000000000000000.."
-        "1111111111111111111111111111111111111111\n"
-        "--- /dev/null\n"
-        f"+++ b/{path}\n"
-        f"@@ -0,0 +{line_count} @@\n"
+        f"diff --git a/{old_path} b/{new_path}\n"
+        f"index {old_sha}..{new_sha} 100644\n"
+        f"--- a/{old_path}\n"
+        f"+++ b/{new_path}\n"
+        f"{hunk}\n"
+        f"{body}"
     ).encode()
 
 
-def _synthetic_diff_section(path: str, payload_bytes: int) -> bytes:
-    """Build one small-text diff section with a controllable byte size."""
-    return _synthetic_diff_header(path) + b"+" + (b"x" * payload_bytes) + b"\n"
-
-
-def _synthetic_diff_section_with_lines(
-    path: str,
-    body_lines: tuple[bytes, ...],
-) -> bytes:
-    """Build one synthetic added-file section from exact body lines."""
-    return _synthetic_diff_header(path, len(body_lines)) + b"".join(
-        b"+" + line + b"\n" for line in body_lines
-    )
-
-
-def test_review_event_uses_comment_only_for_self_authored_prs(tmp_path: Path) -> None:
-    """Self-authored PRs use comments while other authors retain formal events."""
-    client = GitHubClient(CommandRunner(), tmp_path)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-
-    client.authenticated_login = pull_request.author
-    assert client.review_event(pull_request, "APPROVE") == "COMMENT"
-    assert client.review_event(pull_request, "REQUEST_CHANGES") == "COMMENT"
-
-    client.authenticated_login = "another-user"
-    assert client.review_event(pull_request, "APPROVE") == "APPROVE"
-    assert client.review_event(pull_request, "REQUEST_CHANGES") == "REQUEST_CHANGES"
-
-
-def test_verify_posted_checks_actor_commit_and_body_without_formal_state(
-    mocker: MockerFixture,
-    tmp_path: Path,
-) -> None:
-    """Publication verification ignores formal state but binds all other data."""
-    client = GitHubClient(CommandRunner(), tmp_path)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-    body = "review body\n\nReviewed head: `" + pull_request.head_sha + "`"
-    client.authenticated_login = "author"
-    response = {
-        "id": 123,
-        "user": {"login": "author"},
-        "commit_id": pull_request.head_sha,
-        "body": body,
-        "state": "CHANGES_REQUESTED",
-    }
-
-    def fake_text(_args: list[str], **_kwargs: object) -> str:
-        return json.dumps(response)
-
-    mocker.patch.object(client, "_text", fake_text)
-
-    assert client.verify_posted(pull_request, 123, body) == response
-
-
-@pytest.mark.parametrize("mismatch", ["id", "actor", "commit_id", "body"])
-def test_verify_posted_rejects_each_identity_mismatch(
-    mocker: MockerFixture,
-    tmp_path: Path,
-    mismatch: str,
-) -> None:
-    """Every post-write identity field is independently fail-closed."""
-    client = GitHubClient(CommandRunner(), tmp_path)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-    body = "review body"
-    client.authenticated_login = "author"
-    response: JsonObject = {
-        "id": 123,
-        "user": {"login": "author"},
-        "commit_id": pull_request.head_sha,
-        "body": body,
-        "state": "COMMENTED",
-    }
-    if mismatch == "id":
-        response["id"] = 456
-    elif mismatch == "actor":
-        response["user"] = {"login": "other-user"}
-    elif mismatch == "commit_id":
-        response["commit_id"] = "c" * 40
-    else:
-        response["body"] = "different body"
-
-    def fake_text(_args: list[str], **_kwargs: object) -> str:
-        return json.dumps(response)
-
-    mocker.patch.object(client, "_text", fake_text)
-
-    with pytest.raises(LooprError, match="posted review revalidation failed"):
-        client.verify_posted(pull_request, 123, body)
-
-
-def test_post_review_publishes_selected_event_and_exact_head(
-    mocker: MockerFixture,
-    tmp_path: Path,
-) -> None:
-    """The GitHub payload carries the selected event and frozen review body."""
-    client = GitHubClient(CommandRunner(), tmp_path)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-    body = "review body"
-    captured: dict[str, JsonObject] = {}
-
-    def fake_text(
-        _args: list[str],
-        *,
-        input_text: str | None = None,
-        **_kwargs: object,
-    ) -> str:
-        assert input_text is not None
-        captured["payload"] = json.loads(input_text)
-        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
-
-    mocker.patch.object(client, "_text", fake_text)
-
-    review_id, _posted = client.post_review(pull_request, "COMMENT", body)
-
-    assert review_id == 123
-    assert captured["payload"] == {
-        "commit_id": pull_request.head_sha,
-        "body": body,
-        "event": "COMMENT",
-    }
-
-
-def _repo_with_two_commits(tmp_path: Path) -> tuple[str, Path, str, str]:
-    """Create a repository with distinct base and head blob contents."""
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.py").write_text("base\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / "file.py").write_text("expected\n")
-    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    return git, repo, base, head
-
-
-def test_git_reads_ignore_replace_refs_and_injected_controls(tmp_path: Path) -> None:
-    """Replace refs and inherited Git controls cannot redirect evidence reads."""
-    git, repo, base, head = _repo_with_two_commits(tmp_path)
-    malicious_blob = _git(
-        git,
-        ["hash-object", "-w", "--stdin"],
-        cwd=repo,
-        input_text="attacker\n",
-    )
-    malicious_tree = _git(
-        git,
-        ["mktree"],
-        cwd=repo,
-        input_text=f"100644 blob {malicious_blob}\tfile.py\n",
-    )
-    malicious_commit = _git(
-        git,
-        ["commit-tree", malicious_tree, "-p", base, "-m", "malicious"],
-        cwd=repo,
-    )
-    _git(git, ["replace", head, malicious_commit], cwd=repo)
-
-    runner = CommandRunner({
-        **os.environ,
-        "GIT_DIR": str(tmp_path / "redirected.git"),
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "core.worktree",
-        "GIT_CONFIG_VALUE_0": str(tmp_path / "redirected-worktree"),
-        "GIT_NO_REPLACE_OBJECTS": "0",
-    })
-    client = GitHubClient(runner, repo)
-
-    data = client.changed_file_bytes(
-        _sample_pr(base, head),
-        "file.py",
-        max_output=1024,
-    )
-
-    assert data == b"expected\n"
-
-
-def test_changed_file_bytes_returns_none_for_deleted_path(tmp_path: Path) -> None:
-    """A path absent from the frozen head is an explicit omission."""
-    git, repo, base, _head = _repo_with_two_commits(tmp_path)
-    (repo / "file.py").unlink()
-    _git(git, ["commit", "-q", "-am", "delete"], cwd=repo)
-    deleted_head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-
-    assert (
-        client.changed_file_bytes(
-            _sample_pr(base, deleted_head),
-            "file.py",
-            max_output=1024,
-        )
-        is None
-    )
-
-
-class _FailingGitHub:
-    """Provide valid bundle inputs but fail the changed-file Git read."""
-
-    def __init__(self, repo_dir: Path) -> None:
-        self.repo_dir = repo_dir
-
-    @staticmethod
-    def patch(_pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Return a minimal valid UTF-8 patch."""
-        del max_output
-        return b"diff --git a/file.py b/file.py\n"
-
-    @staticmethod
-    def tracked_paths(_pull_request: PullRequest) -> tuple[str, ...]:
-        """Return the changed path as a tracked head path."""
-        return ("file.py",)
-
-    @staticmethod
-    def changed_file_bytes(
-        _pull_request: PullRequest,
-        _path: str,
-        *,
-        max_output: int,
-    ) -> bytes | None:
-        """Inject an unexpected Git failure rather than an omission."""
-        del max_output
-        raise LooprError(EXIT_PRECONDITION, "git", "injected git failure")
-
-
-def test_generic_git_failure_aborts_bundle_construction(tmp_path: Path) -> None:
-    """Unexpected Git failures cannot be converted into omission evidence."""
-    runner = CommandRunner()
-    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
-    github = _FailingGitHub(tmp_path)
-    github_client = cast("GitHubClient", github)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-
-    with pytest.raises(LooprError, match="injected git failure"):
-        build_review_bundle(runner, github_client, writer, pull_request)
-
-
-def _repo_with_origin(tmp_path: Path, origin_url: str) -> Path:
-    """Create an empty Git repository with a configured origin remote."""
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "issue-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["remote", "add", "origin", origin_url], cwd=repo)
-    return repo
-
-
-def _pr_payload(
-    *,
-    state: str = "OPEN",
-    is_draft: JsonValue = False,
-    body: JsonValue = "Body",
-    name_with_owner: JsonValue = "owner/repository",
-) -> JsonObject:
-    """Return one complete GitHub CLI PR response payload."""
-    return {
-        "url": "https://github.com/owner/repository/pull/21",
-        "number": 21,
-        "title": "Title",
-        "body": body,
-        "author": {"login": "author"},
-        "state": state,
-        "isDraft": is_draft,
-        "baseRefName": "main",
-        "baseRefOid": "a" * 40,
-        "headRefName": "feature",
-        "headRefOid": "b" * 40,
-        "headRepository": {
-            "nameWithOwner": name_with_owner,
-            "name": "repository",
-        },
-        "headRepositoryOwner": {"login": "owner"},
-        "files": [{"path": "file.py"}],
-        "changedFiles": 1,
-    }
-
-
-class FakePrGh(CommandRunner):
-    """Fake PR responses while running real local Git setup commands."""
-
-    def __init__(self, pull_request: JsonObject) -> None:
-        """Initialize one fake PR transport."""
-        super().__init__()
-        self.pull_request = pull_request
-        self.gh_calls: list[tuple[str, ...]] = []
-
-    def run(
-        self,
-        args: Sequence[str],
-        *,
-        cwd: Path,
-        env: Mapping[str, str],
-        timeout: int = 120,
-        input_text: str | None = None,
-        check: bool = True,
-        max_output: int = 24 * 1024 * 1024,
-        watch_path: Path | None = None,
-    ) -> CommandResult:
-        """Fake `gh` reads and delegate every other command to real Git."""
-        argv = tuple(str(value) for value in args)
-        if argv and argv[0] == "gh":
-            self.gh_calls.append(argv)
-            if argv[1] == "api" and "user" in argv:
-                return CommandResult(argv, 0, b"author\n", "")
-            if argv[1] == "pr":
-                return CommandResult(
-                    argv,
-                    0,
-                    json.dumps(self.pull_request).encode(),
-                    "",
-                )
-        return super().run(
-            argv,
-            cwd=cwd,
-            env=env,
-            timeout=timeout,
-            input_text=input_text,
-            check=check,
-            max_output=max_output,
-            watch_path=watch_path,
-        )
-
-
 @pytest.mark.parametrize(
-    "value",
+    ("remote", "expected"),
     [
-        "https://github.com/owner/repository//pull/21",
-        "https://github.com/owner/repository/pull/21/",
-        "https://user@github.com/owner/repository/pull/21",
-        "https://github.com:443/owner/repository/pull/21",
-        "https://github.com:/owner/repository/pull/21",
-        "https://github.com/owner/repository/pull/\uff12\uff11",
-        " https://github.com/owner/repository/pull/21",
-        "\nhttps://github.com/owner/repository/pull/21",
-        "https://github.com/owner/repository/pull/21?",
-        "https://github.com/owner/repository/pull/21#",
-        "https://github.com/owner/repository/pull/21?ref=head",
-    ],
-    ids=[
-        "double-slash",
-        "trailing-slash",
-        "userinfo",
-        "explicit-port",
-        "empty-port",
-        "unicode-number",
-        "leading-space",
-        "leading-newline",
-        "empty-query",
-        "empty-fragment",
-        "query",
+        ("https://github.com/owner/repository.git", "owner/repository"),
+        ("ssh://git@github.com/owner/repository.git", "owner/repository"),
+        ("git@github.com:owner/repository.git", "owner/repository"),
     ],
 )
-def test_resolve_target_reuses_strict_canonical_url_rules(value: str) -> None:
-    """PR target parsing rejects URL forms with ambiguous interpretations."""
-    with pytest.raises(LooprError) as captured:
-        resolve_target(value, None)
-    assert captured.value.category == "input"
+def test_normalize_repo_accepts_unambiguous_github_com_remotes(
+    remote: str,
+    expected: str,
+) -> None:
+    assert normalize_repo(remote) == expected
 
 
 @pytest.mark.parametrize(
-    "value",
+    "remote",
     [
-        "https://github.com/owner/repository//issues/21",
-        "https://github.com:/owner/repository/issues/21",
-        " https://github.com/owner/repository/issues/21",
-        "\nhttps://github.com/owner/repository/issues/21",
-        "https://github.com/owner/repository/issues/21?",
-        "https://github.com/owner/repository/issues/21#",
-    ],
-)
-def test_resolve_issue_target_rejects_lossy_url_forms(value: str) -> None:
-    """Issue target parsing applies the same raw URL rejection rules."""
-    with pytest.raises(LooprError) as captured:
-        resolve_issue_target(value, None)
-    assert captured.value.category == "input"
-
-
-@pytest.mark.parametrize(
-    "origin_url",
-    [
+        "https://example.com/owner/repository.git",
+        "https://github.com/owner/repository.git?x=1",
+        "https://github.com/owner/repository.git#fragment",
+        "https://github.com/owner/repository/extra",
         " https://github.com/owner/repository.git",
-        "https://github.com/owner/repository.git ",
+        "https://github.com/owner/repository.git\n",
     ],
 )
-def test_origin_repo_rejects_whitespace_before_url_parsing(
-    tmp_path: Path,
-    origin_url: str,
-) -> None:
-    """Origin normalization does not accept whitespace stripped by urlsplit."""
-    repo = _repo_with_origin(tmp_path, origin_url)
-    client = GitHubClient(CommandRunner(), repo)
+def test_normalize_repo_rejects_ambiguous_or_non_github_remotes(remote: str) -> None:
+    with pytest.raises(ReviewLoopError) as captured:
+        normalize_repo(remote)
 
-    with pytest.raises(LooprError) as captured:
-        client.initialize("21")
+    assert captured.value.code == EXIT_PRECONDITION
     assert captured.value.category == "repository"
 
 
-def test_github_client_snapshot_maps_canonical_full_pr_fields(tmp_path: Path) -> None:
-    """The canonical client maps the complete PR schema used by submit."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
-    runner = FakePrGh(_pr_payload())
-    client = GitHubClient(runner, repo)
-
-    client.initialize("21")
-    snapshot = client.snapshot()
-
-    assert snapshot.repository == "owner/repository"
-    assert snapshot.number == 21
-    assert snapshot.title == "Title"
-    assert snapshot.body == "Body"
-    assert snapshot.author == "author"
-    assert snapshot.changed_paths == ("file.py",)
-    assert snapshot.is_draft is False
+def test_resolve_target_accepts_positive_number_and_canonical_url() -> None:
+    assert resolve_target("21", "owner/repository") == (
+        "owner/repository",
+        21,
+        "https://github.com/owner/repository/pull/21",
+    )
+    assert resolve_target("https://github.com/owner/repository/pull/21", None) == (
+        "owner/repository",
+        21,
+        "https://github.com/owner/repository/pull/21",
+    )
 
 
-def test_github_client_snapshot_rejects_truncated_inventory(tmp_path: Path) -> None:
-    """Review snapshots still reject GitHub's capped changed-file list."""
-    payload = _pr_payload()
-    payload["files"] = [{"path": f"file-{index}.py"} for index in range(100)]
-    payload["changedFiles"] = 101
-    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
-    runner = FakePrGh(payload)
-    client = GitHubClient(runner, repo)
-    client.initialize("21")
-
-    with pytest.raises(LooprError) as captured:
-        client.snapshot()
-
-    assert captured.value.category == "inventory"
-
-
-def test_github_client_identity_snapshot_omits_review_inventory(
-    tmp_path: Path,
-) -> None:
-    """Submit identity reads do not request review-only file evidence."""
-    payload = _pr_payload()
-    payload["files"] = [{"path": f"file-{index}.py"} for index in range(100)]
-    payload["changedFiles"] = 101
-    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
-    runner = FakePrGh(payload)
-    client = GitHubClient(runner, repo)
-
-    client.initialize_for_submit("21")
-    snapshot = client.identity_snapshot()
-
-    assert snapshot.head_sha == "b" * 40
-    pr_call = next(call for call in runner.gh_calls if call[1] == "pr")
-    fields = pr_call[pr_call.index("--json") + 1]
-    assert set(fields.split(",")) == {
-        "url",
-        "number",
-        "state",
-        "isDraft",
-        "baseRefName",
-        "baseRefOid",
-        "headRefName",
-        "headRefOid",
-        "headRepository",
-        "headRepositoryOwner",
-    }
+def test_resolve_issue_target_is_issue_specific() -> None:
+    assert resolve_issue_target("7", "owner/repository") == (
+        "owner/repository",
+        7,
+        "https://github.com/owner/repository/issues/7",
+    )
+    with pytest.raises(ReviewLoopError):
+        resolve_issue_target("https://github.com/owner/repository/pull/7", None)
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    "value",
     [
-        ("isDraft", 0),
-        ("isDraft", "false"),
-        ("body", None),
-        ("headRepository.nameWithOwner", 0),
+        "0",
+        "-1",
+        "21 ",
+        "https://github.com/owner/repository/pull/0",
+        "https://github.com/owner/repository/pull/21?x=1",
+        "https://github.com/owner/repository/pull/21#x",
+        "https://github.com/owner/repository/issues/21",
     ],
 )
-def test_github_client_rejects_falsey_or_wrong_pr_field_types(
-    tmp_path: Path,
-    field: str,
-    value: JsonValue,
-) -> None:
-    """PR schema parsing fails closed instead of coercing falsey values."""
-    if field == "isDraft":
-        payload = _pr_payload(is_draft=value)
-    elif field == "body":
-        payload = _pr_payload(body=value)
-    else:
-        payload = _pr_payload(name_with_owner=value)
-    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
-    runner = FakePrGh(payload)
-    client = GitHubClient(runner, repo)
-    client.initialize("21")
-
-    with pytest.raises(LooprError) as captured:
-        client.snapshot()
-
-    assert captured.value.category == "github_schema"
+def test_resolve_target_rejects_noncanonical_or_nonpositive_values(value: str) -> None:
+    with pytest.raises(ReviewLoopError):
+        resolve_target(value, "owner/repository")
 
 
-def test_github_client_allows_closed_snapshot_only_after_push(tmp_path: Path) -> None:
-    """Post-push validation can accept closure without weakening pre-write checks."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
-    runner = FakePrGh(_pr_payload(state="CLOSED"))
-    client = GitHubClient(runner, repo)
-    client.initialize("21")
-
-    with pytest.raises(LooprError, match="must be open"):
-        client.snapshot()
-
-    assert client.snapshot(require_open=False).state == "CLOSED"
-
-
-def test_submit_initialization_does_not_lookup_reviewer_identity(
-    tmp_path: Path,
-) -> None:
-    """Submit reuses PR setup without requiring the review actor lookup."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/owner/repository.git")
-    runner = FakePrGh(_pr_payload())
-    client = GitHubClient(runner, repo)
-
-    client.initialize_for_submit("21")
-
-    assert not any("user" in call for call in runner.gh_calls)
-
-
-def _issue_payload(
-    *,
-    number: int = 42,
-    url: str = "https://github.com/acme/demo/issues/42",
-    state: str = "OPEN",
-    title: str = "Title",
-    body: str = "Body",
-    author: str | None = "author",
-    updated_at: str = "2026-01-01T00:00:00Z",
-    comments: list[JsonObject] | None = None,
-) -> JsonObject:
-    """Return one valid GraphQL Issue response payload."""
-    return {
-        "number": number,
-        "url": url,
-        "state": state,
-        "title": title,
-        "body": body,
-        "author": None if author is None else {"login": author},
-        "updatedAt": updated_at,
-        "comments": [] if comments is None else list(comments),
-    }
-
-
-class FakeIssueGh(CommandRunner):
-    """Fake GitHub responses while running real local Git.
-
-    The fake returns its configured comments regardless of the requested
-    GraphQL window. Tests for the outbound bound inspect `gh_calls` directly;
-    the oversized response tests intentionally exercise local defenses too.
-    """
-
-    def __init__(
-        self,
-        *,
-        issue: JsonObject,
-        default_branch: str = "main",
-        branch_sha: str = "a" * 40,
-    ) -> None:
-        """Initialize one fake Issue-bootstrap GitHub CLI transport."""
-        super().__init__()
-        self.issue = issue
-        self.default_branch_name = default_branch
-        self.branch_sha_value = branch_sha
-        self.gh_calls: list[tuple[str, ...]] = []
-
-    def run(
-        self,
-        args: Sequence[str],
-        *,
-        cwd: Path,
-        env: Mapping[str, str],
-        timeout: int = 120,
-        input_text: str | None = None,
-        check: bool = True,
-        max_output: int = 24 * 1024 * 1024,
-        watch_path: Path | None = None,
-    ) -> CommandResult:
-        """Fake `gh` reads and delegate every other command to real Git."""
-        argv = tuple(str(value) for value in args)
-        if argv and argv[0] == "gh":
-            self.gh_calls.append(argv)
-            if argv[1] == "repo":
-                payload = {"defaultBranchRef": {"name": self.default_branch_name}}
-                return CommandResult(argv, 0, json.dumps(payload).encode(), "")
-            if argv[1] == "api" and "graphql" in argv:
-                issue_payload = dict(self.issue)
-                issue_payload["comments"] = {
-                    "nodes": issue_payload.get("comments", []),
-                }
-                envelope = {"data": {"repository": {"issue": issue_payload}}}
-                return CommandResult(argv, 0, json.dumps(envelope).encode(), "")
-            if argv[1] == "api":
-                payload = {"commit": {"sha": self.branch_sha_value}}
-                return CommandResult(argv, 0, json.dumps(payload).encode(), "")
-        return super().run(
-            argv,
-            cwd=cwd,
-            env=env,
-            timeout=timeout,
-            input_text=input_text,
-            check=check,
-            max_output=max_output,
-            watch_path=watch_path,
-        )
-
-
-@pytest.mark.parametrize(
-    ("target", "origin", "expected"),
-    [
-        pytest.param(
-            "42",
-            "acme/demo",
-            ("acme/demo", 42, "https://github.com/acme/demo/issues/42"),
-            id="numeric-with-origin",
-        ),
-        pytest.param(
-            "https://github.com/acme/demo/issues/42",
-            None,
-            ("acme/demo", 42, "https://github.com/acme/demo/issues/42"),
-            id="canonical-url",
-        ),
-    ],
-)
-def test_resolve_issue_target_accepts_valid_targets(
-    target: str,
-    origin: str | None,
-    expected: tuple[str, int, str],
-) -> None:
-    """Numeric and canonical Issue targets resolve to the same identity."""
-    assert resolve_issue_target(target, origin) == expected
-
-
-@pytest.mark.parametrize(
-    ("target", "origin"),
-    [
-        pytest.param("42", None, id="numeric-without-origin"),
-        pytest.param(
-            "https://github.com/acme/demo/pull/42",
-            None,
-            id="pull-url",
-        ),
-        pytest.param("0", "acme/demo", id="zero-number"),
-    ],
-)
-def test_resolve_issue_target_rejects_invalid_targets(
-    target: str,
-    origin: str | None,
-) -> None:
-    """Ambiguous, non-Issue, and non-positive targets fail closed."""
-    with pytest.raises(LooprError) as captured:
-        resolve_issue_target(target, origin)
+def test_numeric_target_requires_origin() -> None:
+    with pytest.raises(ReviewLoopError) as captured:
+        resolve_target("21", None)
 
     assert captured.value.category == "input"
 
 
-def test_issue_client_snapshot_maps_fields(tmp_path: Path) -> None:
-    """A valid open Issue snapshot maps every field from the GitHub response."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload())
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    snapshot = client.snapshot()
-
-    assert snapshot.repository == "acme/demo"
-    assert snapshot.number == 42
-    assert snapshot.state == "OPEN"
-    assert snapshot.title == "Title"
-    assert snapshot.body == "Body"
-    assert snapshot.author == "author"
-    assert snapshot.updated_at == "2026-01-01T00:00:00Z"
-    assert snapshot.comments == ()
+@pytest.mark.parametrize(
+    "ref",
+    ["", "-danger", ".hidden", "feature..other", "feature@{1}", "a b", "a~b", "x.lock"],
+)
+def test_validate_ref_rejects_unsafe_git_refs(ref: str) -> None:
+    with pytest.raises(ReviewLoopError):
+        validate_ref(ref)
 
 
-def test_issue_client_snapshot_requests_bounded_comment_window(
-    tmp_path: Path,
-) -> None:
-    """The GitHub transport requests only the newest bounded comment window."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload())
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    client.snapshot()
-
-    graphql_calls = [
-        call
-        for call in runner.gh_calls
-        if call[1:5] == ("api", "--hostname", "github.com", "graphql")
-    ]
-    assert len(graphql_calls) == 1
-    call = graphql_calls[0]
-    assert "--paginate" not in call
-    assert "view" not in call
-    query = next(argument for argument in call if argument.startswith("query="))
-    assert "$lastComments: Int!" in query
-    assert "comments(last: $lastComments)" in query
-    assert "comments(first:" not in query
-    typed_values = [
-        call[index + 1] for index, argument in enumerate(call[:-1]) if argument == "-F"
-    ]
-    assert f"lastComments={MAX_ISSUE_COMMENTS}" in typed_values
+def test_validate_ref_accepts_normal_feature_ref() -> None:
+    validate_ref("feature/review-loop")
 
 
 @pytest.mark.parametrize(
-    "payload",
-    [
-        pytest.param(
-            _issue_payload(author=None),
-            id="null-author",
-        ),
-        pytest.param(
-            {**_issue_payload(), "author": {"login": None}},
-            id="null-author-login",
-        ),
-    ],
+    "path",
+    ["", "/absolute", "../escape", "dir/../escape", ".git/config", "dir/.GIT/x", "a\\b"],
 )
-def test_issue_client_snapshot_accepts_null_author(
-    tmp_path: Path,
-    payload: JsonObject,
-) -> None:
-    """Missing author logins map to an empty snapshot login."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=payload)
-    client = IssueClient(runner, repo)
-    client.initialize("42")
+def test_validate_path_rejects_unsafe_paths(path: str) -> None:
+    with pytest.raises(ReviewLoopError):
+        validate_path(path)
 
-    snapshot = client.snapshot()
 
-    assert snapshot.author == ""
+def test_validate_path_returns_safe_posix_path() -> None:
+    assert validate_path("src/file.py") == "src/file.py"
 
 
-def test_issue_client_rejects_closed_issue(tmp_path: Path) -> None:
-    """A closed Issue is rejected before it reaches the bootstrap bundle."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(state="CLOSED"))
-    client = IssueClient(runner, repo)
-    client.initialize("42")
+def test_json_object_and_required_field_helpers_are_strict() -> None:
+    value = parse_json_object('{"s":"x","i":7,"b":true,"o":{}}', category="schema")
 
-    with pytest.raises(LooprError) as captured:
-        client.snapshot()
+    assert require_string(value["s"], field="s") == "x"
+    assert require_integer(value["i"], field="i") == 7
+    assert require_boolean(value["b"], field="b") is True
+    assert require_object(value["o"], field="o") == {}
 
-    assert captured.value.category == "state"
+    with pytest.raises(ReviewLoopError):
+        parse_json_object("[]", category="schema")
+    with pytest.raises(ReviewLoopError):
+        require_integer(True, field="i")
+    with pytest.raises(ReviewLoopError):
+        require_boolean(1, field="b")
+    with pytest.raises(ReviewLoopError):
+        require_string("", field="s")
+    with pytest.raises(ReviewLoopError):
+        require_object([], field="o")
 
 
-def test_issue_client_rejects_pull_request_identity(tmp_path: Path) -> None:
-    """A number that names a pull request, not an Issue, fails identity."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    payload = _issue_payload(url="https://github.com/acme/demo/pull/42")
-    runner = FakeIssueGh(issue=payload)
-    client = IssueClient(runner, repo)
-    client.initialize("42")
+def test_frozen_diff_analysis_derives_anchors_shas_and_section_metadata() -> None:
+    patch = patch_for()
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
-    with pytest.raises(LooprError) as captured:
-        client.snapshot()
-
-    assert captured.value.category == "identity"
-
-
-def test_issue_client_rejects_repository_mismatch(tmp_path: Path) -> None:
-    """A canonical Issue URL cannot redirect bootstrap to another repository."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload())
-    client = IssueClient(runner, repo)
-
-    with pytest.raises(LooprError) as captured:
-        client.initialize("https://github.com/other/repo/issues/42")
-
-    assert captured.value.category == "repository"
-
-
-@pytest.mark.parametrize(
-    "target",
-    [
-        pytest.param("42", id="numeric"),
-        pytest.param(
-            "https://github.com/acme/demo/issues/42",
-            id="canonical-url",
-        ),
-    ],
-)
-def test_issue_client_targets_require_local_origin(
-    tmp_path: Path,
-    target: str,
-) -> None:
-    """Issue targets cannot bypass the matching local-origin requirement.
-
-    Bootstrap hands the returned base commit to the host for implementation
-    in this checkout, so an Issue URL must not be able to skip the
-    unambiguous-local-origin requirement that numeric input already enforces.
-    """
-    runner = FakeIssueGh(issue=_issue_payload())
-    client = IssueClient(runner, tmp_path)
-
-    with pytest.raises(LooprError) as captured:
-        client.initialize(target)
-
-    assert captured.value.category == "repository"
-
-
-def test_issue_client_url_requires_origin_remote(tmp_path: Path) -> None:
-    """A canonical Issue URL still requires a configured origin remote."""
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "issue-repo-no-origin"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    runner = FakeIssueGh(issue=_issue_payload())
-    client = IssueClient(runner, repo)
-
-    with pytest.raises(LooprError) as captured:
-        client.initialize("https://github.com/acme/demo/issues/42")
-
-    assert captured.value.category == "repository"
-
-
-def test_issue_client_rejects_known_credential_in_body(tmp_path: Path) -> None:
-    """Issue body content cannot carry a known credential value forward."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(body="token=known-secret-value"))
-    runner.secrets.add("known-secret-value")
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    with pytest.raises(LooprError) as captured:
-        client.snapshot()
-
-    assert captured.value.category == "credentials"
-
-
-def test_issue_client_rejects_known_credential_in_comment(tmp_path: Path) -> None:
-    """Issue comment content cannot carry a known credential value forward."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    comment: JsonObject = {
-        "author": {"login": "commenter"},
-        "body": "known-secret-value",
-        "createdAt": "2026-01-01T00:00:00Z",
-    }
-    runner = FakeIssueGh(issue=_issue_payload(comments=[comment]))
-    runner.secrets.add("known-secret-value")
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    with pytest.raises(LooprError) as captured:
-        client.snapshot()
-
-    assert captured.value.category == "credentials"
-
-
-def test_issue_client_rejects_oversized_body(tmp_path: Path) -> None:
-    """An Issue body beyond the bound fails closed rather than truncating."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    oversized = "x" * (MAX_ISSUE_BODY_BYTES + 1)
-    runner = FakeIssueGh(issue=_issue_payload(body=oversized))
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    with pytest.raises(LooprError) as captured:
-        client.snapshot()
-
-    assert captured.value.category == "bundle"
-
-
-def test_issue_client_bounds_and_orders_comments(tmp_path: Path) -> None:
-    """Local defenses bound and order an oversized fake response."""
-    total = MAX_ISSUE_COMMENTS + 5
-    comments: list[JsonObject] = [
-        {
-            "author": {"login": f"user{index}"},
-            "body": f"comment {index}",
-            "createdAt": f"2026-01-01T00:00:{index:02d}Z",
-        }
-        for index in range(total)
-    ]
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(comments=list(reversed(comments))))
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    snapshot = client.snapshot()
-
-    assert len(snapshot.comments) == MAX_ISSUE_COMMENTS
-    kept_bodies = [comment["body"] for comment in snapshot.comments]
-    expected_bodies = [
-        f"comment {index}" for index in range(total - MAX_ISSUE_COMMENTS, total)
-    ]
-    assert kept_bodies == expected_bodies
-
-
-def test_issue_client_omits_oversized_comment_body(tmp_path: Path) -> None:
-    """An individual oversized comment is omitted, not truncated."""
-    comment: JsonObject = {
-        "author": {"login": "author"},
-        "body": "x" * (MAX_ISSUE_COMMENT_BYTES + 1),
-        "createdAt": "2026-01-01T00:00:00Z",
-    }
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(comments=[comment]))
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    snapshot = client.snapshot()
-
-    assert snapshot.comments[0]["omitted"] is True
-    assert snapshot.comments[0]["body"] == ""
-
-
-def test_issue_client_snapshot_accepts_null_comment_author(tmp_path: Path) -> None:
-    """A comment from a deleted account (`"author": null`) is not rejected."""
-    comment: JsonObject = {
-        "author": None,
-        "body": "still relevant",
-        "createdAt": "2026-01-01T00:00:00Z",
-    }
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(comments=[comment]))
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    snapshot = client.snapshot()
-
-    assert snapshot.comments[0]["author"] == ""
-    assert snapshot.comments[0]["body"] == "still relevant"
-
-
-def test_issue_client_omits_comments_past_aggregate_byte_bound(
-    tmp_path: Path,
-) -> None:
-    """The aggregate byte bound is spent newest-first, keeping the newest."""
-    per_comment_bytes = 15_000
-    comments: list[JsonObject] = [
-        {
-            "author": {"login": f"user{index}"},
-            "body": "x" * per_comment_bytes,
-            "createdAt": f"2026-01-01T00:{index:02d}:00Z",
-        }
-        for index in range(MAX_ISSUE_COMMENTS)
-    ]
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(comments=comments))
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    snapshot = client.snapshot()
-
-    included = MAX_ISSUE_COMMENTS_TOTAL_BYTES // per_comment_bytes
-    excluded = MAX_ISSUE_COMMENTS - included
-    assert [comment["omitted"] for comment in snapshot.comments[:excluded]] == (
-        [True] * excluded
-    )
-    assert [comment["omitted"] for comment in snapshot.comments[excluded:]] == (
-        [False] * included
-    )
-    assert snapshot.comments[0]["body"] == ""
-    assert snapshot.comments[-1]["body"] == "x" * per_comment_bytes
-    assert [comment["author"] for comment in snapshot.comments] == [
-        f"user{index}" for index in range(MAX_ISSUE_COMMENTS)
-    ]
-
-
-def test_issue_client_default_branch_rejects_unsafe_ref(tmp_path: Path) -> None:
-    """An unsafe default branch name fails closed."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(), default_branch="unsafe branch")
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    with pytest.raises(LooprError) as captured:
-        client.default_branch()
-
-    assert captured.value.category == "ref"
-
-
-def test_issue_client_branch_sha_rejects_invalid_sha(tmp_path: Path) -> None:
-    """A malformed branch SHA from GitHub fails closed."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload(), branch_sha="not-a-sha")
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    with pytest.raises(LooprError) as captured:
-        client.branch_sha("main")
-
-    assert captured.value.category == "sha"
-
-
-def test_issue_client_branch_sha_encodes_slash_containing_branch(
-    tmp_path: Path,
-) -> None:
-    """A branch name containing a slash is sent as one encoded path segment."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    runner = FakeIssueGh(issue=_issue_payload())
-    client = IssueClient(runner, repo)
-    client.initialize("42")
-
-    client.branch_sha("release/1.0")
-
-    api_calls = [call for call in runner.gh_calls if call[1] == "api"]
-    assert api_calls[-1][-1] == "repos/acme/demo/branches/release%2F1.0"
-
-
-def test_issue_client_reads_tracked_paths_and_blobs_at_base_sha(
-    tmp_path: Path,
-) -> None:
-    """IssueClient reads repository evidence at an arbitrary base commit."""
-    _git_exe, repo, base, _head = _repo_with_two_commits(tmp_path)
-    client = IssueClient(CommandRunner(), repo)
-
-    client.ensure_commit_object(base)
-
-    assert client.tracked_paths_at(base) == ("file.py",)
-    assert client.blob_bytes_at(base, "file.py", max_output=1024) == b"base\n"
-
-
-def test_issue_client_ensure_commit_object_rejects_missing_sha(
-    tmp_path: Path,
-) -> None:
-    """A base SHA absent from the local checkout fails closed."""
-    repo = _repo_with_origin(tmp_path, "https://github.com/acme/demo.git")
-    client = IssueClient(CommandRunner(), repo)
-
-    with pytest.raises(LooprError) as captured:
-        client.ensure_commit_object("a" * 40)
-
-    assert captured.value.category == "git"
-
-
-SAMPLE_PATCH = """diff --git a/file.py b/file.py
-index 1111111..2222222 100644
---- a/file.py
-+++ b/file.py
-@@ -1,4 +1,4 @@
- alpha
--beta
-+bravo
- gamma
-diff --git a/gone.py b/gone.py
-deleted file mode 100644
-index 3333333..0000000
---- a/gone.py
-+++ /dev/null
-@@ -1,2 +0,0 @@
--one
--two
-diff --git a/old.py b/new.py
-similarity index 80%
-rename from old.py
-rename to new.py
-index 4444444..5555555 100644
---- a/old.py
-+++ b/new.py
-@@ -3,2 +3,2 @@ def anchor() -> None:
--stale
-+fresh
- tail
-diff --git a/ignored.py b/ignored.py
-index 6666666..7777777 100644
---- a/ignored.py
-+++ b/ignored.py
-@@ -1 +1 @@
--before
-+after
-"""
-
-
-def test_diff_anchors_maps_each_line_kind_to_its_own_side() -> None:
-    """Added and context lines anchor RIGHT only; only removed lines anchor LEFT."""
-    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py", "gone.py", "new.py"}))
-
-    assert anchors == frozenset({
+    assert analysis.anchors == frozenset({
         ("file.py", "RIGHT", 1),
         ("file.py", "LEFT", 2),
         ("file.py", "RIGHT", 2),
-        ("file.py", "RIGHT", 3),
-        ("gone.py", "LEFT", 1),
-        ("gone.py", "LEFT", 2),
-        ("new.py", "LEFT", 3),
-        ("new.py", "RIGHT", 3),
-        ("new.py", "RIGHT", 4),
+    })
+    file_analysis = analysis.files["file.py"]
+    assert file_analysis.base_path == "file.py"
+    assert file_analysis.old_sha == SHA_A
+    assert file_analysis.new_sha == SHA_B
+    assert file_analysis.byte_size == len(patch)
+    assert file_analysis.line_count == patch.count(b"\n")
+
+
+def test_frozen_diff_context_line_is_right_only() -> None:
+    analysis = analyze_frozen_diff(patch_for(), frozenset({"file.py"}))
+
+    assert ("file.py", "RIGHT", 1) in analysis.anchors
+    assert ("file.py", "LEFT", 1) not in analysis.anchors
+
+
+def test_frozen_diff_rename_maps_head_path_to_base_path() -> None:
+    patch = (
+        f"diff --git a/old.py b/new.py\n"
+        "similarity index 80%\n"
+        "rename from old.py\n"
+        "rename to new.py\n"
+        f"index {SHA_A}..{SHA_B} 100644\n"
+        "--- a/old.py\n"
+        "+++ b/new.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    ).encode()
+
+    analysis = analyze_frozen_diff(patch, frozenset({"new.py"}))
+
+    assert analysis.files["new.py"].base_path == "old.py"
+    assert analysis.anchors == frozenset({
+        ("new.py", "LEFT", 1),
+        ("new.py", "RIGHT", 1),
     })
 
 
-def test_diff_anchors_rejects_a_context_line_as_a_left_anchor() -> None:
-    """A context line is never a valid LEFT anchor, only RIGHT."""
-    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py"}))
-
-    assert ("file.py", "LEFT", 1) not in anchors
-    assert ("file.py", "LEFT", 3) not in anchors
-    assert ("file.py", "RIGHT", 1) in anchors
-    assert ("file.py", "RIGHT", 3) in anchors
-
-
-def test_diff_anchors_excludes_paths_outside_the_validated_inventory() -> None:
-    """A diff section for a path the snapshot did not list yields no anchors."""
-    anchors = diff_anchors(SAMPLE_PATCH, frozenset({"file.py"}))
-
-    assert {path for path, _side, _line in anchors} == {"file.py"}
-    assert ("old.py", "LEFT", 3) not in anchors
-
-
-def test_diff_anchors_ignores_unsafe_and_unreadable_header_paths() -> None:
-    """Traversing, quoted, or prefix-less diff headers contribute no anchors."""
+def test_frozen_diff_deletion_keeps_base_path_for_left_anchor() -> None:
     patch = (
-        "diff --git a/../escape.py b/../escape.py\n"
-        "--- a/../escape.py\n"
-        "+++ b/../escape.py\n"
-        "@@ -1 +1 @@\n"
-        "-before\n"
-        "+after\n"
-        'diff --git "a/quoted\\tname.py" "b/quoted\\tname.py"\n'
-        '--- "a/quoted\\tname.py"\n'
-        '+++ "b/quoted\\tname.py"\n'
-        "@@ -1 +1 @@\n"
-        "-before\n"
-        "+after\n"
-    )
+        "diff --git a/file.py b/file.py\n"
+        "deleted file mode 100644\n"
+        f"index {SHA_A}..{NULL_SHA}\n"
+        "--- a/file.py\n"
+        "+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n"
+        "-removed\n"
+    ).encode()
 
-    assert diff_anchors(patch, frozenset({"../escape.py", "quoted\tname.py"})) == (
-        frozenset()
-    )
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
+
+    assert analysis.files["file.py"].base_path == "file.py"
+    assert analysis.files["file.py"].new_sha == NULL_SHA
+    assert analysis.anchors == frozenset({("file.py", "LEFT", 1)})
 
 
-def test_diff_base_paths_maps_a_rename_to_its_pre_rename_path() -> None:
-    """A rename's head path maps to its own section's base path, not itself."""
-    base_paths = diff_base_paths(
-        SAMPLE_PATCH, frozenset({"file.py", "gone.py", "new.py"})
-    )
-
-    assert base_paths == {
-        "file.py": "file.py",
-        "gone.py": "gone.py",
-        "new.py": "old.py",
-    }
-
-
-def test_diff_anchors_reads_a_header_path_containing_a_space() -> None:
-    """Git's tab separator after a spaced path must not look like a control char."""
+def test_frozen_diff_new_file_uses_null_old_sha_and_right_anchor() -> None:
     patch = (
-        "diff --git a/foo bar.py b/foo bar.py\n"
-        "index a29bdeb..c0d0fb4 100644\n"
-        "--- a/foo bar.py\t\n"
-        "+++ b/foo bar.py\t\n"
-        "@@ -1 +1,2 @@\n"
-        " line1\n"
-        "+line2\n"
-    )
+        "diff --git a/file.py b/file.py\n"
+        "new file mode 100644\n"
+        f"index {NULL_SHA}..{SHA_B}\n"
+        "--- /dev/null\n"
+        "+++ b/file.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+added\n"
+    ).encode()
 
-    assert diff_anchors(patch, frozenset({"foo bar.py"})) == frozenset({
-        ("foo bar.py", "RIGHT", 1),
-        ("foo bar.py", "RIGHT", 2),
-    })
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
-
-def test_diff_size_safe_paths_treats_file_limit_equality_as_unsafe() -> None:
-    """A file exactly at GitHub's byte limit cannot receive an inline anchor."""
-    path = "file.py"
-    empty_section = _synthetic_diff_section(path, 0)
-    below = _synthetic_diff_section(
-        path,
-        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section) - 1,
-    )
-    at_limit = _synthetic_diff_section(
-        path,
-        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section),
-    )
-
-    assert len(below) == MAX_GITHUB_FILE_DIFF_BYTES - 1
-    assert len(at_limit) == MAX_GITHUB_FILE_DIFF_BYTES
-    assert _diff_size_safe_paths(
-        below,
-        below.decode(),
-        frozenset({path}),
-    ) == frozenset({path})
-    assert (
-        _diff_size_safe_paths(
-            at_limit,
-            at_limit.decode(),
-            frozenset({path}),
-        )
-        == frozenset()
-    )
+    assert analysis.files["file.py"].old_sha == NULL_SHA
+    assert analysis.anchors == frozenset({("file.py", "RIGHT", 1)})
 
 
-def test_diff_size_safe_paths_preserves_nonfinal_section_separator_bytes() -> None:
-    """A non-final section at the byte limit remains ineligible."""
-    large_path = "large.py"
-    small_path = "small.py"
-    empty_section = _synthetic_diff_section(large_path, 0)
-    large_section = _synthetic_diff_section(
-        large_path,
-        MAX_GITHUB_FILE_DIFF_BYTES - len(empty_section),
-    )
-    small_section = _synthetic_diff_section(small_path, 0)
-    patch = large_section + small_section
-    sections = _diff_sections(patch, patch.decode())
-
-    assert len(sections) == 2
-    assert sections[0][0] == large_path
-    assert len(sections[0][1]) == MAX_GITHUB_FILE_DIFF_BYTES
-    assert _diff_size_safe_paths(
-        patch,
-        patch.decode(),
-        frozenset({large_path, small_path}),
-    ) == frozenset({small_path})
-
-
-def test_diff_size_safe_paths_treats_aggregate_limit_equality_as_unsafe() -> None:
-    """An aggregate patch at the byte limit cannot receive inline anchors."""
-    paths = ("one.py", "two.py", "three.py")
-    empty_sections = tuple(_synthetic_diff_section(path, 0) for path in paths)
-    target_lengths = (
-        MAX_GITHUB_DIFF_BYTES // 3,
-        MAX_GITHUB_DIFF_BYTES // 3,
-        MAX_GITHUB_DIFF_BYTES - 2 * (MAX_GITHUB_DIFF_BYTES // 3),
-    )
-    at_limit = b"".join(
-        _synthetic_diff_section(path, target - len(empty_section))
-        for path, target, empty_section in zip(
-            paths,
-            target_lengths,
-            empty_sections,
-            strict=True,
-        )
-    )
-    below_limit = at_limit[:-1]
-
-    assert len(at_limit) == MAX_GITHUB_DIFF_BYTES
-    assert len(below_limit) == MAX_GITHUB_DIFF_BYTES - 1
-    assert at_limit.count(b"\n") < MAX_GITHUB_DIFF_LINES
-    assert all(
-        len(section) < MAX_GITHUB_FILE_DIFF_BYTES
-        for _path, section in _diff_sections(at_limit, at_limit.decode())
-    )
-    assert all(
-        section.count(b"\n") < MAX_GITHUB_FILE_DIFF_LINES
-        for _path, section in _diff_sections(at_limit, at_limit.decode())
-    )
-    assert _diff_size_safe_paths(
-        below_limit,
-        below_limit.decode(),
-        frozenset(paths),
-    ) == frozenset(paths)
-    assert (
-        _diff_size_safe_paths(
-            at_limit,
-            at_limit.decode(),
-            frozenset(paths),
-        )
-        == frozenset()
-    )
-
-
-def test_diff_size_safe_paths_ignores_header_like_lines_inside_hunks() -> None:
-    """Hunk content cannot relabel an oversized diff section's path."""
-    large_path = "large.py"
-    small_path = "small.py"
-    large_section = _synthetic_diff_section_with_lines(
-        large_path,
+@pytest.mark.parametrize(
+    "patch",
+    [
+        patch_for(old_sha="a" * 7),
+        patch_for(hunk="@@ -1,1 +1,1 @@", body=" context\n-old\n+new\n"),
+        patch_for(body="?malformed\n"),
         (
-            b"x" * MAX_GITHUB_FILE_DIFF_BYTES,
-            b"++ b/small.py",
-        ),
-    )
-    patch = large_section + _synthetic_diff_section(small_path, 0)
+            f"diff --git a/file.py b/file.py\n"
+            f"index {SHA_A}..{SHA_B} 100644\n"
+            "--- a/file.py\n"
+            "+++ b/file.py\n"
+            "@@ -1 +1 @@\n"
+        ).encode(),
+    ],
+)
+def test_malformed_or_unverifiable_diff_never_proves_anchors(patch: bytes) -> None:
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
-    sections = _diff_sections(patch, patch.decode())
-    assert sections[0][0] == large_path
-    assert _diff_size_safe_paths(
-        patch,
-        patch.decode(),
-        frozenset({large_path, small_path}),
-    ) == frozenset({small_path})
+    assert analysis.anchors == frozenset()
 
 
-def test_client_diff_anchors_reads_the_frozen_base_to_head_diff(
-    tmp_path: Path,
+def test_diff_section_for_path_outside_inventory_is_ignored() -> None:
+    analysis = analyze_frozen_diff(patch_for(), frozenset({"other.py"}))
+
+    assert analysis.anchors == frozenset()
+    assert analysis.files == {}
+
+
+def test_duplicate_head_path_sections_fail_closed_for_that_path() -> None:
+    patch = patch_for() + patch_for(old_sha=SHA_B, new_sha=SHA_C)
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
+
+    assert analysis.anchors == frozenset()
+    assert analysis.files == {}
+
+
+def test_non_utf8_patch_fails_closed() -> None:
+    with pytest.raises(ReviewLoopError) as captured:
+        analyze_frozen_diff(b"\xff", frozenset({"file.py"}))
+
+    assert captured.value.code == EXIT_PRECONDITION
+    assert captured.value.category == "bundle"
+
+
+def test_aggregate_github_truncation_boundary_removes_all_anchors(
+    mocker: MockerFixture,
 ) -> None:
-    """Anchors come from the immutable base/head objects, not the worktree."""
-    _git_exe, repo, base, head = _repo_with_two_commits(tmp_path)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head)
+    patch = patch_for()
+    mocker.patch.object(github_module, "MAX_GITHUB_DIFF_BYTES", len(patch))
 
-    assert client.diff_anchors(pull_request) == frozenset({
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
+
+    assert analysis.anchors == frozenset()
+    assert "file.py" in analysis.files
+
+
+def test_per_file_github_truncation_boundary_removes_only_oversized_anchors(
+    mocker: MockerFixture,
+) -> None:
+    first = patch_for(old_path="a.py", new_path="a.py")
+    second = patch_for(old_path="b.py", new_path="b.py", old_sha=SHA_B, new_sha=SHA_C)
+    mocker.patch.object(github_module, "MAX_GITHUB_FILE_DIFF_BYTES", len(first))
+    analysis = analyze_frozen_diff(first + second, frozenset({"a.py", "b.py"}))
+
+    assert not any(anchor[0] == "a.py" for anchor in analysis.anchors)
+    assert "a.py" in analysis.files
+    assert "b.py" in analysis.files
+
+
+def test_exact_no_newline_marker_does_not_consume_hunk_lines() -> None:
+    patch = patch_for(body="-old\n\\ No newline at end of file\n+new\n")
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
+
+    assert analysis.anchors == frozenset({
         ("file.py", "LEFT", 1),
         ("file.py", "RIGHT", 1),
     })
 
 
-def test_client_diff_anchors_drops_only_a_file_over_github_file_byte_limit(
-    tmp_path: Path,
-) -> None:
-    """A large file loses inline anchors while a small file remains eligible."""
-    _git_exe, repo, base, head = _repo_with_added_files(
-        tmp_path,
-        {
-            "large.txt": b"x" * (MAX_GITHUB_FILE_DIFF_BYTES + 1) + b"\n",
-            "small.py": b"safe\n",
-        },
-    )
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head, paths=("large.txt", "small.py"))
-    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
-    text = patch.decode()
-    section_sizes = {
-        path: len(section)
-        for path, section in _diff_sections(patch, text)
-        if path is not None
-    }
+class FrozenDiffClient(GitHubClient):
+    def __init__(
+        self,
+        patch: bytes,
+        *,
+        forced_paths: frozenset[str] = frozenset(),
+        binary_shas: frozenset[str] = frozenset(),
+    ) -> None:
+        super().__init__(CommandRunner({"PATH": "/usr/bin"}), Path("."))
+        self._patch = patch
+        self._forced_paths = forced_paths
+        self._binary_shas = binary_shas
+        self.attr_calls: list[tuple[str, frozenset[str]]] = []
+        self.binary_calls: list[str] = []
 
-    assert len(patch) < MAX_GITHUB_DIFF_BYTES
-    assert patch.count(b"\n") < MAX_GITHUB_DIFF_LINES
-    assert section_sizes["large.txt"] >= MAX_GITHUB_FILE_DIFF_BYTES
-    assert section_sizes["small.py"] < MAX_GITHUB_FILE_DIFF_BYTES
-    anchors = client.diff_anchors(pull_request)
-    assert ("small.py", "RIGHT", 1) in anchors
-    assert not any(path == "large.txt" for path, _side, _line in anchors)
+    @override
+    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
+        del max_output
+        return self._patch
 
+    @override
+    def paths_with_diff_unset(
+        self,
+        sha: str,
+        paths: frozenset[str],
+        *,
+        max_output: int,
+    ) -> frozenset[str]:
+        del max_output
+        self.attr_calls.append((sha, paths))
+        return paths & self._forced_paths
 
-def test_client_diff_anchors_drops_all_files_when_aggregate_bytes_are_unsafe(
-    tmp_path: Path,
-) -> None:
-    """Several individually eligible files lose anchors past the aggregate cap."""
-    content = b"x" * (MAX_GITHUB_FILE_DIFF_BYTES - 2048) + b"\n"
-    paths = tuple(f"large-{index}.txt" for index in range(1, 4))
-    _git_exe, repo, base, head = _repo_with_added_files(
-        tmp_path,
-        dict.fromkeys(paths, content),
-    )
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head, paths=paths)
-    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
-    text = patch.decode()
-    sections = _diff_sections(patch, text)
-
-    assert len(patch) >= MAX_GITHUB_DIFF_BYTES
-    assert len(patch) < MAX_ANCHOR_PATCH_BYTES
-    assert patch.count(b"\n") < MAX_GITHUB_DIFF_LINES
-    assert all(len(section) < MAX_GITHUB_FILE_DIFF_BYTES for _path, section in sections)
-    assert client.diff_anchors(pull_request) == frozenset()
+    @override
+    def blob_is_binary(self, sha: str, *, max_output: int) -> bool:
+        del max_output
+        self.binary_calls.append(sha)
+        return sha in self._binary_shas
 
 
-def test_client_diff_anchors_drops_all_files_when_aggregate_lines_are_unsafe(
-    tmp_path: Path,
-) -> None:
-    """Several small files lose anchors past the aggregate line cap."""
-    line_count = MAX_GITHUB_DIFF_LINES // 2
-    paths = ("many-one.txt", "many-two.txt")
-    _git_exe, repo, base, head = _repo_with_added_files(
-        tmp_path,
-        dict.fromkeys(paths, b"x\n" * line_count),
-    )
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head, paths=paths)
-    patch = client.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
-    text = patch.decode()
-    sections = _diff_sections(patch, text)
-
-    assert len(patch) < MAX_GITHUB_DIFF_BYTES
-    assert patch.count(b"\n") >= MAX_GITHUB_DIFF_LINES
-    assert all(
-        len(section) < MAX_GITHUB_FILE_DIFF_BYTES
-        and section.count(b"\n") < MAX_GITHUB_FILE_DIFF_LINES
-        for _path, section in sections
-    )
-    assert client.diff_anchors(pull_request) == frozenset()
-
-
-def test_client_diff_anchors_rejects_a_context_line_as_left(tmp_path: Path) -> None:
-    """A real diff's unchanged context line yields no LEFT anchor for GitHub.
-
-    GitHub's create-review API accepts LEFT only for a removed line; sending
-    it a context line's base-file position produces an HTTP 422 for the whole
-    atomic review, so this must never be treated as a valid anchor.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "context-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.py").write_text("alpha\nbeta\ngamma\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / "file.py").write_text("alpha\nBRAVO\ngamma\n")
-    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head)
+def test_diff_anchors_layers_attribute_and_binary_validation_after_parsing() -> None:
+    pull_request = sample_pr()
+    client = FrozenDiffClient(patch_for())
 
     anchors = client.diff_anchors(pull_request)
 
-    assert ("file.py", "LEFT", 1) not in anchors
-    assert ("file.py", "LEFT", 3) not in anchors
+    assert anchors == frozenset({
+        ("file.py", "RIGHT", 1),
+        ("file.py", "LEFT", 2),
+        ("file.py", "RIGHT", 2),
+    })
+    assert client.attr_calls == [
+        (SHA_A, frozenset({"file.py"})),
+        (SHA_B, frozenset({"file.py"})),
+    ]
+    assert set(client.binary_calls) == {SHA_A, SHA_B}
+
+
+def test_diff_anchors_rejects_attribute_forced_text_path() -> None:
+    client = FrozenDiffClient(patch_for(), forced_paths=frozenset({"file.py"}))
+
+    assert client.diff_anchors(sample_pr()) == frozenset()
+    assert client.binary_calls == []
+
+
+def test_diff_anchors_rejects_only_side_backed_by_binary_blob() -> None:
+    client = FrozenDiffClient(patch_for(), binary_shas=frozenset({SHA_A}))
+
+    anchors = client.diff_anchors(sample_pr())
+
+    assert ("file.py", "LEFT", 2) not in anchors
     assert ("file.py", "RIGHT", 1) in anchors
-    assert ("file.py", "RIGHT", 3) in anchors
-    assert ("file.py", "LEFT", 2) in anchors
     assert ("file.py", "RIGHT", 2) in anchors
 
 
-def test_client_diff_anchors_ignores_repository_local_diff_config(
-    tmp_path: Path,
-) -> None:
-    """Repository-local `diff.*` config cannot change anchors from Git's defaults.
+def test_diff_anchors_cache_binary_probe_per_blob_sha() -> None:
+    client = FrozenDiffClient(patch_for())
 
-    `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` already exclude global and
-    system config, but not this repository's own `.git/config`. A
-    `diff.noprefix` or oversized `diff.context`/`diff.algorithm` setting there
-    must not corrupt the header paths `diff_anchors` reads or expose context
-    lines beyond Git's default 3-line window, either of which could produce
-    an anchor GitHub's own diff does not contain. A low `diff.renameLimit`
-    must not silently turn a rename's small hunk into whole-file delete/add
-    anchors, and `diff.indentHeuristic=false` must not move a hunk boundary.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "configured-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    lines = [f"line{index}" for index in range(1, 13)]
-    (repo / "file.py").write_text("\n".join(lines) + "\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    lines[5] = "CHANGED"
-    (repo / "file.py").write_text("\n".join(lines) + "\n")
-    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    _git(git, ["config", "diff.noprefix", "true"], cwd=repo)
-    _git(git, ["config", "diff.context", "10"], cwd=repo)
-    _git(git, ["config", "diff.interHunkContext", "10"], cwd=repo)
-    _git(git, ["config", "diff.algorithm", "patience"], cwd=repo)
-    _git(git, ["config", "diff.indentHeuristic", "false"], cwd=repo)
-    _git(git, ["config", "diff.renameLimit", "1"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head)
+    client.diff_anchors(sample_pr())
 
-    anchors = client.diff_anchors(pull_request)
+    assert client.binary_calls.count(SHA_A) == 1
+    assert client.binary_calls.count(SHA_B) == 1
 
-    assert {(path, line) for path, _side, line in anchors} == {
-        ("file.py", line) for line in range(3, 10)
-    }
-    assert ("file.py", "LEFT", 1) not in anchors
-    assert ("file.py", "LEFT", 12) not in anchors
 
+def test_review_event_preserves_self_review_comment_semantics() -> None:
+    client = GitHubClient(CommandRunner({"PATH": "/usr/bin"}), Path("."))
+    client.authenticated_login = "author"
 
-def test_client_diff_anchors_ignores_a_low_repository_local_rename_limit(
-    tmp_path: Path,
-) -> None:
-    """A low `diff.renameLimit` must not turn a rename into delete+add anchors.
+    assert client.review_event(sample_pr(), "APPROVE") == "COMMENT"
+    assert client.review_event(sample_pr(), "REQUEST_CHANGES") == "COMMENT"
+    client.authenticated_login = "reviewer"
+    assert client.review_event(sample_pr(), "APPROVE") == "APPROVE"
 
-    Git's exhaustive inexact-rename search silently gives up once the number
-    of rename candidates exceeds `diff.renameLimit`, reporting the rename as
-    an unrelated whole-file deletion and whole-file addition instead. That
-    would replace a small rename hunk's anchors with anchors spanning every
-    line of both files, so this repository-local setting must have no effect
-    on the anchor set `patch()` produces.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "rename-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    body = "\n".join(f"line{index}" for index in range(1, 9))
-    for index in range(1, 11):
-        (repo / f"file{index}.py").write_text(f"{body}\n")
-    _git(git, ["add", "-A"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    for index in range(1, 11):
-        source = repo / f"file{index}.py"
-        source.rename(repo / f"moved{index}.py")
-    (repo / "moved1.py").write_text(f"{body}\nCHANGED\n")
-    _git(git, ["add", "-A"], cwd=repo)
-    _git(git, ["commit", "-q", "-am", "rename"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    _git(git, ["config", "diff.renameLimit", "1"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head, paths=("moved1.py",))
 
-    anchors = client.diff_anchors(pull_request)
+def test_review_event_rejects_unknown_verdict() -> None:
+    client = GitHubClient(CommandRunner({"PATH": "/usr/bin"}), Path("."))
 
-    assert {(path, side) for path, side, _line in anchors} == {
-        ("moved1.py", "RIGHT"),
-    }
+    with pytest.raises(ReviewLoopError):
+        client.review_event(sample_pr(), "COMMENT")
 
 
-def test_client_diff_anchors_reads_a_quoted_non_ascii_path(tmp_path: Path) -> None:
-    """A repository-local `core.quotePath=true` must not hide a UTF-8 path.
+def test_same_snapshot_depends_only_on_frozen_base_and_head() -> None:
+    first = sample_pr()
+    same = replace(first, title="Changed title")
+    changed = replace(first, head_sha=SHA_C)
 
-    With that setting, Git C-quotes a non-ASCII path in the `---`/`+++`
-    headers (wrapping it in double quotes and octal-escaping each non-ASCII
-    byte), which `_header_path()` cannot parse as a `a/`/`b/`-prefixed path.
-    Left unpinned, that would silently drop every anchor for the file to the
-    aggregate body instead of the safe fallback the design intends only for
-    genuinely unsafe paths.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "quoted-path-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    path = "日本語.py"
-    (repo / path).write_text("line1\nline2\n")
-    _git(git, ["add", path], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / path).write_text("line1\nCHANGED\n")
-    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    _git(git, ["config", "core.quotePath", "true"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head, paths=(path,))
+    assert GitHubClient.same_snapshot(first, same)
+    assert not GitHubClient.same_snapshot(first, changed)
 
-    anchors = client.diff_anchors(pull_request)
 
-    assert (path, "RIGHT", 2) in anchors
+def test_bounded_comments_keeps_newest_comments_and_marks_oversized() -> None:
+    comments = [
+        {
+            "author": {"login": f"user-{index}"},
+            "body": "x" * (25_000 if index == 31 else 1),
+            "createdAt": f"2026-01-{index:02d}T00:00:00Z",
+        }
+        for index in range(1, 32)
+    ]
 
+    result = _bounded_comments(comments)
 
-def test_client_diff_anchors_keeps_anchors_after_a_suppressed_blank_context_line(
-    tmp_path: Path,
-) -> None:
-    """A repository-local `diff.suppressBlankEmpty=true` must not truncate a hunk.
+    assert len(result) == 30
+    assert result[0]["created_at"] == "2026-01-02T00:00:00Z"
+    assert result[-1]["created_at"] == "2026-01-31T00:00:00Z"
+    assert result[-1]["omitted"] is True
+    assert result[-1]["body"] == ""
 
-    With that setting, Git emits an empty context line with no leading
-    space instead of a lone space, which `diff_anchors` cannot distinguish
-    from the hunk's end. Left unpinned, that would silently drop every
-    anchor after the blank line, including the actually-changed line the
-    hunk exists to report.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "blank-context-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    lines = [f"line{index}" for index in range(1, 13)]
-    lines[2] = ""
-    (repo / "file.py").write_text("\n".join(lines) + "\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    lines[5] = "CHANGED"
-    (repo / "file.py").write_text("\n".join(lines) + "\n")
-    _git(git, ["commit", "-q", "-am", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    _git(git, ["config", "diff.suppressBlankEmpty", "true"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head)
 
-    anchors = client.diff_anchors(pull_request)
+def test_bounded_comments_rejects_malformed_comment_entry() -> None:
+    with pytest.raises(ReviewLoopError) as captured:
+        _bounded_comments(["bad"])
 
-    assert {(path, line) for path, _side, line in anchors} == {
-        ("file.py", line) for line in range(3, 10)
-    }
+    assert captured.value.code == EXIT_GITHUB
 
 
-def test_client_diff_anchors_drops_a_locally_attribute_forced_text_hunk(
-    tmp_path: Path,
-) -> None:
-    """A local `diff` attribute forcing a binary blob to text yields no anchor.
+def test_parse_json_object_preserves_exact_json_values() -> None:
+    value = parse_json_object(json.dumps({"path": " a.py ", "number": 1}), category="x")
 
-    GitHub only ever resolves `.gitattributes` from the tracked commits it
-    diffs; it has no access to `$GIT_DIR/info/attributes`, so a local rule
-    such as `file.bin diff` can make `patch()` emit a textual hunk for
-    NUL-containing content that GitHub's own diff still renders as binary.
-    Anchoring a comment to such a hunk would make the create-review API
-    reject the whole atomic review with a 422, so `diff_anchors` must read
-    each anchor's blob back by its content-addressed object id and drop it
-    when that content is actually binary, regardless of what local
-    attribute forced a hunk. An ordinary modified file and a deleted file
-    changed in the same commit must both still keep their anchors: a
-    deletion's `index <sha>..0000000` line puts its one real blob id on the
-    old/LEFT side, the opposite side from an added file, so this also
-    guards against the filter checking the wrong side of that pair.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "attr-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.py").write_text("alpha\n")
-    (repo / "gone.py").write_text("one\ntwo\n")
-    _git(git, ["add", "file.py", "gone.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / "file.py").write_text("BRAVO\n")
-    (repo / "file.bin").write_bytes(b"bin\x00ary")
-    (repo / "gone.py").unlink()
-    _git(git, ["add", "file.py", "file.bin", "gone.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / ".git" / "info" / "attributes").write_text("file.bin diff\n")
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head, paths=("file.py", "file.bin", "gone.py"))
+    assert value == {"path": " a.py ", "number": 1}
 
-    anchors = client.diff_anchors(pull_request)
 
-    assert {(path, side) for path, side, _line in anchors} == {
-        ("file.py", "LEFT"),
-        ("file.py", "RIGHT"),
-        ("gone.py", "LEFT"),
-    }
-
-
-def test_client_diff_anchors_drops_a_head_tree_attribute_off_the_worktree(
-    tmp_path: Path,
-) -> None:
-    """A `-diff` attribute committed at head drops anchors, off the worktree.
-
-    `patch()` resolves `.gitattributes` from whatever ref the local
-    worktree happens to have checked out, not from the base or head commit
-    it diffs. A PR whose head commit adds `file.txt -diff` while the
-    worktree stays checked out at base therefore still renders `file.txt`
-    as an ordinary textual hunk — the content itself has no NUL byte, so
-    the content check alone would accept it — even though GitHub resolves
-    that same tracked attribute from head and would refuse to anchor a
-    comment there. `diff_anchors` must check the base and head trees
-    themselves, independently of the checked-out worktree, and drop every
-    anchor for such a path while keeping anchors for an ordinary file
-    changed in the same commit.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "tree-attr-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.txt").write_text("line1\nline2\nline3\n")
-    (repo / "other.py").write_text("alpha\n")
-    _git(git, ["add", "file.txt", "other.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / ".gitattributes").write_text("file.txt -diff\n")
-    (repo / "file.txt").write_text("line1\nCHANGED\nline3\n")
-    (repo / "other.py").write_text("BRAVO\n")
-    _git(git, ["add", ".gitattributes", "file.txt", "other.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    _git(git, ["checkout", "-q", base], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(
-        base, head, paths=("file.txt", "other.py", ".gitattributes")
-    )
-
-    anchors = client.diff_anchors(pull_request)
-
-    assert {(path, side) for path, side, _line in anchors if path == "file.txt"} == (
-        set()
-    )
-    assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
-
-
-def test_client_diff_anchors_ignores_a_local_override_of_a_head_tree_diff_unset(
-    tmp_path: Path,
-) -> None:
-    """A local `info/attributes` rule cannot unmask a tracked `-diff` path.
-
-    `$GIT_DIR/info/attributes` outranks a tree passed via `check-attr
-    --source`, so a local rule forcing `diff` back to `set` for a path the
-    head tree marks `-diff` could otherwise make `paths_with_diff_unset`
-    miss it -- not merely drop a valid anchor, but keep one GitHub's
-    create-review API would reject, since GitHub never resolves attributes
-    from this clone's `$GIT_DIR`. `diff_anchors` must still drop every
-    anchor for such a path while keeping anchors for an ordinary file
-    changed in the same commit.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "masked-attr-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.txt").write_text("line1\nline2\nline3\n")
-    (repo / "other.py").write_text("alpha\n")
-    _git(git, ["add", "file.txt", "other.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / ".gitattributes").write_text("file.txt -diff\n")
-    (repo / "file.txt").write_text("line1\nCHANGED\nline3\n")
-    (repo / "other.py").write_text("BRAVO\n")
-    _git(git, ["add", ".gitattributes", "file.txt", "other.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / ".git" / "info" / "attributes").write_text("file.txt diff\n")
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(
-        base, head, paths=("file.txt", "other.py", ".gitattributes")
-    )
-
-    anchors = client.diff_anchors(pull_request)
-
-    assert {(path, side) for path, side, _line in anchors if path == "file.txt"} == (
-        set()
-    )
-    assert ("other.py", "RIGHT") in {(path, side) for path, side, _line in anchors}
-
-
-def test_client_diff_anchors_checks_the_base_side_path_for_a_rename(
-    tmp_path: Path,
-) -> None:
-    """A base-only `-diff` rule on the pre-rename path must still drop anchors.
-
-    `diff_anchors` addresses a rename's anchors, including its `LEFT`
-    lines, under the file's head-side path. A base tree's `-diff` rule is
-    keyed to whatever path it names; a rule such as `old.txt -diff` only
-    matches `old.txt`, never `new.txt`. Checking the base tree's attribute
-    with the head-side path `new.txt` instead of the diff's own base-side
-    path `old.txt` would never match that rule, letting an anchor through
-    that GitHub's create-review API would still refuse because the base
-    tree itself marks the file `-diff`.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "rename-attr-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "old.txt").write_text("line1\nline2\nline3\n")
-    (repo / ".gitattributes").write_text("old.txt -diff\n")
-    _git(git, ["add", "old.txt", ".gitattributes"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / "old.txt").rename(repo / "new.txt")
-    (repo / "new.txt").write_text("line1\nCHANGED\nline3\n")
-    _git(git, ["add", "-A"], cwd=repo)
-    _git(git, ["commit", "-q", "-am", "rename"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    client = GitHubClient(CommandRunner(), repo)
-    pull_request = _sample_pr(base, head, paths=("new.txt",))
-
-    anchors = client.diff_anchors(pull_request)
-
-    assert anchors == frozenset()
-
-
-def test_client_diff_anchors_degrades_to_no_anchors_without_check_attr_source(
-    tmp_path: Path,
-) -> None:
-    """An unsupported `check-attr --source` degrades to no anchors, not a crash.
-
-    `--source` was introduced in Git 2.40; the 2.25-2.39 `git-check-attr`
-    rejects it as an unknown option, and this skill's public contract
-    requires only "Git", with no minimum version. A `git` shim ahead of the
-    real one on `PATH` reproduces that exact rejection for `check-attr
-    --source` while forwarding every other subcommand to the real `git`, so
-    `diff_anchors` runs against a genuine subprocess failure rather than a
-    stubbed exception. It must treat that failure the same way
-    `blob_is_binary` treats an unreadable blob -- fail closed by dropping
-    every anchor it cannot verify -- rather than letting a Git precondition
-    error abort an otherwise publishable review. The same PR snapshot still
-    yields anchors against the real, unshimmed `git`, so this also proves
-    the failure path is exercised rather than vacuously satisfied.
-    """
-    git = shutil.which("git")
-    assert git is not None
-    repo = tmp_path / "old-git-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.py").write_text("alpha\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / "file.py").write_text("BRAVO\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    pull_request = _sample_pr(base, head, paths=("file.py",))
-
-    real_client = GitHubClient(CommandRunner(), repo)
-    assert real_client.diff_anchors(pull_request) != frozenset()
-
-    shim_dir = tmp_path / "old-git-bin"
-    shim_dir.mkdir()
-    shim = shim_dir / "git"
-    shim.write_text(
-        "#!/bin/sh\n"
-        'case " $* " in\n'
-        '  *" check-attr "*"--source"*)\n'
-        '    echo "error: unknown option \\`source\'" >&2\n'
-        "    exit 129\n"
-        "    ;;\n"
-        "esac\n"
-        f'exec "{git}" "$@"\n'
-    )
-    shim.chmod(0o755)
-    old_source_env = dict(os.environ)
-    old_source_env["PATH"] = f"{shim_dir}{os.pathsep}{old_source_env.get('PATH', '')}"
-    old_git_client = GitHubClient(CommandRunner(old_source_env), repo)
-
-    assert old_git_client.diff_anchors(pull_request) == frozenset()
-
-
-def test_client_patch_ignores_a_default_global_attributes_file(
-    tmp_path: Path,
-) -> None:
-    """A default `$HOME/.config/git/attributes` rule cannot force a text hunk.
-
-    Git consults this file even with no `core.attributesFile` config
-    present anywhere, so `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` do not
-    redirect it away. `patch()` must pin `core.attributesFile=/dev/null`
-    directly so a `diff` attribute placed there cannot turn a binary blob
-    into a textual hunk the way `$GIT_DIR/info/attributes` still can
-    (covered instead by the content check in the test above, since no
-    config override reaches that file).
-    """
-    git = shutil.which("git")
-    assert git is not None
-    fake_home = tmp_path / "home"
-    (fake_home / ".config" / "git").mkdir(parents=True)
-    (fake_home / ".config" / "git" / "attributes").write_text("file.bin diff\n")
-    repo = tmp_path / "global-attr-repo"
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    (repo / "file.py").write_text("alpha\n")
-    _git(git, ["add", "file.py"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "base"], cwd=repo)
-    base = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    (repo / "file.py").write_text("BRAVO\n")
-    (repo / "file.bin").write_bytes(b"bin\x00ary")
-    _git(git, ["add", "file.py", "file.bin"], cwd=repo)
-    _git(git, ["commit", "-q", "-m", "head"], cwd=repo)
-    head = _git(git, ["rev-parse", "HEAD"], cwd=repo)
-    runner = CommandRunner({**os.environ, "HOME": str(fake_home)})
-    client = GitHubClient(runner, repo)
-    pull_request = _sample_pr(base, head, paths=("file.py", "file.bin"))
-
-    patch = client.patch(pull_request, max_output=1024 * 1024)
-
-    assert b"Binary files /dev/null and b/file.bin differ" in patch
-    anchors = client.diff_anchors(pull_request)
-    assert {(path, side) for path, side, _line in anchors} == {
-        ("file.py", "LEFT"),
-        ("file.py", "RIGHT"),
-    }
-
-
-def test_diff_blob_shas_maps_each_allowed_path_to_its_full_index_ids() -> None:
-    """`diff_blob_shas` reads the `--full-index` header, not any path lookup."""
-    patch = (
-        "diff --git a/file.py b/file.py\n"
-        f"index {'1' * 40}..{'2' * 40} 100644\n"
-        "--- a/file.py\n"
-        "+++ b/file.py\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-        "diff --git a/new.py b/new.py\n"
-        "new file mode 100644\n"
-        f"index {'0' * 40}..{'3' * 40}\n"
-        "--- /dev/null\n"
-        "+++ b/new.py\n"
-        "@@ -0,0 +1 @@\n"
-        "+added\n"
-    )
-
-    shas = diff_blob_shas(patch, frozenset({"file.py", "new.py"}))
-
-    assert shas == {
-        "file.py": ("1" * 40, "2" * 40),
-        "new.py": ("0" * 40, "3" * 40),
-    }
-
-
-def test_post_review_publishes_inline_comments_in_the_same_request(
-    mocker: MockerFixture,
-    tmp_path: Path,
-) -> None:
-    """One create-review request carries the body and every inline comment."""
-    client = GitHubClient(CommandRunner(), tmp_path)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-    captured: dict[str, JsonObject] = {}
-
-    def fake_text(
-        _args: list[str],
-        *,
-        input_text: str | None = None,
-        **_kwargs: object,
-    ) -> str:
-        assert input_text is not None
-        captured["payload"] = json.loads(input_text)
-        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
-
-    mocker.patch.object(client, "_text", fake_text)
-
-    client.post_review(
-        pull_request,
-        "REQUEST_CHANGES",
-        "review body",
-        (
-            ReviewComment(path="file.py", line=7, side="RIGHT", body="inline one"),
-            ReviewComment(path="file.py", line=3, side="LEFT", body="inline two"),
-        ),
-    )
-
-    assert captured["payload"] == {
-        "commit_id": pull_request.head_sha,
-        "body": "review body",
-        "event": "REQUEST_CHANGES",
-        "comments": [
-            {"path": "file.py", "line": 7, "side": "RIGHT", "body": "inline one"},
-            {"path": "file.py", "line": 3, "side": "LEFT", "body": "inline two"},
-        ],
-    }
-
-
-def test_post_review_serializes_unicode_without_ascii_escaping(
-    mocker: MockerFixture,
-    tmp_path: Path,
-) -> None:
-    r"""Unicode review text is sent as UTF-8, not inflated by `\uXXXX` escapes."""
-    client = GitHubClient(CommandRunner(), tmp_path)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-    captured: dict[str, str] = {}
-
-    def fake_text(
-        _args: list[str],
-        *,
-        input_text: str | None = None,
-        **_kwargs: object,
-    ) -> str:
-        assert input_text is not None
-        captured["input_text"] = input_text
-        return json.dumps({"id": 123, "commit_id": pull_request.head_sha})
-
-    mocker.patch.object(client, "_text", fake_text)
-
-    client.post_review(pull_request, "COMMENT", "レビュー本文" * 100)
-
-    assert "レビュー" in captured["input_text"]
-    assert "\\u" not in captured["input_text"]
-
-
-def test_post_review_rejects_a_request_exceeding_the_command_input_bound(
-    mocker: MockerFixture,
-    tmp_path: Path,
-) -> None:
-    """A request too large for the command transport fails before any write.
-
-    Each comment body is already bounded individually by `review.py`, but a
-    large number of individually valid comments can still serialize past the
-    command runner's input cap; that must fail closed locally rather than as
-    a confusing subprocess error, and without ever touching the network.
-    """
-    client = GitHubClient(CommandRunner(), tmp_path)
-    pull_request = _sample_pr("a" * 40, "b" * 40)
-
-    def fail_if_called(*_args: object, **_kwargs: object) -> str:
-        msg = "the oversized request must never reach the transport"
-        raise AssertionError(msg)
-
-    mocker.patch.object(client, "_text", fail_if_called)
-    oversized_comments = tuple(
-        ReviewComment(path="file.py", line=index, side="RIGHT", body="x" * 65_000)
-        for index in range(1, 70)
-    )
-
-    with pytest.raises(LooprError) as captured:
-        client.post_review(pull_request, "COMMENT", "body", oversized_comments)
-
-    assert captured.value.category == "input"
+def test_original_diff_limit_constant_remains_larger_than_minimal_patch() -> None:
+    assert MAX_GITHUB_DIFF_BYTES > len(patch_for())
