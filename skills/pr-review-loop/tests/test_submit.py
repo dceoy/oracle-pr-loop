@@ -110,6 +110,7 @@ class ScenarioRunner(CommandRunner):
         fail_push_after_success: bool = False,
         source_env: Mapping[str, str] | None = None,
     ) -> None:
+        """Initialize the runner with mutable GitHub and push state."""
         super().__init__(source_env)
         self.repo = repo
         self.remote = remote

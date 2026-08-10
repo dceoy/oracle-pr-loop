@@ -31,7 +31,11 @@ SHA_B = "b" * 40
 
 
 def _git(git: str, args: list[str], *, cwd: Path) -> str:
-    """Run one test-controlled Git command and return stripped stdout."""
+    """Run one test-controlled Git command and return stripped stdout.
+
+    Returns:
+        The command's stripped standard output.
+    """
     result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed test argv
         [git, *args],
         cwd=cwd,
@@ -74,6 +78,7 @@ class FakeIssueClient:
     statuses: ClassVar[list[bytes]] = []
 
     def __init__(self, _runner: CommandRunner, repo_dir: Path) -> None:
+        """Initialize the fake client with queued transport responses."""
         self.repo_dir = repo_dir
         type(self).instance = self
         self._snapshots = list(type(self).snapshots)
@@ -105,7 +110,11 @@ class FakeIssueClient:
         self.ensure_calls.append(sha)
 
     def git_bytes(self, args: list[str], *, max_output: int) -> bytes:
-        """Return the next deterministic local HEAD/status probe result."""
+        """Return the next deterministic local HEAD/status probe result.
+
+        Raises:
+            AssertionError: If the caller requests an unexpected Git probe.
+        """
         del max_output
         if args[:3] == ["rev-parse", "--abbrev-ref", "HEAD"]:
             return self._local_branches.pop(0)
@@ -189,7 +198,11 @@ def _execute(
     thinking_time: str | None = "heavy",
     model: str | None = None,
 ) -> BootstrapResult:
-    """Execute bootstrap with the current fake configuration."""
+    """Execute bootstrap with the current fake configuration.
+
+    Returns:
+        The result produced by the bootstrap orchestration.
+    """
     return execute_bootstrap(
         issue_value="7",
         repo_dir=tmp_path,
@@ -451,11 +464,19 @@ class ClosingIssueClient(FakeIssueClient):
     """Simulate the Issue closing between the initial and post-Oracle read."""
 
     def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
+        """Initialize the fake client and its snapshot-read counter."""
         super().__init__(runner, repo_dir)
         self.snapshot_calls = 0
 
     def snapshot(self) -> IssueSnapshot:
-        """Raise on the second read, as a real closed-Issue re-fetch would."""
+        """Raise on the second read, as a real closed-Issue re-fetch would.
+
+        Returns:
+            The next queued Issue snapshot.
+
+        Raises:
+            ReviewLoopError: If the issue closes before the second read.
+        """
         self.snapshot_calls += 1
         if self.snapshot_calls == 2:
             raise ReviewLoopError(EXIT_PRECONDITION, "state", "issue must be open")
@@ -488,7 +509,11 @@ class MissingBaseIssueClient(FakeIssueClient):
     """Simulate a base commit absent from the local checkout."""
 
     def ensure_commit_object(self, sha: str) -> None:  # ruff: ignore[no-self-use] -- overrides base
-        """Fail closed as the shared immutable-Git mixin would."""
+        """Fail closed as the shared immutable-Git mixin would.
+
+        Raises:
+            ReviewLoopError: Always, because the base commit is unavailable.
+        """
         raise ReviewLoopError(EXIT_PRECONDITION, "git", f"{sha} is not a commit object")
 
 

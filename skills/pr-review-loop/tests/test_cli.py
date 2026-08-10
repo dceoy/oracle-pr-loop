@@ -177,7 +177,7 @@ def test_bootstrap_success_schema_is_stable(
     value, stderr = _stdout_object(capsys)
 
     assert code == 0
-    assert stderr == ""
+    assert not stderr
     assert value == result.as_json()
     execute.assert_called_once()
     kwargs = execute.call_args.kwargs
@@ -208,7 +208,7 @@ def test_review_success_schema_is_stable(
     value, stderr = _stdout_object(capsys)
 
     assert code == 0
-    assert stderr == ""
+    assert not stderr
     assert value == result.as_json()
     execute.assert_called_once()
     assert execute.call_args.kwargs["pr_value"] == "21"
@@ -242,7 +242,7 @@ def test_submit_success_schema_is_stable(
     value, stderr = _stdout_object(capsys)
 
     assert code == 0
-    assert stderr == ""
+    assert not stderr
     assert value == result.as_json()
     execute.assert_called_once()
     assert execute.call_args.kwargs["expected_head"] == SHA_B

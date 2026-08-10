@@ -293,11 +293,21 @@ class FakeReviewGitHub:
 
     @staticmethod
     def patch(_pr: PullRequest, *, max_output: int) -> bytes:
+        """Return the frozen pull-request patch.
+
+        Returns:
+            The deterministic patch bytes.
+        """
         del max_output
         return b"diff --git a/file.py b/file.py\n"
 
     @staticmethod
     def tracked_paths(_pr: PullRequest) -> tuple[str, ...]:
+        """Return the paths tracked by the frozen pull request.
+
+        Returns:
+            The deterministic changed-path inventory.
+        """
         return ("AGENTS.md", "file.py")
 
     @staticmethod
@@ -307,6 +317,11 @@ class FakeReviewGitHub:
         *,
         max_output: int,
     ) -> bytes | None:
+        """Return frozen content for one changed path.
+
+        Returns:
+            The path content, or ``None`` when no content is available.
+        """
         del max_output
         return {
             "AGENTS.md": b"review rules\n",
@@ -319,6 +334,11 @@ class FakeIssueClient:
 
     @staticmethod
     def tracked_paths_at(_sha: str) -> tuple[str, ...]:
+        """Return the paths tracked by the frozen base commit.
+
+        Returns:
+            The deterministic base-tree inventory.
+        """
         return ("AGENTS.md", "README.md")
 
     @staticmethod
@@ -328,6 +348,11 @@ class FakeIssueClient:
         *,
         max_output: int,
     ) -> bytes | None:
+        """Return frozen content for one base-tree path.
+
+        Returns:
+            The path content from the base tree.
+        """
         del max_output
         return b"instructions\n" if path == "AGENTS.md" else b"readme\n"
 
@@ -411,6 +436,7 @@ class RecordingOracleRunner(CommandRunner):
         output: str = '{"ok":true}',
         failures: list[CommandError] | None = None,
     ) -> None:
+        """Initialize the runner with captured output and queued failures."""
         super().__init__(source_env)
         self.output = output
         self.failures = list(failures or [])
