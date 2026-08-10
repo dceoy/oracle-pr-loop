@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from scripts import process as process_module
 from scripts.artifacts import TemporaryFileWriter
 from scripts.models import IssueSnapshot, LooprError, PullRequest
 from scripts.oracle import (
@@ -70,6 +72,32 @@ def _invoke(
         _sleep=_sleep,
         _random_value=_random_value,
     )
+
+
+def _generate_bootstrap(
+    runner: CommandRunner,
+    writer: TemporaryFileWriter,
+    github: IssueClient,
+    issue: IssueSnapshot,
+    base_sha: str,
+) -> None:
+    """Build and invoke one bootstrap request through the focused API."""
+    bundle = build_bootstrap_bundle(runner, github, writer, issue, base_sha)
+    prompt = BOOTSTRAP_PROMPT.format(
+        repository=issue.repository,
+        issue_number=issue.number,
+        base_ref="main",
+        base_sha=base_sha,
+    )
+    raw = _invoke(
+        runner,
+        writer,
+        github.repo_dir,
+        prompt,
+        bundle,
+        MAX_BOOTSTRAP_ATTACHMENTS,
+    )
+    parse_bootstrap(raw, issue, base_sha)
 
 
 def _sample_pr() -> PullRequest:
@@ -614,10 +642,12 @@ class _FakeOracleRunner(CommandRunner):
         payload: str,
         source_env: Mapping[str, str] | None = None,
     ) -> None:
-        """Initialize a fake Oracle transport with one fixed raw response."""
-        super().__init__(source_env)
+        """Initialize a fake Oracle transport, defaulting to an isolated empty env."""
+        isolated_env = source_env or {"HOME": os.devnull}
+        super().__init__(isolated_env)
         self.payload = payload
         self.commands: list[tuple[str, ...]] = []
+        self.environments: list[dict[str, str]] = []
 
     def run(
         self,
@@ -632,9 +662,10 @@ class _FakeOracleRunner(CommandRunner):
         watch_path: Path | None = None,
     ) -> CommandResult:
         """Record the command and satisfy the Oracle watch-path contract."""
-        del cwd, env, timeout, input_text, check, max_output
+        del cwd, timeout, input_text, check, max_output
         argv = tuple(str(value) for value in args)
         self.commands.append(argv)
+        self.environments.append(dict(env))
         if argv and argv[0] == "oracle":
             if watch_path is None:
                 pytest.fail("Oracle invocation must provide a watched output path")
@@ -1270,3 +1301,410 @@ def test_review_prompt_requires_anchored_findings_without_body_duplication() -> 
     assert "LEFT" in PROMPT
     assert "RIGHT" in PROMPT
     assert "never restate an individual" in PROMPT
+
+
+def test_oracle_invocation_forces_manual_login_without_remote_transport(
+    tmp_path: Path,
+) -> None:
+    """Local hosts (no remote transport configured) keep the pre-upgrade default."""
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {})
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+    assert "--engine" in oracle_argv
+    assert "browser" in oracle_argv
+
+
+def test_oracle_invocation_omits_manual_login_with_remote_transport(
+    tmp_path: Path,
+) -> None:
+    """A configured `ORACLE_REMOTE_HOST` does not force the local-login flag."""
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {
+            "HOME": os.devnull,
+            "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
+            "ORACLE_REMOTE_TOKEN": "token-value",
+        },
+    )
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+    assert "--engine" in oracle_argv
+    assert "browser" in oracle_argv
+
+
+def _write_oracle_config_remote_host(home: Path, remote_host: str) -> None:
+    """Write a `.oracle/config.json` declaring `browser.remoteHost` under home."""
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        json.dumps({"browser": {"remoteHost": remote_host}}),
+        encoding="utf-8",
+    )
+
+
+def test_oracle_invocation_uses_config_only_remote_host_as_remote(
+    tmp_path: Path,
+) -> None:
+    """A config-only `browser.remoteHost` selects remote mode, Oracle's default."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+
+
+def test_oracle_invocation_uses_effective_home_without_exported_home(
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    """Missing HOME still selects config-only remote mode and redacts tokens."""
+    effective_home = tmp_path / "effective-home"
+    oracle_dir = effective_home / ".oracle"
+    oracle_dir.mkdir(parents=True)
+    oracle_dir.joinpath("config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", "remoteToken": "xyz"}}',
+        encoding="utf-8",
+    )
+    mocker.patch.object(process_module.Path, "home", return_value=effective_home)
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A) + "xyz"
+    runner = _FakeOracleRunner(payload, {"PATH": os.environ["PATH"]})
+
+    with pytest.raises(LooprError, match="contained a credential"):
+        _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    assert runner.commands
+    assert "--browser-manual-login" not in runner.commands[0]
+    assert runner.environments[0]["HOME"] == str(effective_home)
+    assert runner.contains_secret("xyz")
+
+
+def test_oracle_invocation_uses_unquoted_key_config_remote_host_as_remote(
+    tmp_path: Path,
+) -> None:
+    """Oracle's documented unquoted-key config style also selects remote mode."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remoteHost: '10.0.0.9:9473' } }",
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+
+
+def test_oracle_invocation_accepts_extended_json5_config_remote_host(
+    tmp_path: Path,
+) -> None:
+    """An unrelated JSON5 number does not block a configured remote host."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +5}',
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+
+
+def test_oracle_invocation_allows_config_remote_host_matching_exported_env(
+    tmp_path: Path,
+) -> None:
+    """A config-declared `browser.remoteHost` mirrored via env is accepted."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": str(home), "ORACLE_REMOTE_HOST": "10.0.0.9:9473"},
+    )
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+
+
+def test_oracle_invocation_refreshes_config_after_runner_construction(
+    tmp_path: Path,
+) -> None:
+    """Oracle validation and redaction use config values current at launch."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    config_path = oracle_dir / "config.json"
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": "initial-secret-token",
+            }
+        }),
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    rotated_token = "rotated-secret-token"
+    payload = _bootstrap_payload(issue, SHA_A) + rotated_token
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": str(home), "ORACLE_REMOTE_HOST": "127.0.0.1:9473"},
+    )
+
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "127.0.0.1:9473",
+                "remoteToken": rotated_token,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LooprError, match="contained a credential"):
+        _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    assert runner.commands
+    assert "--browser-manual-login" not in runner.commands[0]
+    assert runner.contains_secret(rotated_token)
+
+
+def test_oracle_invocation_rejects_rotated_config_token_in_patch(
+    tmp_path: Path,
+) -> None:
+    """A token rotated after bundling cannot enter Oracle attachments."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    config_path = oracle_dir / "config.json"
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": "initial-secret-token",
+            }
+        }),
+        encoding="utf-8",
+    )
+    rotated_token = "rotated-secret-token"
+    pull_request = _sample_pr()
+    runner = _FakeOracleRunner(
+        _review_payload(pull_request),
+        {"HOME": str(home)},
+    )
+    writer = TemporaryFileWriter(tmp_path / "oracle", runner)
+    github = cast(
+        "GitHubClient",
+        _FakeReviewGitHub(
+            tmp_path,
+            patch=f"diff --git a/file.py b/file.py\n{rotated_token}\n".encode(),
+        ),
+    )
+    attachments = build_review_bundle(runner, github, writer, pull_request)
+
+    config_path.write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": rotated_token,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LooprError, match="attachment contains a known credential"):
+        _invoke(
+            runner,
+            writer,
+            github.repo_dir,
+            PROMPT.format(
+                repository=pull_request.repository,
+                pr_number=pull_request.number,
+                base_sha=pull_request.base_sha,
+                head_sha=pull_request.head_sha,
+            ),
+            attachments,
+            MAX_ORACLE_ATTACHMENTS,
+        )
+
+    assert runner.commands == []
+
+
+def test_oracle_invocation_accepts_config_remote_host_disagreeing_with_env(
+    tmp_path: Path,
+) -> None:
+    """Oracle owns precedence when config and env hosts differ."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": "config-secret-token",
+            }
+        }),
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {
+            "HOME": str(home),
+            "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
+            "ORACLE_REMOTE_TOKEN": "environment-secret-token",
+        },
+    )
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+    assert runner.contains_secret("config-secret-token")
+    assert runner.contains_secret("environment-secret-token")
+    assert all(
+        token not in argument
+        for argument in oracle_argv
+        for token in ("config-secret-token", "environment-secret-token")
+    )
+
+
+def test_oracle_invocation_treats_whitespace_only_env_host_as_unset(
+    tmp_path: Path,
+) -> None:
+    """A whitespace-only `ORACLE_REMOTE_HOST` is unset, matching Oracle's trimming."""
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": os.devnull, "ORACLE_REMOTE_HOST": "   "},
+    )
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+
+
+def test_oracle_invocation_survives_json5_config_with_local_only_settings(
+    tmp_path: Path,
+) -> None:
+    """A valid JSON5 config with only local-browser settings still allows Oracle."""
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{\n  // local profile only, no remote transport\n"
+        '  "browser": {"manualLogin": true},\n}',
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+
+
+def test_oracle_invocation_ignores_comment_spliced_remote_host_key(
+    tmp_path: Path,
+) -> None:
+    """A block comment cannot splice `remote`/`Host` into one declared key.
+
+    Oracle's own `JSON5.parse` treats the comment as token-separating
+    trivia, so `remote/*x*/Host` is two bare identifiers rather than one
+    `remoteHost` key; Oracle's config loader rejects the file and falls
+    back to an empty config. pr-review-loop must likewise not infer
+    remote mode from it and must still pass `--browser-manual-login`.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        "{ browser: { remote/*x*/Host: '10.0.0.9:9473' } }",
+        encoding="utf-8",
+    )
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(payload, {"HOME": str(home)})
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" in oracle_argv
+
+
+def test_oracle_invocation_accepts_config_host_matching_padded_env_host(
+    tmp_path: Path,
+) -> None:
+    """A config `browser.remoteHost` matches an env value padded with whitespace."""
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    issue = _sample_issue()
+    writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
+    github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
+    payload = _bootstrap_payload(issue, SHA_A)
+    runner = _FakeOracleRunner(
+        payload,
+        {"HOME": str(home), "ORACLE_REMOTE_HOST": "  10.0.0.9:9473  "},
+    )
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv

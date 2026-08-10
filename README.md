@@ -40,7 +40,8 @@ from user intent; users normally do not invoke the Python CLI directly.
 - macOS or Linux;
 - Python 3.12 or newer;
 - Git and an authenticated GitHub CLI session;
-- Oracle with Chrome/Chromium and an authenticated browser profile for Issue
+- Oracle CLI with either a local authenticated Chrome/Chromium browser profile
+  or a local CLI configured to use a remote `oracle serve` instance, for Issue
   bootstrap and independent review;
 - a ChatGPT account with GitHub connected when supplemental connector context is
   desired;
@@ -49,12 +50,7 @@ from user intent; users normally do not invoke the Python CLI directly.
 Issue and pull-request workflows require matching same-repository GitHub.com
 targets. GitHub Enterprise and fork targets are unsupported.
 
-Initialize Oracle once when needed:
-
-```console
-oracle --engine browser --browser-manual-login --browser-keep-browser \
-  --browser-input-timeout 120000 --prompt "Reply with ready"
-```
+`pr-review-loop` only ever invokes the local `oracle` CLI; it never implements its own Oracle REST/MCP protocol. Where Oracle's browser work actually runs — a local Chrome profile or a remote `oracle serve` host — is entirely Oracle's own configuration. See `skills/pr-review-loop/references/operations.md` for the local and remote setup examples.
 
 No upstream Oracle change is required for GitHub app review integration. The
 review command uses the normal Oracle browser invocation and places `@GitHub`

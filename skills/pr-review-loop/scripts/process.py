@@ -10,10 +10,16 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, NoReturn
+from typing import TYPE_CHECKING, BinaryIO, NoReturn, cast
+
+from .json5 import loads as loads_json5
+from .json5 import may_declare_member
+from .models import EXIT_PRECONDITION, LooprError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from .models import JsonObject
 
 MAX_OUTPUT = 24 * 1024 * 1024
 MAX_INPUT = 4 * 1024 * 1024
@@ -21,6 +27,34 @@ MAX_STDERR = 1024 * 1024
 POLL_INTERVAL_SECONDS = 0.01
 TERMINATION_GRACE_SECONDS = 2
 MIN_SECRET_LENGTH = 4
+
+# Oracle's `normalizeString()` trims with JavaScript's `String.prototype.trim()`,
+# whose WhiteSpace/LineTerminator character set (ECMA-262) differs from
+# Python's `str.isspace()` -- notably it includes U+FEFF (BOM), which Python
+# does not treat as whitespace. Trimming with Python's default `str.strip()`
+# would leave a BOM-padded value registered as the secret while Oracle
+# authenticates with the BOM-free string, letting the effective credential
+# bypass output redaction. Characters below, in order: TAB, LF, VT, FF, CR,
+# SP, NBSP, OGHAM SPACE MARK, EN QUAD..HAIR SPACE, LS, PS, NNBSP, MMSP,
+# IDEOGRAPHIC SPACE, BOM.
+_JS_TRIM_CHARS = (
+    "\t\n\x0b\x0c\r "
+    "\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def normalize_oracle_remote_value(value: object) -> str | None:
+    """Trim a remote-transport value the way Oracle's own resolver does.
+
+    Returns:
+        The stripped value, or None if it is not a non-blank string.
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip(_JS_TRIM_CHARS)
+    return stripped or None
 
 
 @dataclass(frozen=True)
@@ -54,13 +88,30 @@ class CommandError(RuntimeError):
 class CommandRunner:
     """Run trusted executables with bounded input, output, and lifetime."""
 
-    def __init__(self, source_env: Mapping[str, str] | None = None) -> None:
-        """Capture the source environment and known secret values."""
+    def __init__(
+        self,
+        source_env: Mapping[str, str] | None = None,
+        *,
+        repo_dir: Path | None = None,
+    ) -> None:
+        """Capture the source environment and known secret values.
+
+        `repo_dir` must be the directory Oracle itself is launched with
+        (`_invoke_oracle`'s `cwd=repo_dir`): a relative `ORACLE_HOME_DIR` is
+        resolved against it, not against this process's own current
+        directory, so a relative value names the same config file Oracle's
+        subprocess actually reads. Defaults to this process's own current
+        directory for callers, such as `submit`, that never invoke Oracle.
+        """
         self.source_env = dict(source_env or os.environ)
+        self._repo_dir = Path() if repo_dir is None else repo_dir
+        self._effective_home: str | None = None
+        self._effective_home_resolved = False
         self.secrets = {
             value
             for key, value in self.source_env.items()
-            if value
+            if key != "ORACLE_REMOTE_TOKEN"
+            and value
             and len(value) >= MIN_SECRET_LENGTH
             and any(
                 marker in key.upper()
@@ -76,6 +127,129 @@ class CommandRunner:
                 )
             )
         }
+        # Registered from its normalized form only: Oracle's own resolver
+        # trims this value before use, so a whitespace-only token
+        # authenticates as no token at all and must not become a
+        # registered secret (e.g. redacting every run of matching
+        # whitespace in Oracle's output).
+        normalized_remote_token = normalize_oracle_remote_value(
+            self.source_env.get("ORACLE_REMOTE_TOKEN")
+        )
+        if normalized_remote_token:
+            self.secrets.add(normalized_remote_token)
+
+    def _oracle_home(self) -> str:
+        """Return the effective HOME used by Oracle's subprocess.
+
+        Raises:
+            LooprError: The effective account home cannot be resolved.
+        """
+        if "HOME" in self.source_env:
+            return self.source_env["HOME"]
+        if not self._effective_home_resolved:
+            try:
+                self._effective_home = str(Path.home())
+            except (OSError, RuntimeError) as exc:
+                raise LooprError(
+                    EXIT_PRECONDITION,
+                    "bundle",
+                    "could not resolve Oracle's effective home directory",
+                ) from exc
+            self._effective_home_resolved = True
+        if self._effective_home is None:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "could not resolve Oracle's effective home directory",
+            )
+        return self._effective_home
+
+    @property
+    def oracle_config_remote_host(self) -> str | None:
+        """Oracle's config-declared `browser.remoteHost`, or None if unset.
+
+        Read the config on every access so the host and token used for
+        validation and redaction come from the same current snapshot that
+        Oracle will read when it is launched. This is intentionally deferred
+        from construction so a config file this module cannot parse never
+        breaks commands that never invoke Oracle.
+        """
+        config_remote_host, config_remote_token = self._read_oracle_config_remote()
+        if config_remote_token:
+            self.secrets.add(config_remote_token)
+        return config_remote_host
+
+    def _read_oracle_config_remote(self) -> tuple[str | None, str | None]:
+        r"""Read Oracle's own remote-transport fields from its config file.
+
+        Oracle reads `browser.remoteHost`/`browser.remoteToken` from its
+        config file (`$ORACLE_HOME_DIR/config.json`, or `~/.oracle/config.json`
+        when unset) as well as `ORACLE_REMOTE_HOST`/`ORACLE_REMOTE_TOKEN`, so
+        this module must know the config-declared values too rather than
+        trusting its own env export alone. Values are trimmed the way
+        Oracle's own `resolveRemoteServiceConfig()` trims them, so a
+        whitespace-padded config value cannot desync from Oracle's transport
+        signal or this module's secret redaction.
+
+        A relative `ORACLE_HOME_DIR` is resolved against `self._repo_dir`
+        (Oracle's own launch cwd), not this process's own current
+        directory, so this module and the Oracle subprocess it later
+        launches with `cwd=repo_dir` always agree on which config file is
+        being inspected. Oracle's `getOracleHomeDir()` returns
+        `ORACLE_HOME_DIR` via `??`, so an explicitly empty value is still
+        "set" -- unlike Python truthiness -- and must not fall back to
+        `~/.oracle/config.json`.
+
+        Returns:
+            The config-declared (remote host, remote token); each is None if
+            unset or blank, or if the config file is absent, unreadable, or
+            unparseable while declaring neither remote field as a member key.
+
+        Raises:
+            LooprError: the config file cannot be parsed and contains a
+                member key resolving to `remoteHost` or `remoteToken`, so a
+                config-declared remote host or token cannot be ruled out.
+        """
+        oracle_home_dir = self.source_env.get("ORACLE_HOME_DIR")
+        if oracle_home_dir is not None:
+            config_path = self._repo_dir / oracle_home_dir / "config.json"
+        else:
+            config_path = (
+                self._repo_dir / self._oracle_home() / ".oracle" / "config.json"
+            )
+        try:
+            # Match Node's fs.readFile(..., "utf8") replacement decoding.
+            raw_text = config_path.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            return (None, None)
+        try:
+            raw_config: object = loads_json5(raw_text)
+        except ValueError as exc:
+            if not may_declare_member(raw_text, ("remoteHost", "remoteToken")):
+                # A malformed local-settings config cannot declare either
+                # remote field, so Oracle's own empty-config fallback remains
+                # available to local-browser users.
+                return (None, None)
+            message = (
+                f"Oracle's config file at {config_path} could not be parsed "
+                "as JSON5 and contains a member key resolving to "
+                "'remoteHost' or 'remoteToken'; a config-declared "
+                "browser.remoteHost or browser.remoteToken cannot be ruled "
+                "out, so refusing to proceed."
+            )
+            raise LooprError(EXIT_PRECONDITION, "bundle", message) from exc
+        if not isinstance(raw_config, dict):
+            return (None, None)
+        config = cast("JsonObject", raw_config)
+        browser_config = config.get("browser")
+        if not isinstance(browser_config, dict):
+            return (None, None)
+        host = browser_config.get("remoteHost")
+        token = browser_config.get("remoteToken")
+        return (
+            normalize_oracle_remote_value(host),
+            normalize_oracle_remote_value(token),
+        )
 
     def redact(self, text: str) -> str:
         """Replace every known secret value in text.
@@ -160,8 +334,14 @@ class CommandRunner:
         return env
 
     def oracle_env(self) -> dict[str, str]:
-        """Return the minimal browser environment supplied to Oracle."""
-        return self.allowlisted_env({
+        """Return the minimal environment supplied to Oracle.
+
+        Includes Oracle's own remote-transport variables (`ORACLE_HOME_DIR`,
+        `ORACLE_REMOTE_HOST`, `ORACLE_REMOTE_TOKEN`) so a host configured to
+        use a remote `oracle serve` instance works without a local Chrome
+        session and without this module implementing a second transport.
+        """
+        env = self.allowlisted_env({
             "CHROME_PATH",
             "DISPLAY",
             "WAYLAND_DISPLAY",
@@ -173,6 +353,9 @@ class CommandRunner:
             "ORACLE_REMOTE_HOST",
             "ORACLE_REMOTE_TOKEN",
         })
+        if "HOME" not in env:
+            env["HOME"] = self._oracle_home()
+        return env
 
     def run(
         self,

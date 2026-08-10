@@ -262,6 +262,31 @@ def test_execute_review_forwards_oracle_overrides(
     assert calls == [("extended", "gpt-5.6-sol")]
 
 
+def test_execute_review_binds_implicit_runner_to_repo_dir(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    """An omitted runner uses the same repository directory as Oracle."""
+    initial = sample_pr()
+    FakeGitHubClient.snapshots = [initial, initial, initial]
+    install_orchestration_fakes(mocker)
+    created_repo_dirs: list[Path] = []
+
+    def make_runner(*, repo_dir: Path) -> CommandRunner:
+        created_repo_dirs.append(repo_dir)
+        return CommandRunner(repo_dir=repo_dir)
+
+    mocker.patch.object(review_module, "CommandRunner", make_runner)
+
+    execute_review(
+        pr_value="21",
+        repo_dir=tmp_path,
+        thinking_time="heavy",
+    )
+
+    assert created_repo_dirs == [tmp_path]
+
+
 def test_formal_review_rejects_mismatched_persisted_state(
     mocker: MockerFixture,
     tmp_path: Path,

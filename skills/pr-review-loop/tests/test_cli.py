@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import chdir
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NoReturn, cast
@@ -22,6 +24,7 @@ from scripts.models import (
     PullRequest,
     ReviewComment,
     ReviewResult,
+    SubmitResult,
 )
 from scripts.oracle import parse_review
 from scripts.process import CommandResult, CommandRunner
@@ -503,6 +506,194 @@ def test_operational_failure_uses_stable_nonzero_error_schema(
     assert payload["command"] == command
     assert set(payload) == {"schema_version", "command", "error"}
     assert error["category"] == category
+
+
+def test_submit_command_survives_unparseable_oracle_config(
+    mocker: MockerFixture,
+    tmp_path: Path,
+) -> None:
+    """`submit` never invokes Oracle, so a malformed Oracle config must not break it."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +5}',
+        encoding="utf-8",
+    )
+    mocker.patch.dict(os.environ, {"HOME": str(tmp_path)})
+
+    def fake_submit(**_kwargs: object) -> SubmitResult:
+        return SubmitResult(
+            repository="octo/repo",
+            pr_number=1,
+            base_sha="a" * 40,
+            previous_head_sha="b" * 40,
+            resulting_head_sha="c" * 40,
+            commit_sha="d" * 40,
+            pushed_branch="feature",
+        )
+
+    mocker.patch.object(cli, "execute_submit", fake_submit)
+
+    status = cli.main(["submit", "--pr", "1", "--expected-head", "a" * 40])
+
+    assert status == 0
+
+
+def test_review_dispatch_surfaces_malformed_oracle_config_as_structured_error(
+    mocker: MockerFixture,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reading a malformed remote config on the Oracle-only path stays structured."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": +}',
+        encoding="utf-8",
+    )
+    mocker.patch.dict(os.environ, {"HOME": str(tmp_path)})
+
+    def touch_oracle_config(**kwargs: object) -> ReviewResult:
+        _ = cast("CommandRunner", kwargs["runner"]).oracle_config_remote_host
+        message = "unreachable: property access must raise first"
+        raise AssertionError(message)
+
+    mocker.patch.object(cli, "execute_review", touch_oracle_config)
+
+    status = cli.main(["review", "--pr", "1"])
+    payload = _stdout_json(capsys)
+    error = cast("dict[str, object]", payload["error"])
+
+    assert status == EXIT_PRECONDITION
+    assert error["category"] == "bundle"
+    assert "could not be parsed" in cast("str", error["message"])
+
+
+def test_review_cli_binds_runner_config_inspection_to_repo_dir(
+    mocker: MockerFixture,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The parsed repo directory selects the same config Oracle will read."""
+    launcher_dir = tmp_path / "launcher"
+    launcher_home = launcher_dir / ".oracle-home"
+    launcher_home.mkdir(parents=True)
+    (launcher_home / "config.json").write_text(
+        '{"browser": {"remoteHost": "192.0.2.1:9473", '
+        '"remoteToken": "launcher-decoy-secret"}}',
+        encoding="utf-8",
+    )
+    repo_dir = tmp_path / "repo"
+    repo_home = repo_dir / ".oracle-home"
+    repo_home.mkdir(parents=True)
+    (repo_home / "config.json").write_text(
+        '{"browser": {"remoteHost": "10.0.0.9:9473", '
+        '"remoteToken": "repo-secret-token"}}',
+        encoding="utf-8",
+    )
+    mocker.patch.dict(os.environ, {"ORACLE_HOME_DIR": ".oracle-home"})
+
+    created_runners: list[CommandRunner] = []
+
+    def make_runner(*, repo_dir: Path | None = None) -> CommandRunner:
+        runner = (
+            CommandRunner(repo_dir=repo_dir)
+            if repo_dir is not None
+            else CommandRunner()
+        )
+        created_runners.append(runner)
+        return runner
+
+    mocker.patch.object(cli, "CommandRunner", make_runner)
+    expected = ReviewResult(
+        repository="octo/repo",
+        pr_number=1,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        verdict="APPROVE",
+        github_review_id=42,
+        blocking_findings=(),
+        implementation_prompt=None,
+    )
+
+    def fake_review(**kwargs: object) -> ReviewResult:
+        runner = cast("CommandRunner", kwargs["runner"])
+        assert runner.oracle_config_remote_host == "10.0.0.9:9473"
+        assert runner.contains_secret("repo-secret-token")
+        assert not runner.contains_secret("launcher-decoy-secret")
+        return expected
+
+    mocker.patch.object(cli, "execute_review", fake_review)
+
+    with chdir(launcher_dir):
+        status = cli.main([
+            "review",
+            "--pr",
+            "1",
+            "--repo-dir",
+            str(repo_dir),
+        ])
+    payload = _stdout_json(capsys)
+
+    assert status == 0
+    assert payload == expected.as_json()
+    assert len(created_runners) == 2
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        pytest.param(
+            (
+                "{\n"
+                "  // remote transport\n"
+                '  "browser": {"remoteHost": "10.0.0.9:9473"},\n'
+                "}"
+            ),
+            id="comments-and-trailing-commas",
+        ),
+        pytest.param(
+            "{ browser: { remoteHost: '10.0.0.9:9473' } }",
+            id="unquoted-keys-and-single-quotes",
+        ),
+    ],
+)
+def test_review_dispatch_survives_valid_json5_oracle_config(
+    mocker: MockerFixture,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    config_text: str,
+) -> None:
+    """Valid Oracle JSON5 config forms must not block `review`."""
+    oracle_dir = tmp_path / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        config_text,
+        encoding="utf-8",
+    )
+    mocker.patch.dict(os.environ, {"HOME": str(tmp_path)})
+
+    def touch_oracle_config(**kwargs: object) -> ReviewResult:
+        host = cast("CommandRunner", kwargs["runner"]).oracle_config_remote_host
+        assert host == "10.0.0.9:9473"
+        return ReviewResult(
+            repository="octo/repo",
+            pr_number=1,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            verdict="APPROVE",
+            github_review_id=42,
+            blocking_findings=(),
+            implementation_prompt=None,
+        )
+
+    mocker.patch.object(cli, "execute_review", touch_oracle_config)
+
+    status = cli.main(["review", "--pr", "1"])
+    payload = _stdout_json(capsys)
+
+    assert status == 0
+    assert payload["verdict"] == "APPROVE"
 
 
 @pytest.mark.parametrize(

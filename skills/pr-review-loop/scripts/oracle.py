@@ -22,7 +22,7 @@ from .models import (
     OracleReview,
     PullRequest,
 )
-from .process import CommandError
+from .process import CommandError, normalize_oracle_remote_value
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -565,6 +565,38 @@ def _run_oracle_with_retries(
             return
 
 
+def _reject_credentials_in_attachments(
+    runner: CommandRunner,
+    attachments: tuple[Path, ...],
+) -> None:
+    """Reject credentials that became known after bundle construction.
+
+    The Oracle config is refreshed immediately before invocation. Re-checking
+    every private bundle artifact after that refresh closes the gap where a
+    config-only token rotates after the source patch or instruction files were
+    initially validated.
+
+    Raises:
+        LooprError: An attachment cannot be inspected or contains a known
+            credential.
+    """
+    for attachment in attachments:
+        try:
+            data = attachment.read_bytes()
+        except OSError as exc:
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "failed to inspect an Oracle attachment",
+            ) from exc
+        if runner.contains_secret(data):
+            raise LooprError(
+                EXIT_PRECONDITION,
+                "bundle",
+                "Oracle attachment contains a known credential",
+            )
+
+
 def _snapshot(pull_request: PullRequest) -> JsonObject:
     """Return the stable pull-request metadata snapshot.
 
@@ -839,6 +871,21 @@ def build_bootstrap_bundle(
     )
 
 
+def _oracle_uses_remote_transport(
+    runner: CommandRunner,
+    env: Mapping[str, str],
+) -> bool:
+    """Return whether either Oracle remote-transport source is configured.
+
+    Both sources are trimmed the way Oracle's own resolver trims them, so a
+    whitespace-only value is treated as unset. Endpoint selection and
+    config/environment precedence remain Oracle's responsibility.
+    """
+    env_remote_host = normalize_oracle_remote_value(env.get("ORACLE_REMOTE_HOST"))
+    config_remote_host = runner.oracle_config_remote_host
+    return env_remote_host is not None or config_remote_host is not None
+
+
 def _oracle_command(
     raw_path: Path,
     thinking_time: str | None,
@@ -846,6 +893,8 @@ def _oracle_command(
     prompt: str,
     attachments: tuple[Path, ...],
     slug: str,
+    *,
+    manual_login: bool,
 ) -> list[str]:
     """Build the bounded Oracle argv for one browser invocation.
 
@@ -856,10 +905,13 @@ def _oracle_command(
         "oracle",
         "--engine",
         "browser",
-        "--browser-manual-login",
+    ]
+    if manual_login:
+        command.append("--browser-manual-login")
+    command.extend((
         "--browser-model-strategy",
         "select" if model is not None else "current",
-    ]
+    ))
     if model is not None:
         command.extend(("--model", model))
     if thinking_time is not None:
@@ -910,6 +962,8 @@ def invoke_oracle(
             "Oracle attachment count exceeds the command bound",
         )
     raw_path = writer.root / "oracle-raw.json"
+    env = runner.oracle_env()
+    uses_remote_transport = _oracle_uses_remote_transport(runner, env)
     command = _oracle_command(
         raw_path,
         thinking_time,
@@ -917,9 +971,11 @@ def invoke_oracle(
         prompt,
         attachments,
         slug,
+        manual_login=not uses_remote_transport,
     )
     _validate_oracle_command(command)
-    environment = runner.oracle_env()
+    _reject_credentials_in_attachments(runner, attachments)
+    environment = env
     sleep = time.sleep if _sleep is None else _sleep
     random_value = SystemRandom().random if _random_value is None else _random_value
     _run_oracle_with_retries(
