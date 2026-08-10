@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess  # ruff: ignore[suspicious-subprocess-import]
 from typing import TYPE_CHECKING, override
 
 import pytest
@@ -22,43 +20,11 @@ from scripts.submit import (
     execute_submit,
 )
 
+from .support import GIT, git as _git, run_process as _run_process
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
-
-
-def _git_executable() -> str:
-    executable = shutil.which("git")
-    if executable is None:
-        message = "git is required for submit integration tests"
-        raise RuntimeError(message)
-    return executable
-
-
-GIT = _git_executable()
-
-
-def _run_process(
-    args: Sequence[str],
-    *,
-    cwd: Path,
-    env: Mapping[str, str] | None = None,
-    input_text: str | None = None,
-    check: bool = True,
-) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
-        list(args),
-        cwd=cwd,
-        env=None if env is None else dict(env),
-        input=None if input_text is None else input_text.encode(),
-        check=check,
-        capture_output=True,
-    )
-
-
-def _git(repo: Path, *args: str) -> str:
-    result = _run_process([GIT, *args], cwd=repo)
-    return result.stdout.decode("utf-8", "strict").strip()
 
 
 def _fixture_repo(tmp_path: Path) -> tuple[Path, Path, JsonObject, str, str]:
