@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from typing import cast
 
 EXIT_PRECONDITION = 2
@@ -15,7 +15,7 @@ type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, JsonValue]
 
 
-class LooprError(RuntimeError):
+class ReviewLoopError(RuntimeError):
     """A stable command failure with an exit code and machine category."""
 
     def __init__(self, code: int, category: str, message: str) -> None:
@@ -23,6 +23,11 @@ class LooprError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.category = category
+
+
+# Transitional import alias for modules that are migrated independently. The
+# canonical internal exception name is ReviewLoopError.
+LooprError = ReviewLoopError
 
 
 @dataclass(frozen=True)
@@ -43,7 +48,7 @@ class PullRequest:
     head_sha: str
     head_repository: str
     changed_paths: tuple[str, ...]
-    raw: JsonObject
+    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -60,7 +65,7 @@ class PullRequestIdentity:
     head_ref: str
     head_sha: str
     head_repository: str
-    raw: JsonObject
+    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -76,7 +81,7 @@ class IssueSnapshot:
     state: str
     updated_at: str
     comments: tuple[JsonObject, ...]
-    raw: JsonObject
+    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +120,7 @@ class OracleReview:
     blocking_findings: tuple[JsonObject, ...]
     implementation_prompt: str | None
     non_blocking_notes: tuple[str, ...]
-    raw: JsonObject
+    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -126,7 +131,7 @@ class OracleBootstrap:
     issue_number: int
     base_sha: str
     implementation_prompt: str
-    raw: JsonObject
+    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
