@@ -11,8 +11,13 @@ stable failure classes are precondition/input `2`, Oracle/schema `3`,
 GitHub/write `4`, and stale state or lease loss `6`.
 
 Failures emit
-`{"schema_version":1,"command":"bootstrap|review|submit","error":{"category":"...","message":"..."}}`
-with bounded redacted diagnostics.
+`{"schema_version":1,"command":"pr-review-loop|bootstrap|review|submit","error":{"category":"...","message":"..."}}`
+with bounded redacted diagnostics. `command` is `pr-review-loop` when argument
+parsing fails before a valid subcommand has been identified, including a
+missing or unknown subcommand and invalid root-level arguments. Once the first
+argument identifies `bootstrap`, `review`, or `submit`, parse failures for that
+subcommand retain that recognized command value, including missing options,
+unknown options, and invalid option values.
 
 ## `bootstrap`
 
