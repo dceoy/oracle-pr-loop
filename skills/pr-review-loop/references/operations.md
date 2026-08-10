@@ -117,6 +117,3 @@ review with a disposable PR:
    its attached evidence with the unchanged result schema and commit anchor.
 3. If ChatGPT or Oracle instead returns an operational error, confirm no review
    verdict is fabricated from that failure.
-
-GitHub.com same-repository targets only are supported. Forks and GitHub
-Enterprise are outside the command contract.

@@ -45,13 +45,3 @@ targets. GitHub Enterprise and fork targets are unsupported.
 Ask a compatible host to implement an open Issue and carry its pull request
 through review, or to review and improve an existing pull request. See the
 canonical workflow and command contract above for the normative behavior.
-
-## Development
-
-```console
-uv sync --dev
-uv run pytest
-uv run ruff check skills/pr-review-loop
-uv run ruff format --check skills/pr-review-loop
-uv run pyright
-```

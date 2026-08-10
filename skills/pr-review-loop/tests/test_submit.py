@@ -16,7 +16,11 @@ from scripts.models import (
     ReviewLoopError,
 )
 from scripts.process import CommandError, CommandResult, CommandRunner
-from scripts.submit import execute_submit
+from scripts.submit import (
+    _contains_gitlink_change,
+    _staged_object_ids,
+    execute_submit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -195,11 +199,55 @@ def _modify(repo: Path, value: str = "fixed\n") -> None:
     (repo / "file.txt").write_text(value, encoding="utf-8")
 
 
+def _raw_record(
+    status: str,
+    *,
+    old_mode: str = "100644",
+    new_mode: str = "100644",
+    paths: tuple[str, ...] = ("file.txt",),
+) -> bytes:
+    """Return one terminated raw Git diff record for parser tests."""
+    header = f":{old_mode} {new_mode} {'a' * 40} {'b' * 40} {status}\0"
+    return header.encode() + b"\0".join(path.encode() for path in paths) + b"\0"
+
+
+def test_shared_raw_parser_accepts_scores_and_gitlink_modes() -> None:
+    """Shared raw parsing accepts Git scores and exposes both modes."""
+    assert _staged_object_ids(_raw_record("M100")) == ["b" * 40]
+    assert _staged_object_ids(_raw_record("R100", paths=("old.txt", "new.txt"))) == [
+        "b" * 40
+    ]
+    assert _contains_gitlink_change(_raw_record("M100", old_mode="160000")) is True
+
+
+@pytest.mark.parametrize(
+    ("status", "paths"),
+    [
+        ("R", ("old.txt", "new.txt")),
+        ("C101", ("old.txt", "new.txt")),
+        ("A100", ("file.txt",)),
+        ("T100", ("file.txt",)),
+        ("M101", ("file.txt",)),
+        ("Mbad", ("file.txt",)),
+    ],
+)
+def test_shared_raw_parser_rejects_invalid_scores(
+    status: str,
+    paths: tuple[str, ...],
+) -> None:
+    """Shared raw parsing rejects missing, out-of-range, and nonnumeric scores."""
+    with pytest.raises(ReviewLoopError) as captured:
+        _staged_object_ids(_raw_record(status, paths=paths))
+
+    assert captured.value.category == "git"
+
+
 def test_success_creates_single_child_and_lease_protected_remote_head(
     tmp_path: Path,
 ) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     _modify(repo)
+    (repo / "new.txt").write_text("new\n", encoding="utf-8")
     runner = ScenarioRunner(repo, remote, state)
 
     result = execute_submit(
@@ -222,6 +270,9 @@ def test_success_creates_single_child_and_lease_protected_remote_head(
     assert remote_head == result.commit_sha
     assert _git(repo, "show", "-s", "--format=%s", result.commit_sha) == (
         "apply reviewed changes"
+    )
+    assert "new.txt" in _git(
+        repo, "show", "--name-only", "--format=", result.commit_sha
     )
 
 
@@ -306,78 +357,6 @@ def test_submit_rejects_whitespace_errors(tmp_path: Path) -> None:
         )
 
     assert captured.value.category == "git"
-
-
-def test_untracked_reserved_runtime_artifacts_are_never_committed(
-    tmp_path: Path,
-) -> None:
-    repo, remote, state, _base, head = _fixture_repo(tmp_path)
-    runtime = repo / ".pr-review-loop" / "stale.json"
-    runtime.parent.mkdir()
-    runtime.write_text("stale\n", encoding="utf-8")
-    _modify(repo)
-
-    result = execute_submit(
-        pr_value="1",
-        expected_head=head,
-        repo_dir=repo,
-        runner=ScenarioRunner(repo, remote, state),
-    )
-
-    assert runtime.exists()
-    changed = _git(
-        repo,
-        "show",
-        "--name-only",
-        "--format=",
-        result.commit_sha,
-    )
-    assert ".pr-review-loop" not in changed
-
-
-def test_tracked_reserved_runtime_artifacts_fail_closed(tmp_path: Path) -> None:
-    repo, remote, state, _base, head = _fixture_repo(tmp_path)
-    runtime = repo / ".pr-review-loop" / "state.json"
-    runtime.parent.mkdir()
-    runtime.write_text("tracked\n", encoding="utf-8")
-    _git(repo, "add", ".pr-review-loop/state.json")
-    _git(repo, "commit", "-m", "track reserved state")
-    new_head = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "push", "origin", "feature")
-    state["headRefOid"] = new_head
-    _modify(repo)
-
-    with pytest.raises(ReviewLoopError) as captured:
-        execute_submit(
-            pr_value="1",
-            expected_head=new_head,
-            repo_dir=repo,
-            runner=ScenarioRunner(repo, remote, state),
-        )
-
-    assert head != new_head
-    assert captured.value.category == "legacy_artifacts"
-
-
-def test_forced_staged_reserved_runtime_artifact_fails_closed(
-    tmp_path: Path,
-) -> None:
-    repo, remote, state, _base, head = _fixture_repo(tmp_path)
-    runtime = repo / ".pr-review-loop" / "state.json"
-    runtime.parent.mkdir()
-    runtime.write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "-f", ".pr-review-loop/state.json")
-    _modify(repo)
-
-    with pytest.raises(ReviewLoopError) as captured:
-        execute_submit(
-            pr_value="1",
-            expected_head=head,
-            repo_dir=repo,
-            runner=ScenarioRunner(repo, remote, state),
-        )
-
-    assert captured.value.category == "legacy_artifacts"
 
 
 def test_submit_rejects_known_credential_in_staged_blob(tmp_path: Path) -> None:

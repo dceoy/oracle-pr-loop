@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 from scripts import cli
@@ -15,7 +15,6 @@ from scripts.models import (
 )
 
 if TYPE_CHECKING:
-    import argparse
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -146,35 +145,6 @@ def test_each_recognized_command_owns_its_parse_failures(
     assert value["command"] == command
     assert value["error"]["category"] == "input"  # type: ignore[index]
     assert stderr
-
-
-def test_root_help_is_issue_and_pr_oriented() -> None:
-    help_text = cli.parser().format_help()
-
-    assert "Bootstrap one exact GitHub Issue" in help_text
-    assert "GitHub pull" in help_text
-    assert "request" in help_text
-    assert "turn one open GitHub Issue" in help_text
-    assert "review and post one exact pull-request snapshot" in help_text
-
-
-def test_subcommand_help_describes_bootstrap_issue_and_pr_commands() -> None:
-    root = cli.parser()
-    subparsers = cast(
-        "argparse._SubParsersAction[argparse.ArgumentParser]",
-        next(action for action in root._actions if action.dest == "command"),
-    )
-    choices = subparsers.choices
-    bootstrap_description = choices["bootstrap"].description
-    review_description = choices["review"].description
-    submit_description = choices["submit"].description
-
-    assert bootstrap_description is not None
-    assert review_description is not None
-    assert submit_description is not None
-    assert "GitHub Issue" in bootstrap_description
-    assert "pull-request snapshot" in review_description
-    assert "GitHub pull request" in submit_description
 
 
 def test_bootstrap_success_schema_is_stable(

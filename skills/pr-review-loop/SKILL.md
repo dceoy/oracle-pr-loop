@@ -127,19 +127,5 @@ Never re-review an unchanged head, and never treat a GitHub formal review state
 as a substitute for the structured Oracle verdict. Preserve the exact
 repository and head binding at every iteration.
 
-## Internal commands
-
-The deterministic entry points are:
-
-```console
-python3 skills/pr-review-loop/scripts/cli.py bootstrap --issue <NUMBER_OR_URL>
-python3 skills/pr-review-loop/scripts/cli.py review --pr <NUMBER_OR_URL>
-python3 skills/pr-review-loop/scripts/cli.py submit --pr <NUMBER_OR_URL> --expected-head <SHA>
-```
-
-These commands require Python 3.12 or newer. Their complete options, schemas,
-preconditions, side effects, supported targets, and failure classes are defined
-only in [command-contracts.md](references/command-contracts.md).
-
 Production code must not launch, select, or detect Codex CLI, Claude Code,
 Cursor CLI, or another implementation agent.

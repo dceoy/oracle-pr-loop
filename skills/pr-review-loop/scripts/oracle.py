@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, cast
 from .models import (
     EXIT_ORACLE,
     EXIT_PRECONDITION,
+    BlockingFinding,
+    FindingLocation,
     IssueSnapshot,
     JsonObject,
     JsonValue,
@@ -62,7 +64,6 @@ TOP_KEYS = {
     "non_blocking_notes",
 }
 BLOCKER_KEYS = {"id", "title", "description", "required_change", "location"}
-BLOCKER_TEXT_KEYS = BLOCKER_KEYS - {"location"}
 LOCATION_KEYS = {"path", "line", "side"}
 LOCATION_SIDES = {"LEFT", "RIGHT"}
 BOOTSTRAP_TOP_KEYS = {
@@ -215,7 +216,7 @@ def _integer(value: JsonValue | None, *, field: str) -> int:
     return value
 
 
-def _location(value: JsonValue | None) -> JsonObject | None:
+def _location(value: JsonValue | None) -> FindingLocation | None:
     """Validate one proposed inline-comment location's shape.
 
     The location's shape is validated here; whether it names a real line of
@@ -243,16 +244,14 @@ def _location(value: JsonValue | None) -> JsonObject | None:
             "oracle_schema",
             "blocking finding location must name a positive line on LEFT or RIGHT",
         )
-    return {
-        "path": _exact_string(
-            value.get("path"), field="blocking_findings.location.path"
-        ),
-        "line": line,
-        "side": side,
-    }
+    return FindingLocation(
+        path=_exact_string(value.get("path"), field="blocking_findings.location.path"),
+        line=line,
+        side=side,
+    )
 
 
-def _blocking_findings(value: JsonValue | None) -> tuple[JsonObject, ...]:
+def _blocking_findings(value: JsonValue | None) -> tuple[BlockingFinding, ...]:
     """Validate the complete blocking-finding collection.
 
     Returns:
@@ -267,7 +266,7 @@ def _blocking_findings(value: JsonValue | None) -> tuple[JsonObject, ...]:
             "oracle_schema",
             "blocking_findings must be an array",
         )
-    findings: list[JsonObject] = []
+    findings: list[BlockingFinding] = []
     for item in value:
         if not isinstance(item, dict) or set(item) != BLOCKER_KEYS:
             raise ReviewLoopError(
@@ -275,12 +274,21 @@ def _blocking_findings(value: JsonValue | None) -> tuple[JsonObject, ...]:
                 "oracle_schema",
                 "invalid blocking finding",
             )
-        finding: JsonObject = {
-            key: _string(item.get(key), field=f"blocking_findings.{key}")
-            for key in sorted(BLOCKER_TEXT_KEYS)
-        }
-        finding["location"] = _location(item.get("location"))
-        findings.append(finding)
+        findings.append(
+            BlockingFinding(
+                id=_string(item.get("id"), field="blocking_findings.id"),
+                title=_string(item.get("title"), field="blocking_findings.title"),
+                description=_string(
+                    item.get("description"),
+                    field="blocking_findings.description",
+                ),
+                required_change=_string(
+                    item.get("required_change"),
+                    field="blocking_findings.required_change",
+                ),
+                location=_location(item.get("location")),
+            )
+        )
     return tuple(findings)
 
 
