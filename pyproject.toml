@@ -1,7 +1,7 @@
 [project]
 name = "pr-review-loop"
 version = "0.1.0"
-description = "Host-agent-neutral Oracle/ChatGPT pull-request review and submission skill"
+description = "Oracle/ChatGPT pull-request review and submission skill"
 authors = [{name = "dceoy", email = "1938249+dceoy@users.noreply.github.com"}]
 maintainers = [{name = "dceoy", email = "1938249+dceoy@users.noreply.github.com"}]
 license = "AGPL-3.0-or-later"
@@ -147,7 +147,7 @@ pythonpath = ["skills/pr-review-loop"]
 testpaths = ["skills/pr-review-loop/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
-python_functions = ["test_*"]
+python_functions = ["test_*.py", "*_test.py"]
 minversion = "9.0"
 
 [tool.coverage.run]
