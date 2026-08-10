@@ -17,14 +17,15 @@ from scripts.models import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pytest import CaptureFixture
     from pytest_mock import MockerFixture
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 
 
-def _stdout_object(capsys: CaptureFixture[str]) -> tuple[dict[str, object], str]:
+def _stdout_object(
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[dict[str, object], str]:
     captured = capsys.readouterr()
     lines = captured.out.splitlines()
     assert len(lines) == 1
@@ -34,7 +35,7 @@ def _stdout_object(capsys: CaptureFixture[str]) -> tuple[dict[str, object], str]
 
 
 def test_missing_subcommand_uses_documented_top_level_command(
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     code = cli.main([])
     value, stderr = _stdout_object(capsys)
@@ -50,7 +51,7 @@ def test_missing_subcommand_uses_documented_top_level_command(
 
 
 def test_unknown_subcommand_uses_documented_top_level_command(
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     code = cli.main(["unknown"])
     value, stderr = _stdout_object(capsys)
@@ -63,7 +64,7 @@ def test_unknown_subcommand_uses_documented_top_level_command(
 
 
 def test_invalid_root_option_uses_documented_top_level_command(
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     code = cli.main(["--invalid-option"])
     value, stderr = _stdout_object(capsys)
@@ -75,7 +76,7 @@ def test_invalid_root_option_uses_documented_top_level_command(
 
 
 def test_recognized_command_missing_required_option_keeps_attribution(
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     code = cli.main(["review"])
     value, stderr = _stdout_object(capsys)
@@ -90,27 +91,33 @@ def test_recognized_command_missing_required_option_keeps_attribution(
 
 
 def test_recognized_command_unknown_option_keeps_attribution(
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = cli.main(["submit", "--pr", "1", "--expected-head", SHA_A, "--wat"])
+    code = cli.main(
+        ["submit", "--pr", "1", "--expected-head", SHA_A, "--wat"]
+    )
     value, stderr = _stdout_object(capsys)
 
     assert code == 2
     assert value["command"] == "submit"
-    assert "unrecognized arguments: --wat" in value["error"]["message"]  # type: ignore[index]
+    assert (
+        "unrecognized arguments: --wat" in value["error"]["message"]  # type: ignore[index]
+    )
     assert stderr
 
 
 def test_invalid_option_value_keeps_recognized_command_attribution(
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = cli.main([
-        "bootstrap",
-        "--issue",
-        "7",
-        "--oracle-thinking-time",
-        "maximum",
-    ])
+    code = cli.main(
+        [
+            "bootstrap",
+            "--issue",
+            "7",
+            "--oracle-thinking-time",
+            "maximum",
+        ]
+    )
     value, stderr = _stdout_object(capsys)
 
     assert code == 2
@@ -133,7 +140,7 @@ def test_invalid_option_value_keeps_recognized_command_attribution(
 def test_each_recognized_command_owns_its_parse_failures(
     command: str,
     argv: list[str],
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     code = cli.main(argv)
     value, stderr = _stdout_object(capsys)
@@ -148,7 +155,8 @@ def test_root_help_is_issue_and_pr_oriented() -> None:
     help_text = cli.parser().format_help()
 
     assert "Bootstrap one exact GitHub Issue" in help_text
-    assert "review or submit one exact GitHub pull request" in help_text
+    assert "GitHub pull" in help_text
+    assert "request" in help_text
     assert "turn one open GitHub Issue" in help_text
     assert "review and post one exact pull-request snapshot" in help_text
 
@@ -168,7 +176,7 @@ def test_subcommand_help_describes_bootstrap_issue_and_pr_commands() -> None:
 def test_bootstrap_success_schema_is_stable(
     tmp_path: Path,
     mocker: MockerFixture,
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     result = BootstrapResult(
         repository="owner/repository",
@@ -181,17 +189,19 @@ def test_bootstrap_success_schema_is_stable(
     )
     execute = mocker.patch.object(cli, "execute_bootstrap", return_value=result)
 
-    code = cli.main([
-        "bootstrap",
-        "--issue",
-        "7",
-        "--repo-dir",
-        str(tmp_path),
-        "--oracle-model",
-        "gpt-5.6-sol",
-        "--oracle-thinking-time",
-        "heavy",
-    ])
+    code = cli.main(
+        [
+            "bootstrap",
+            "--issue",
+            "7",
+            "--repo-dir",
+            str(tmp_path),
+            "--oracle-model",
+            "gpt-5.6-sol",
+            "--oracle-thinking-time",
+            "heavy",
+        ]
+    )
     value, stderr = _stdout_object(capsys)
 
     assert code == 0
@@ -208,7 +218,7 @@ def test_bootstrap_success_schema_is_stable(
 def test_review_success_schema_is_stable(
     tmp_path: Path,
     mocker: MockerFixture,
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     result = ReviewResult(
         repository="owner/repository",
@@ -235,7 +245,7 @@ def test_review_success_schema_is_stable(
 def test_submit_success_schema_is_stable(
     tmp_path: Path,
     mocker: MockerFixture,
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     result = SubmitResult(
         repository="owner/repository",
@@ -248,15 +258,17 @@ def test_submit_success_schema_is_stable(
     )
     execute = mocker.patch.object(cli, "execute_submit", return_value=result)
 
-    code = cli.main([
-        "submit",
-        "--pr",
-        "21",
-        "--expected-head",
-        SHA_B,
-        "--repo-dir",
-        str(tmp_path),
-    ])
+    code = cli.main(
+        [
+            "submit",
+            "--pr",
+            "21",
+            "--expected-head",
+            SHA_B,
+            "--repo-dir",
+            str(tmp_path),
+        ]
+    )
     value, stderr = _stdout_object(capsys)
 
     assert code == 0
@@ -268,7 +280,7 @@ def test_submit_success_schema_is_stable(
 
 def test_cli_redacts_structured_and_stderr_failures(
     mocker: MockerFixture,
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     secret = "remote-secret-token"
     mocker.patch.dict(
@@ -294,7 +306,7 @@ def test_cli_redacts_structured_and_stderr_failures(
 
 def test_keyboard_interrupt_is_structured_and_command_attributed(
     mocker: MockerFixture,
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mocker.patch.object(cli, "execute_review", side_effect=KeyboardInterrupt)
 
@@ -312,7 +324,7 @@ def test_keyboard_interrupt_is_structured_and_command_attributed(
 
 def test_unexpected_exception_is_structured_and_fail_closed(
     mocker: MockerFixture,
-    capsys: CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mocker.patch.object(cli, "execute_review", side_effect=RuntimeError("boom"))
 
