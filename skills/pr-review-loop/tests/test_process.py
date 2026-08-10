@@ -148,12 +148,20 @@ def test_run_redacts_nonzero_command_output(tmp_path: Path) -> None:
         "ORACLE_REMOTE_TOKEN": secret,
     })
 
+    command = "; ".join(
+        (
+            f"import sys; print({secret!r})",
+            f"sys.stderr.write({secret!r})",
+            "sys.exit(7)",
+        ),
+    )
+
     with pytest.raises(CommandError) as captured:
         runner.run(
             [
                 sys.executable,
                 "-c",
-                f"import sys; print({secret!r}); sys.stderr.write({secret!r}); sys.exit(7)",
+                command,
             ],
             cwd=tmp_path,
             env=runner.base_env(),

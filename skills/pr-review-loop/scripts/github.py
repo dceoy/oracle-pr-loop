@@ -737,7 +737,14 @@ class _ImmutableGitMixin:
         env: dict[str, str],
         max_output: int = 1024 * 1024,
     ) -> str:
-        """Run one Git text command with the supplied environment."""
+        """Run one Git text command with the supplied environment.
+
+        Returns:
+            The command's decoded standard output.
+
+        Raises:
+            ReviewLoopError: The command fails or output is not valid UTF-8.
+        """
         try:
             result = self.runner.run(
                 ["git", *args],
@@ -760,7 +767,14 @@ class _ImmutableGitMixin:
         input_text: str | None = None,
         max_output: int = 24 * 1024 * 1024,
     ) -> str:
-        """Run one authenticated GitHub CLI command and decode UTF-8 output."""
+        """Run one authenticated GitHub CLI command and decode UTF-8 output.
+
+        Returns:
+            The command's decoded standard output.
+
+        Raises:
+            ReviewLoopError: The command fails or output is not valid UTF-8.
+        """
         try:
             result = self.runner.run(
                 ["gh", *args],
@@ -779,7 +793,14 @@ class _ImmutableGitMixin:
         hardened: bool,
         require_push_url: bool,
     ) -> str:
-        """Resolve and validate the local repository origin."""
+        """Resolve and validate the local repository origin.
+
+        Returns:
+            The normalized repository identified by the fetch URL.
+
+        Raises:
+            ReviewLoopError: The local repository or its origin is invalid.
+        """
         env = self._git_env() if hardened else self.runner.base_env()
         try:
             root = self._git_text(
@@ -811,7 +832,14 @@ class _ImmutableGitMixin:
         return fetch_repo
 
     def _origin_repo(self, *, env: dict[str, str], push: bool) -> str:
-        """Read exactly one GitHub.com origin fetch or push URL."""
+        """Read exactly one GitHub.com origin fetch or push URL.
+
+        Returns:
+            The normalized repository identified by the requested URL.
+
+        Raises:
+            ReviewLoopError: The origin URL is missing, ambiguous, or invalid.
+        """
         kind = "push" if push else "fetch"
         try:
             urls = self._git_text(
@@ -1042,7 +1070,11 @@ class _ImmutableGitMixin:
         *,
         max_output: int,
     ) -> bytes:
-        """Evaluate immutable `diff` attributes in an isolated bare repository."""
+        """Evaluate immutable `diff` attributes in an isolated bare repository.
+
+        Returns:
+            The bounded output from the isolated attribute-aware diff.
+        """
         common_dir = Path(
             self
             .git_bytes(
@@ -1176,11 +1208,7 @@ class GitHubClient(_ImmutableGitMixin):
             )
 
     def initialize_for_submit(self, pr_value: str) -> None:
-        """Bind submit operations and require one matching origin push URL.
-
-        Raises:
-            ReviewLoopError: Repository or target identity validation fails.
-        """
+        """Bind submit operations and require one matching origin push URL."""
         origin_repo = self._initialize_repository(
             hardened=False,
             require_push_url=True,
@@ -1188,7 +1216,11 @@ class GitHubClient(_ImmutableGitMixin):
         self._set_target(pr_value, origin_repo)
 
     def _set_target(self, pr_value: str, origin_repo: str) -> None:
-        """Resolve the target and bind it to the local origin."""
+        """Resolve the target and bind it to the local origin.
+
+        Raises:
+            ReviewLoopError: The target does not match the local origin.
+        """
         self.repository, self.number, self.url = resolve_target(
             pr_value,
             origin_repo,
@@ -1267,7 +1299,14 @@ class GitHubClient(_ImmutableGitMixin):
 
     @staticmethod
     def _changed_paths(files_value: list[JsonValue]) -> list[str]:
-        """Validate the complete GitHub changed-file inventory."""
+        """Validate the complete GitHub changed-file inventory.
+
+        Returns:
+            The validated changed paths.
+
+        Raises:
+            ReviewLoopError: A changed-file entry or path is invalid.
+        """
         paths: list[str] = []
         for item in files_value:
             if not isinstance(item, dict):
@@ -1289,15 +1328,16 @@ class GitHubClient(_ImmutableGitMixin):
 
         Returns:
             The validated immutable identity snapshot.
-
-        Raises:
-            ReviewLoopError: GitHub identity or state validation fails.
         """
         data = self._pull_request_data(PR_IDENTITY_FIELDS)
         return self._parse_identity(data, require_open=require_open)
 
     def _pull_request_data(self, fields: str) -> JsonObject:
-        """Fetch one bounded PR JSON object from GitHub CLI."""
+        """Fetch one bounded PR JSON object from GitHub CLI.
+
+        Returns:
+            The decoded PR JSON object.
+        """
         output = self._text(
             ["pr", "view", self.url, "--json", fields],
             max_output=8 * 1024 * 1024,
@@ -1310,7 +1350,11 @@ class GitHubClient(_ImmutableGitMixin):
         *,
         require_open: bool,
     ) -> PullRequestIdentity:
-        """Parse and validate the ref-bound identity fields from GitHub."""
+        """Parse and validate the ref-bound identity fields from GitHub.
+
+        Returns:
+            The validated immutable identity snapshot.
+        """
         head_repository = require_object(
             data.get("headRepository"),
             field="headRepository",
@@ -1367,7 +1411,12 @@ class GitHubClient(_ImmutableGitMixin):
         *,
         require_open: bool,
     ) -> None:
-        """Enforce exact target, state, repository, SHA, and ref invariants."""
+        """Enforce exact target, state, repository, SHA, and ref invariants.
+
+        Raises:
+            ReviewLoopError: An identity, state, repository, SHA, or ref
+                invariant is violated.
+        """
         if (
             pull_request.number != self.number
             or pull_request.url.rstrip("/").lower() != self.url.lower()
@@ -1420,11 +1469,7 @@ class GitHubClient(_ImmutableGitMixin):
         return verdict
 
     def ensure_objects(self, pull_request: PullRequest) -> None:
-        """Require the frozen base and head commits locally.
-
-        Raises:
-            ReviewLoopError: Either immutable commit object is unavailable.
-        """
+        """Require the frozen base and head commits locally."""
         for sha in (pull_request.base_sha, pull_request.head_sha):
             self.ensure_commit_object(sha)
 
@@ -1483,7 +1528,11 @@ class GitHubClient(_ImmutableGitMixin):
         analysis: FrozenDiffAnalysis,
         candidate_paths: frozenset[str],
     ) -> dict[str, list[str]]:
-        """Group candidate head paths by their parsed immutable base path."""
+        """Group candidate head paths by their parsed immutable base path.
+
+        Returns:
+            Candidate head paths grouped by immutable base path.
+        """
         grouped: dict[str, list[str]] = {}
         for head_path in candidate_paths:
             file_analysis = analysis.files.get(head_path)
@@ -1498,7 +1547,11 @@ class GitHubClient(_ImmutableGitMixin):
         analysis: FrozenDiffAnalysis,
         candidate_paths: frozenset[str],
     ) -> frozenset[str]:
-        """Map immutable base/head `-diff` attributes to head paths."""
+        """Map immutable base/head `-diff` attributes to head paths.
+
+        Returns:
+            Head paths whose immutable attributes force review treatment.
+        """
         grouped = self._base_paths_by_head(analysis, candidate_paths)
         mapped_count = sum(len(values) for values in grouped.values())
         if mapped_count != len(candidate_paths):
@@ -1525,7 +1578,11 @@ class GitHubClient(_ImmutableGitMixin):
         analysis: FrozenDiffAnalysis,
         attribute_forced: frozenset[str],
     ) -> frozenset[tuple[str, str, int]]:
-        """Filter parsed anchors through immutable blob binary checks."""
+        """Filter parsed anchors through immutable blob binary checks.
+
+        Returns:
+            Anchors belonging to verified non-binary blobs.
+        """
         binary_by_sha: dict[str, bool] = {}
         verified: set[tuple[str, str, int]] = set()
         for path, side, line in analysis.anchors:
@@ -1641,11 +1698,7 @@ class GitHubClient(_ImmutableGitMixin):
         return review_id, data
 
     def dismiss(self, pull_request: PullRequest, review_id: int) -> None:
-        """Dismiss one stale formal GitHub review.
-
-        Raises:
-            ReviewLoopError: GitHub rejects the dismissal.
-        """
+        """Dismiss one stale formal GitHub review."""
         payload: JsonObject = {
             "message": ("Dismissed automatically: reviewed PR snapshot became stale.")
         }
@@ -1892,7 +1945,11 @@ class IssueClient(_ImmutableGitMixin):
         return issue
 
     def _validate_issue_identity(self, issue: IssueSnapshot) -> None:
-        """Require the Issue response to match the exact requested target."""
+        """Require the Issue response to match the exact requested target.
+
+        Raises:
+            ReviewLoopError: The Issue identity or state is invalid.
+        """
         if (
             issue.number != self.number
             or issue.url.rstrip("/").lower() != self.url.lower()
@@ -1910,7 +1967,11 @@ class IssueClient(_ImmutableGitMixin):
             )
 
     def _validate_content_safety(self, issue: IssueSnapshot) -> None:
-        """Reject known credentials from untrusted Issue evidence."""
+        """Reject known credentials from untrusted Issue evidence.
+
+        Raises:
+            ReviewLoopError: Issue content contains a known credential.
+        """
         texts = [issue.title, issue.body]
         for comment in issue.comments:
             body = comment.get("body")
@@ -1928,9 +1989,6 @@ class IssueClient(_ImmutableGitMixin):
 
         Returns:
             A validated safe branch name.
-
-        Raises:
-            ReviewLoopError: GitHub returns invalid default-branch metadata.
         """
         data = parse_json_object(
             self._text([

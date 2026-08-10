@@ -93,6 +93,7 @@ class FakeGitHubClient:
         _runner: CommandRunner,
         repo_dir: Path,
     ) -> None:
+        """Initialize the fake client with queued review state."""
         self.repo_dir = repo_dir
         self.authenticated_login = type(self).authenticated_login_value
         self.dismissed: list[int] = []
@@ -121,12 +122,20 @@ class FakeGitHubClient:
         return type(self).anchors
 
     def review_event(self, pull_request: PullRequest, verdict: str) -> str:
-        """Use formal events unless the fake authenticated user authored it."""
+        """Use formal events unless the fake authenticated user authored it.
+
+        Returns:
+            The GitHub review event for the supplied verdict.
+        """
         return "COMMENT" if pull_request.author == self.authenticated_login else verdict
 
     @staticmethod
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
-        """Compare base and head SHAs."""
+        """Compare base and head SHAs.
+
+        Returns:
+            Whether both snapshots have identical base and head SHAs.
+        """
         return first.base_sha == second.base_sha and first.head_sha == second.head_sha
 
     def post_review(
@@ -136,7 +145,11 @@ class FakeGitHubClient:
         body: str,
         comments: tuple[ReviewComment, ...] = (),
     ) -> tuple[int, JsonObject]:
-        """Record a posted review anchored to the supplied head."""
+        """Record a posted review anchored to the supplied head.
+
+        Returns:
+            The deterministic review ID and persisted review payload.
+        """
         self.post_count += 1
         self.posted_events.append(event)
         self.posted_bodies.append(body)
@@ -573,7 +586,11 @@ def _install_findings(
 
 
 def _published(tmp_path: Path) -> FakeGitHubClient:
-    """Run one review and return the GitHub transport that published it."""
+    """Run one review and return the GitHub transport that published it.
+
+    Returns:
+        The fake GitHub client used for publication.
+    """
     execute_review(
         pr_value="21",
         repo_dir=tmp_path,

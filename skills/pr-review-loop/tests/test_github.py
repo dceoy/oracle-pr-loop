@@ -230,7 +230,7 @@ def test_json_object_and_required_field_helpers_are_strict() -> None:
     with pytest.raises(ReviewLoopError):
         parse_json_object("[]", category="schema")
     with pytest.raises(ReviewLoopError):
-        require_integer(True, field="i")
+        require_integer(value=True, field="i")
     with pytest.raises(ReviewLoopError):
         require_boolean(1, field="b")
     with pytest.raises(ReviewLoopError):
@@ -439,6 +439,7 @@ class FrozenDiffClient(GitHubClient):
         forced_paths: frozenset[str] = frozenset(),
         binary_shas: frozenset[str] = frozenset(),
     ) -> None:
+        """Initialize the client with frozen patch and validation evidence."""
         super().__init__(CommandRunner({"PATH": "/usr/bin"}), Path())
         self._patch = patch
         self._forced_paths = forced_paths
@@ -562,7 +563,9 @@ def test_bounded_comments_keeps_newest_comments_and_marks_oversized() -> None:
     assert result[0]["created_at"] == "2026-01-02T00:00:00Z"
     assert result[-1]["created_at"] == "2026-01-31T00:00:00Z"
     assert result[-1]["omitted"] is True
-    assert result[-1]["body"] == ""
+    body = result[-1]["body"]
+    assert isinstance(body, str)
+    assert not body
 
 
 def test_bounded_comments_rejects_malformed_comment_entry() -> None:

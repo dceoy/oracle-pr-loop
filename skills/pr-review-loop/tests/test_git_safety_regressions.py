@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scripts.github import GitHubClient
 from scripts.models import PullRequest
 from scripts.process import CommandRunner
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _runner() -> CommandRunner:
@@ -20,7 +23,11 @@ def _git(
     repo: Path,
     *args: str,
 ) -> bytes:
-    """Run one test-controlled Git command and return stdout."""
+    """Run one test-controlled Git command and return stdout.
+
+    Returns:
+        The command's standard output.
+    """
     return runner.run(
         ["git", *args],
         cwd=repo,
@@ -30,7 +37,11 @@ def _git(
 
 
 def _init_repo(tmp_path: Path) -> tuple[CommandRunner, Path]:
-    """Create one isolated repository with deterministic commit identity."""
+    """Create one isolated repository with deterministic commit identity.
+
+    Returns:
+        The command runner and path to the new repository.
+    """
     runner = _runner()
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -41,7 +52,11 @@ def _init_repo(tmp_path: Path) -> tuple[CommandRunner, Path]:
 
 
 def _commit(runner: CommandRunner, repo: Path, message: str) -> str:
-    """Commit the worktree and return the immutable commit SHA."""
+    """Commit the worktree and return the immutable commit SHA.
+
+    Returns:
+        The SHA of the new commit.
+    """
     _git(runner, repo, "add", "-A")
     _git(runner, repo, "commit", "--quiet", "-m", message)
     return _git(runner, repo, "rev-parse", "HEAD").decode().strip()
