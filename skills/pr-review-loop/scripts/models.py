@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import cast
 
 EXIT_PRECONDITION = 2
@@ -77,6 +77,26 @@ class IssueSnapshot:
 
 
 @dataclass(frozen=True)
+class FindingLocation:
+    """An Oracle-proposed location for one blocking finding."""
+
+    path: str
+    line: int
+    side: str
+
+
+@dataclass(frozen=True)
+class BlockingFinding:
+    """One strictly validated Oracle blocking finding."""
+
+    id: str
+    title: str
+    description: str
+    required_change: str
+    location: FindingLocation | None
+
+
+@dataclass(frozen=True)
 class ReviewComment:
     """One inline review comment anchored to a validated frozen-diff line."""
 
@@ -109,7 +129,7 @@ class OracleReview:
     head_sha: str
     verdict: str
     review_body: str
-    blocking_findings: tuple[JsonObject, ...]
+    blocking_findings: tuple[BlockingFinding, ...]
     implementation_prompt: str | None
     non_blocking_notes: tuple[str, ...]
 
@@ -134,7 +154,7 @@ class ReviewResult:
     head_sha: str
     verdict: str
     github_review_id: int
-    blocking_findings: tuple[JsonObject, ...]
+    blocking_findings: tuple[BlockingFinding, ...]
     implementation_prompt: str | None
 
     def as_json(self) -> JsonObject:
@@ -150,7 +170,9 @@ class ReviewResult:
                 "head_sha": self.head_sha,
                 "verdict": self.verdict,
                 "github_review_id": self.github_review_id,
-                "blocking_findings": list(self.blocking_findings),
+                "blocking_findings": [
+                    asdict(finding) for finding in self.blocking_findings
+                ],
                 "implementation_prompt": self.implementation_prompt,
             },
         )

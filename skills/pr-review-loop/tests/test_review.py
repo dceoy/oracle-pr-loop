@@ -10,8 +10,9 @@ from scripts import review as review_module
 from scripts.models import (
     EXIT_ORACLE,
     EXIT_RACE,
+    BlockingFinding,
+    FindingLocation,
     JsonObject,
-    JsonValue,
     OracleReview,
     PullRequest,
     ReviewComment,
@@ -52,16 +53,16 @@ def sample_pr(*, base_sha: str = SHA_A, head_sha: str = SHA_B) -> PullRequest:
 
 def finding(
     identifier: str,
-    location: JsonValue = None,
-) -> JsonObject:
+    location: FindingLocation | None = None,
+) -> BlockingFinding:
     """Return one validated-shape blocking finding with the given location."""
-    return {
-        "id": identifier,
-        "title": f"Title {identifier}",
-        "description": f"Description {identifier}.",
-        "required_change": f"Change {identifier}.",
-        "location": location,
-    }
+    return BlockingFinding(
+        id=identifier,
+        title=f"Title {identifier}",
+        description=f"Description {identifier}.",
+        required_change=f"Change {identifier}.",
+        location=location,
+    )
 
 
 def approve_review(pull_request: PullRequest) -> OracleReview:
@@ -192,7 +193,7 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     mocker: MockerFixture,
     tmp_path: Path,
     oracle_verdict: str,
-    expected_findings: tuple[JsonObject, ...],
+    expected_findings: tuple[BlockingFinding, ...],
 ) -> None:
     """A PR author can publish either canonical Oracle verdict as a comment."""
     initial = sample_pr()
@@ -258,31 +259,6 @@ def test_execute_review_forwards_oracle_overrides(
     )
 
     assert calls == [("extended", "gpt-5.6-sol")]
-
-
-def test_execute_review_binds_implicit_runner_to_repo_dir(
-    mocker: MockerFixture,
-    tmp_path: Path,
-) -> None:
-    """An omitted runner uses the same repository directory as Oracle."""
-    initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
-    install_orchestration_fakes(mocker)
-    created_repo_dirs: list[Path] = []
-
-    def make_runner(*, repo_dir: Path) -> CommandRunner:
-        created_repo_dirs.append(repo_dir)
-        return CommandRunner(repo_dir=repo_dir)
-
-    mocker.patch.object(review_module, "CommandRunner", make_runner)
-
-    execute_review(
-        pr_value="21",
-        repo_dir=tmp_path,
-        thinking_time="heavy",
-    )
-
-    assert created_repo_dirs == [tmp_path]
 
 
 def test_formal_review_rejects_mismatched_persisted_state(
@@ -574,7 +550,7 @@ def test_post_write_snapshot_interrupt_dismisses_review(
 
 def _install_findings(
     mocker: MockerFixture,
-    findings: tuple[JsonObject, ...],
+    findings: tuple[BlockingFinding, ...],
     anchors: frozenset[tuple[str, str, int]],
 ) -> None:
     """Install a REQUEST_CHANGES verdict carrying findings over a fake diff."""
@@ -614,7 +590,7 @@ def test_line_specific_finding_becomes_one_inline_comment(
     tmp_path: Path,
 ) -> None:
     """A finding anchored to a real diff line is published inline, not in the body."""
-    location: JsonObject = {"path": "file.py", "line": 7, "side": "RIGHT"}
+    location = FindingLocation(path="file.py", line=7, side="RIGHT")
     _install_findings(
         mocker,
         (finding("F1", location),),
@@ -640,9 +616,9 @@ def test_multiple_anchored_findings_share_one_review_submission(
     _install_findings(
         mocker,
         (
-            finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),
-            finding("F2", {"path": "file.py", "line": 3, "side": "LEFT"}),
-            finding("F3", {"path": "file.py", "line": 9, "side": "RIGHT"}),
+            finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),
+            finding("F2", FindingLocation(path="file.py", line=3, side="LEFT")),
+            finding("F3", FindingLocation(path="file.py", line=9, side="RIGHT")),
         ),
         frozenset({
             ("file.py", "RIGHT", 7),
@@ -687,7 +663,7 @@ def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
     mocker: MockerFixture,
     tmp_path: Path,
     oracle_verdict: str,
-    expected_findings: tuple[JsonObject, ...],
+    expected_findings: tuple[BlockingFinding, ...],
 ) -> None:
     """``diff_anchors()`` never runs when no finding can be published inline.
 
@@ -742,7 +718,7 @@ def test_mixed_findings_are_partitioned_without_duplication(
     _install_findings(
         mocker,
         (
-            finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),
+            finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),
             finding("F2"),
         ),
         frozenset({("file.py", "RIGHT", 7)}),
@@ -762,21 +738,18 @@ def test_mixed_findings_are_partitioned_without_duplication(
 @pytest.mark.parametrize(
     "location",
     [
-        {"path": "file.py", "line": 8, "side": "RIGHT"},
-        {"path": "file.py", "line": 7, "side": "LEFT"},
-        {"path": "other.py", "line": 7, "side": "RIGHT"},
-        {"path": "file.py", "line": 7, "side": "MIDDLE"},
-        {"path": "file.py", "line": "7", "side": "RIGHT"},
-        {"path": "file.py", "line": True, "side": "RIGHT"},
-        "file.py:7",
+        FindingLocation(path="file.py", line=8, side="RIGHT"),
+        FindingLocation(path="file.py", line=7, side="LEFT"),
+        FindingLocation(path="other.py", line=7, side="RIGHT"),
+        FindingLocation(path="file.py", line=7, side="MIDDLE"),
     ],
 )
 def test_unanchorable_location_never_attaches_to_another_line(
     mocker: MockerFixture,
     tmp_path: Path,
-    location: JsonValue,
+    location: FindingLocation,
 ) -> None:
-    """A stale, ambiguous, or malformed anchor degrades to aggregate output."""
+    """A stale or semantically invalid anchor degrades to aggregate output."""
     _install_findings(
         mocker,
         (finding("F1", location),),
@@ -802,7 +775,7 @@ def test_context_line_left_location_degrades_to_aggregate_body(
     """
     _install_findings(
         mocker,
-        (finding("F1", {"path": "file.py", "line": 1, "side": "LEFT"}),),
+        (finding("F1", FindingLocation(path="file.py", line=1, side="LEFT")),),
         frozenset({("file.py", "RIGHT", 1)}),
     )
 
@@ -825,7 +798,7 @@ def test_added_deleted_and_context_lines_anchor_on_their_own_side(
     """Added, deleted, and modified-file context lines each anchor as themselves."""
     _install_findings(
         mocker,
-        (finding("F1", {"path": "file.py", "line": line, "side": side}),),
+        (finding("F1", FindingLocation(path="file.py", line=line, side=side)),),
         frozenset({
             ("file.py", "RIGHT", 12),
             ("file.py", "LEFT", 4),
@@ -844,8 +817,10 @@ def test_one_oversized_inline_comment_is_bounded_before_publication(
     tmp_path: Path,
 ) -> None:
     """A single inline comment over GitHub's per-comment body limit fails closed."""
-    oversized = finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"})
-    oversized["description"] = "x" * 70_000
+    oversized = replace(
+        finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),
+        description="x" * 70_000,
+    )
     _install_findings(mocker, (oversized,), frozenset({("file.py", "RIGHT", 7)}))
 
     with pytest.raises(ReviewLoopError) as captured:
@@ -874,8 +849,13 @@ def test_many_individually_bounded_inline_comments_are_not_rejected_in_aggregate
     not impose.
     """
     findings = tuple(
-        finding(f"F{index}", {"path": "file.py", "line": index, "side": "RIGHT"})
-        | {"description": "x" * 40_000}
+        replace(
+            finding(
+                f"F{index}",
+                FindingLocation(path="file.py", line=index, side="RIGHT"),
+            ),
+            description="x" * 40_000,
+        )
         for index in range(1, 4)
     )
     anchors = frozenset(("file.py", "RIGHT", index) for index in range(1, 4))
@@ -895,7 +875,7 @@ def test_post_write_race_dismisses_review_carrying_inline_comments(
     changed = sample_pr(head_sha=SHA_C)
     _install_findings(
         mocker,
-        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
+        (finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
     FakeGitHubClient.snapshots = [initial, initial, changed]
@@ -923,7 +903,7 @@ def test_pre_post_race_blocks_inline_publication(
     changed = sample_pr(head_sha=SHA_C)
     _install_findings(
         mocker,
-        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
+        (finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
     FakeGitHubClient.snapshots = [initial, changed]
@@ -956,7 +936,7 @@ def test_head_change_during_anchor_discovery_blocks_publication(
     """
     _install_findings(
         mocker,
-        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),),
+        (finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
 
@@ -1003,7 +983,7 @@ def test_formal_event_semantics_are_unchanged_by_inline_comments(
 ) -> None:
     """APPROVE and REQUEST_CHANGES still select their own formal review event."""
     findings = (
-        (finding("F1", {"path": "file.py", "line": 7, "side": "RIGHT"}),)
+        (finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),)
         if verdict == "REQUEST_CHANGES"
         else ()
     )

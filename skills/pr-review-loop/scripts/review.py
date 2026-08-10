@@ -10,7 +10,6 @@ from .github import GitHubClient
 from .models import (
     EXIT_ORACLE,
     EXIT_RACE,
-    JsonObject,
     JsonValue,
     ReviewComment,
     ReviewLoopError,
@@ -29,7 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .artifacts import TemporaryFileWriter
-    from .models import OracleReview, PullRequest
+    from .models import BlockingFinding, FindingLocation, OracleReview, PullRequest
 
 
 def review_prompt(pull_request: PullRequest) -> str:
@@ -92,7 +91,7 @@ def execute_review(
         ReviewLoopError: The pull request, bundle, or Oracle verdict violated a
             precondition, or the posted review could not be verified fresh.
     """
-    command_runner = runner if runner is not None else CommandRunner(repo_dir=repo_dir)
+    command_runner = runner if runner is not None else CommandRunner()
     github = GitHubClient(command_runner, repo_dir)
     github.initialize(pr_value)
     initial = github.snapshot()
@@ -158,9 +157,7 @@ def _publication(
     """
     anchors: frozenset[tuple[str, str, int]] = (
         github.diff_anchors(pull_request)
-        if any(
-            finding.get("location") is not None for finding in verdict.blocking_findings
-        )
+        if any(finding.location is not None for finding in verdict.blocking_findings)
         else frozenset()
     )
     comments, unanchored = _partition_findings(verdict, anchors)
@@ -181,26 +178,21 @@ def _publication(
     return body, comments
 
 
-def _finding_text(finding: JsonObject) -> str:
+def _finding_text(finding: BlockingFinding) -> str:
     """Render one blocking finding as the Markdown published for it.
 
     Returns:
         The finding's Markdown block, used inline or in the aggregate body.
     """
-
-    def field(key: str) -> str:
-        value = finding.get(key)
-        return value if isinstance(value, str) else ""
-
     return (
-        f"**{field('id')}: {field('title')}**\n\n"
-        f"{field('description')}\n\n"
-        f"Required change: {field('required_change')}"
+        f"**{finding.id}: {finding.title}**\n\n"
+        f"{finding.description}\n\n"
+        f"Required change: {finding.required_change}"
     )
 
 
 def _validated_anchor(
-    location: JsonValue | None,
+    location: FindingLocation | None,
     anchors: frozenset[tuple[str, str, int]],
 ) -> tuple[str, str, int] | None:
     """Match one Oracle-proposed location against the frozen diff's anchors.
@@ -213,26 +205,16 @@ def _validated_anchor(
     Returns:
         The validated anchor, or None when the location names no diff line.
     """
-    if not isinstance(location, dict):
+    if location is None:
         return None
-    path = location.get("path")
-    line = location.get("line")
-    side = location.get("side")
-    if (
-        not isinstance(path, str)
-        or isinstance(line, bool)
-        or not isinstance(line, int)
-        or not isinstance(side, str)
-    ):
-        return None
-    anchor = (path, side, line)
+    anchor = (location.path, location.side, location.line)
     return anchor if anchor in anchors else None
 
 
 def _partition_findings(
     verdict: OracleReview,
     anchors: frozenset[tuple[str, str, int]],
-) -> tuple[tuple[ReviewComment, ...], tuple[JsonObject, ...]]:
+) -> tuple[tuple[ReviewComment, ...], tuple[BlockingFinding, ...]]:
     """Split blocking findings into inline comments and aggregate-only findings.
 
     Every finding lands in exactly one of the two collections, so a finding is
@@ -242,9 +224,9 @@ def _partition_findings(
         The inline review comments and the findings left for the body.
     """
     comments: list[ReviewComment] = []
-    unanchored: list[JsonObject] = []
+    unanchored: list[BlockingFinding] = []
     for finding in verdict.blocking_findings:
-        anchor = _validated_anchor(finding.get("location"), anchors)
+        anchor = _validated_anchor(finding.location, anchors)
         if anchor is None:
             unanchored.append(finding)
         else:
@@ -263,7 +245,7 @@ def _partition_findings(
 def _aggregate_body(
     pull_request: PullRequest,
     verdict: OracleReview,
-    unanchored: tuple[JsonObject, ...],
+    unanchored: tuple[BlockingFinding, ...],
 ) -> str:
     """Compose the review body, notes, unanchored findings, and audit footer.
 

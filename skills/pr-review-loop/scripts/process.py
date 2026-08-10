@@ -81,16 +81,8 @@ class CommandRunner:
     def __init__(
         self,
         source_env: Mapping[str, str] | None = None,
-        *,
-        repo_dir: Path | None = None,
     ) -> None:
-        """Capture the source environment and known secret values.
-
-        `repo_dir` is accepted as command context; Oracle configuration is not
-        parsed here. The Oracle invocation itself uses a private command-scoped
-        home so user config cannot introduce an undiscoverable remote token.
-        """
-        del repo_dir
+        """Capture the source environment and known secret values."""
         self.source_env = dict(source_env or os.environ)
         self._effective_home: str | None = None
         self._effective_home_resolved = False

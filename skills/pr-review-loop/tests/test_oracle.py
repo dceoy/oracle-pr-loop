@@ -11,6 +11,8 @@ from scripts.artifacts import TemporaryFileWriter
 from scripts.models import (
     EXIT_ORACLE,
     EXIT_PRECONDITION,
+    BlockingFinding,
+    FindingLocation,
     IssueSnapshot,
     JsonObject,
     JsonValue,
@@ -168,7 +170,15 @@ def test_parse_review_accepts_exact_request_changes_schema() -> None:
     )
 
     assert result.verdict == "REQUEST_CHANGES"
-    assert result.blocking_findings == (finding,)
+    assert result.blocking_findings == (
+        BlockingFinding(
+            id="F1",
+            title="Bug",
+            description="Description",
+            required_change="Fix it",
+            location=FindingLocation(path="file.py", line=7, side="RIGHT"),
+        ),
+    )
     assert result.implementation_prompt == "Fix F1."
 
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from scripts.models import (
+    BlockingFinding,
     BootstrapResult,
+    FindingLocation,
     ReviewLoopError,
     ReviewResult,
     SubmitResult,
@@ -26,10 +28,18 @@ def test_review_result_serializes_stable_schema() -> None:
         pr_number=1,
         base_sha="a" * 40,
         head_sha="b" * 40,
-        verdict="APPROVE",
+        verdict="REQUEST_CHANGES",
         github_review_id=42,
-        blocking_findings=(),
-        implementation_prompt=None,
+        blocking_findings=(
+            BlockingFinding(
+                id="F1",
+                title="Bug",
+                description="Description",
+                required_change="Fix it",
+                location=FindingLocation(path="file.py", line=7, side="RIGHT"),
+            ),
+        ),
+        implementation_prompt="Fix it.",
     )
 
     payload = result.as_json()
@@ -37,7 +47,15 @@ def test_review_result_serializes_stable_schema() -> None:
     assert payload["schema_version"] == 1
     assert payload["command"] == "review"
     assert payload["repository"] == "acme/demo"
-    assert payload["blocking_findings"] == []
+    assert payload["blocking_findings"] == [
+        {
+            "id": "F1",
+            "title": "Bug",
+            "description": "Description",
+            "required_change": "Fix it",
+            "location": {"path": "file.py", "line": 7, "side": "RIGHT"},
+        }
+    ]
 
 
 def test_submit_result_serializes_stable_schema() -> None:

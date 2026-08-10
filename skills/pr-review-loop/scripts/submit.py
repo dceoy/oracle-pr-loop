@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,10 +30,60 @@ POLL_TIMEOUT_SECONDS = 90
 POLL_INTERVAL_SECONDS = 2
 COMMIT_PARENTS_FIELD_COUNT = 2
 RAW_DIFF_HEADER_FIELD_COUNT = 5
-REMOTE_REF_LINE_FIELD_COUNT = 2
+RAW_DIFF_MODE_LENGTH = 6
+RAW_RENAME_PATH_COUNT = 2
+RAW_SCORE_DIGITS = 3
+RAW_SCORE_MAX = 100
+REMOTE_REF_FIELD_COUNT = 2
 COMMIT_MESSAGE = "apply reviewed changes"
-LEGACY_ARTIFACTS_PATH = ".pr-review-loop"
-LEGACY_ARTIFACTS_PATHSPEC = f":(exclude,top){LEGACY_ARTIFACTS_PATH}"
+NULL_SHA = "0" * 40
+RAW_STATUSES = frozenset({b"A", b"B", b"C", b"D", b"M", b"R", b"T", b"U", b"X"})
+RAW_RENAME_STATUSES = frozenset({b"C", b"R"})
+RAW_SCORED_STATUSES = frozenset({b"C", b"M", b"R"})
+STAGED_STATUSES = frozenset({b"A", b"C", b"M", b"R", b"T"})
+GITLINK_STATUSES = frozenset({b"A", b"C", b"D", b"M", b"R", b"T"})
+
+
+@dataclass(frozen=True, slots=True)
+class _RawDiffRecord:
+    """The validated metadata needed by submit's raw-diff callers."""
+
+    status: bytes
+    old_mode: bytes
+    new_mode: bytes
+    new_object_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RemoteRef:
+    """One validated remote ref record."""
+
+    sha: str
+    ref: str
+
+
+def _raw_status(
+    value: bytes,
+    *,
+    accepted_statuses: frozenset[bytes],
+) -> bytes:
+    """Validate one raw status and its optional similarity score."""
+    status = value[:1]
+    if status not in RAW_STATUSES:
+        raise ValueError
+    score = value[1:]
+    if not score and status in RAW_RENAME_STATUSES:
+        raise ValueError
+    if score and (
+        status not in RAW_SCORED_STATUSES
+        or not score.isdigit()
+        or len(score) > RAW_SCORE_DIGITS
+        or int(score) > RAW_SCORE_MAX
+    ):
+        raise ValueError
+    if status not in accepted_statuses:
+        raise ValueError
+    return status
 
 
 def execute_submit(
@@ -64,11 +115,7 @@ def execute_submit(
     _validate_local_workspace(command_runner, github.repo_dir, expected_head)
     _require_same_snapshot(initial, github.identity_snapshot(), phase="before staging")
 
-    add_args = ["add", "--all", "--", "."]
-    if not _legacy_artifacts_already_ignored(command_runner, github.repo_dir):
-        add_args.append(LEGACY_ARTIFACTS_PATHSPEC)
-    _git(command_runner, github.repo_dir, add_args)
-    _reject_staged_legacy_artifacts(command_runner, github.repo_dir)
+    _git(command_runner, github.repo_dir, ["add", "--all", "--", "."])
     _git(command_runner, github.repo_dir, ["diff", "--cached", "--check", "--"])
 
     staged_patch = _git(
@@ -151,46 +198,6 @@ def execute_submit(
         commit_sha=commit_sha,
         pushed_branch=initial.head_ref,
     )
-
-
-def _legacy_artifacts_already_ignored(runner: CommandRunner, repo_dir: Path) -> bool:
-    """Return whether an ignore rule already covers `.pr-review-loop`."""
-    try:
-        result = runner.run(
-            ["git", "check-ignore", "--quiet", "--", LEGACY_ARTIFACTS_PATH],
-            cwd=repo_dir,
-            env=runner.base_env(),
-            check=False,
-        )
-    except CommandError as exc:
-        raise ReviewLoopError(EXIT_PRECONDITION, "git", str(exc)) from exc
-    if result.returncode not in {0, 1}:
-        raise ReviewLoopError(
-            EXIT_PRECONDITION,
-            "git",
-            "could not evaluate ignore rules for .pr-review-loop",
-        )
-    return result.returncode == 0
-
-
-def _reject_staged_legacy_artifacts(runner: CommandRunner, repo_dir: Path) -> None:
-    """Reject reserved `.pr-review-loop` runtime content if indexed."""
-    staged = _git(
-        runner,
-        repo_dir,
-        ["diff", "--cached", "--name-only", "-z", "--", LEGACY_ARTIFACTS_PATH],
-    )
-    tracked = _git(
-        runner,
-        repo_dir,
-        ["ls-files", "--cached", "-z", "--", LEGACY_ARTIFACTS_PATH],
-    )
-    if staged or tracked:
-        raise ReviewLoopError(
-            EXIT_PRECONDITION,
-            "legacy_artifacts",
-            "workspace contains reserved .pr-review-loop runtime content",
-        )
 
 
 def _validate_local_workspace(
@@ -331,63 +338,90 @@ def _require_no_known_credentials_in_staged_blobs(
             )
 
 
-def _staged_object_id(parts: list[bytes]) -> str | None:
-    """Return the staged blob ID, excluding gitlinks from blob scanning."""
-    if parts[1] == GITLINK_MODE:
-        return None
+def _raw_object_id(value: bytes) -> str | None:
+    """Decode one raw-diff object ID, allowing Git's null object ID."""
     try:
-        object_id = parts[3].decode("ascii", "strict")
+        object_id = value.decode("ascii", "strict")
     except UnicodeError as exc:
-        raise ReviewLoopError(
-            EXIT_PRECONDITION, "git", "Git returned a non-ASCII staged object ID"
-        ) from exc
+        raise ValueError from exc
+    if object_id == NULL_SHA:
+        return None
     if SHA_RE.fullmatch(object_id) is None:
-        raise ReviewLoopError(
-            EXIT_PRECONDITION, "git", "Git returned an invalid staged object ID"
-        )
+        raise ValueError
     return object_id
 
 
-def _staged_object_ids(raw: bytes) -> list[str]:
-    """Parse new blob object IDs from NUL-delimited staged raw diff records."""
+def _parse_raw_diff(
+    raw: bytes,
+    *,
+    accepted_statuses: frozenset[bytes],
+) -> tuple[_RawDiffRecord, ...]:
+    """Parse one NUL-delimited Git raw diff with a caller's status policy."""
     if not raw:
-        return []
+        return ()
     fields = raw.split(b"\0")
     if fields[-1]:
-        raise ReviewLoopError(
-            EXIT_PRECONDITION, "git", "Git returned malformed staged diff metadata"
-        )
+        raise ValueError
     fields.pop()
-    object_ids: list[str] = []
-    seen: set[str] = set()
+    records: list[_RawDiffRecord] = []
     index = 0
     while index < len(fields):
-        header = fields[index]
+        parts = fields[index].split()
         index += 1
-        parts = header.split()
         if len(parts) != RAW_DIFF_HEADER_FIELD_COUNT or not parts[0].startswith(b":"):
-            raise ReviewLoopError(
-                EXIT_PRECONDITION, "git", "Git returned malformed staged diff metadata"
-            )
-        status = parts[4][:1]
-        path_count = 2 if status in {b"C", b"R"} else 1
-        if status not in {b"A", b"C", b"M", b"R", b"T"}:
-            raise ReviewLoopError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned an unexpected staged diff status",
-            )
-        if index + path_count > len(fields) or any(
-            not value for value in fields[index : index + path_count]
+            raise ValueError
+
+        old_mode = parts[0][1:]
+        new_mode = parts[1]
+        if any(
+            len(mode) != RAW_DIFF_MODE_LENGTH
+            or any(char not in b"01234567" for char in mode)
+            for mode in (old_mode, new_mode)
         ):
-            raise ReviewLoopError(
-                EXIT_PRECONDITION, "git", "Git returned malformed staged diff paths"
-            )
+            raise ValueError
+        _raw_object_id(parts[2])
+        new_object_id = _raw_object_id(parts[3])
+
+        status = _raw_status(parts[4], accepted_statuses=accepted_statuses)
+
+        path_count = RAW_RENAME_PATH_COUNT if status in RAW_RENAME_STATUSES else 1
+        if index + path_count > len(fields) or any(
+            not path for path in fields[index : index + path_count]
+        ):
+            raise ValueError
         index += path_count
-        object_id = _staged_object_id(parts)
-        if object_id is not None and object_id not in seen:
-            seen.add(object_id)
-            object_ids.append(object_id)
+        records.append(
+            _RawDiffRecord(
+                status=status,
+                old_mode=old_mode,
+                new_mode=new_mode,
+                new_object_id=new_object_id,
+            )
+        )
+    return tuple(records)
+
+
+def _staged_object_ids(raw: bytes) -> list[str]:
+    """Return distinct new object IDs from staged raw diff records."""
+    try:
+        records = _parse_raw_diff(raw, accepted_statuses=STAGED_STATUSES)
+    except ValueError as exc:
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "git", "Git returned malformed staged diff metadata"
+        ) from exc
+
+    object_ids: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        if record.new_mode == GITLINK_MODE:
+            continue
+        if record.new_object_id is None:
+            raise ReviewLoopError(
+                EXIT_PRECONDITION, "git", "Git returned an invalid staged object ID"
+            )
+        if record.new_object_id not in seen:
+            seen.add(record.new_object_id)
+            object_ids.append(record.new_object_id)
     return object_ids
 
 
@@ -418,50 +452,16 @@ def _reject_gitlink_changes(github: GitHubClient, commit_sha: str) -> None:
 
 
 def _contains_gitlink_change(raw: bytes) -> bool:
-    """Parse a bounded NUL-delimited raw diff and detect mode 160000."""
-    if not raw:
-        return False
-    fields = raw.split(b"\0")
-    if fields[-1]:
+    """Return whether a bounded raw diff changes a gitlink mode."""
+    try:
+        records = _parse_raw_diff(raw, accepted_statuses=GITLINK_STATUSES)
+    except ValueError as exc:
         raise ReviewLoopError(
             EXIT_PRECONDITION,
             "submodule",
             "Git returned malformed commit diff metadata",
-        )
-    fields.pop()
-    index = 0
-    while index < len(fields):
-        header = fields[index]
-        index += 1
-        parts = header.split()
-        if len(parts) != RAW_DIFF_HEADER_FIELD_COUNT or not parts[0].startswith(b":"):
-            raise ReviewLoopError(
-                EXIT_PRECONDITION,
-                "submodule",
-                "Git returned malformed commit diff metadata",
-            )
-        status = parts[4][:1]
-        path_count = 2 if status in {b"C", b"R"} else 1
-        if status not in {b"A", b"C", b"D", b"M", b"R", b"T"}:
-            raise ReviewLoopError(
-                EXIT_PRECONDITION,
-                "submodule",
-                "Git returned an unexpected commit diff status",
-            )
-        if index + path_count > len(fields) or any(
-            not value for value in fields[index : index + path_count]
-        ):
-            raise ReviewLoopError(
-                EXIT_PRECONDITION,
-                "submodule",
-                "Git returned malformed commit diff paths",
-            )
-        old_mode = parts[0][1:]
-        new_mode = parts[1]
-        if GITLINK_MODE in {old_mode, new_mode}:
-            return True
-        index += path_count
-    return False
+        ) from exc
+    return any(GITLINK_MODE in {record.old_mode, record.new_mode} for record in records)
 
 
 def _require_same_snapshot(
@@ -516,28 +516,27 @@ def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
     output = _git_text(
         runner, repo_dir, ["ls-remote", "--refs", "origin", f"refs/heads/{ref}"]
     )
+    record = _parse_remote_ref(output, f"refs/heads/{ref}")
+    if record is None:
+        raise ReviewLoopError(
+            EXIT_GITHUB,
+            "remote_ref",
+            "remote pull-request branch was missing or malformed",
+        )
+    return record.sha
+
+
+def _parse_remote_ref(output: str, expected_ref: str) -> _RemoteRef | None:
+    """Parse exactly one validated ``git ls-remote --refs`` record."""
     lines = output.splitlines()
     if len(lines) != 1:
-        raise ReviewLoopError(
-            EXIT_GITHUB,
-            "remote_ref",
-            "remote pull-request branch was missing or ambiguous",
-        )
+        return None
     fields = lines[0].split("\t")
-    if len(fields) != REMOTE_REF_LINE_FIELD_COUNT or fields[1] != f"refs/heads/{ref}":
-        raise ReviewLoopError(
-            EXIT_GITHUB,
-            "remote_ref",
-            "remote pull-request branch response was malformed",
-        )
-    sha = fields[0]
-    if SHA_RE.fullmatch(sha) is None:
-        raise ReviewLoopError(
-            EXIT_GITHUB,
-            "remote_ref",
-            "remote pull-request branch returned an invalid SHA",
-        )
-    return sha
+    if len(fields) != REMOTE_REF_FIELD_COUNT or fields[1] != expected_ref:
+        return None
+    if SHA_RE.fullmatch(fields[0]) is None:
+        return None
+    return _RemoteRef(sha=fields[0], ref=fields[1])
 
 
 def _push_env(runner: CommandRunner) -> dict[str, str]:
@@ -580,15 +579,12 @@ def _remote_matches(
         output = result.stdout.decode("utf-8", "strict")
     except (CommandError, UnicodeError):
         return None
-    lines = output.splitlines()
-    if len(lines) != 1:
+    record = _parse_remote_ref(output, ref)
+    if record is None:
         return None
-    remote_sha, separator, remote_ref = lines[0].partition("\t")
-    if separator != "\t" or remote_ref != ref or SHA_RE.fullmatch(remote_sha) is None:
-        return None
-    if remote_sha == commit_sha:
+    if record.sha == commit_sha:
         return True
-    if remote_sha == expected_head:
+    if record.sha == expected_head:
         return None
     return False
 

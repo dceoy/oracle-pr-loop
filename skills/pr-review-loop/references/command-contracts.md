@@ -5,9 +5,11 @@ Host sequencing and finding triage are defined in
 [SKILL.md](../SKILL.md). Oracle/ChatGPT setup and smoke tests are defined in
 [operations.md](operations.md).
 
-All commands require Python 3.12 or newer and write exactly one JSON object plus
-a trailing newline to stdout. Diagnostics use stderr. Success uses exit `0`;
-stable failure classes are precondition/input `2`, Oracle/schema `3`,
+Except for argparse's `-h`/`--help` output, normal command execution requires
+Python 3.12 or newer and writes exactly one JSON object plus a trailing newline
+to stdout. Help is intentionally human-readable and is the exception to the
+JSON command-result/error contract. Diagnostics use stderr. Success uses exit
+`0`; stable failure classes are precondition/input `2`, Oracle/schema `3`,
 GitHub/write `4`, and stale state or lease loss `6`.
 
 Failures emit
@@ -102,10 +104,11 @@ Success fields are `schema_version`, `command`, `repository`, `pr_number`,
 Before writing, `submit` validates repository/PR identity, an open non-draft
 same-repository PR, exact local and remote heads, safe refs, conflict state,
 whitespace, a non-empty patch, known credentials, gitlink changes, and repeated
-snapshots. It stages the eligible patch, creates one hook-free unsigned child
-commit, pushes with `--force-with-lease` bound to the reviewed head, and
-confirms the resulting PR head. An ambiguous push result is accepted only when
-the remote contains the exact commit; concurrent updates are never overwritten.
+snapshots. It stages the complete workspace patch with normal Git semantics,
+creates one hook-free unsigned child commit, pushes with `--force-with-lease`
+bound to the reviewed head, and confirms the resulting PR head. An ambiguous
+push result is accepted only when the remote contains the exact commit;
+concurrent updates are never overwritten.
 
 ## Recovery and limits
 

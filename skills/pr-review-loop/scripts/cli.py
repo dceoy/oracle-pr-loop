@@ -134,7 +134,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
         command = args.command
-        runner = CommandRunner(repo_dir=Path(args.repo_dir))
         result = _dispatch(command, args, runner)
     except ReviewLoopError as exc:
         message = runner.redact(str(exc))
