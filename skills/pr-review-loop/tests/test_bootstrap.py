@@ -13,6 +13,7 @@ from scripts.models import (
     EXIT_RACE,
     BootstrapResult,
     IssueSnapshot,
+    JsonObject,
     OracleBootstrap,
     ReviewLoopError,
 )
@@ -247,7 +248,7 @@ def test_execute_bootstrap_rejects_comment_edited_during_generation(
     mocker: MockerFixture,
 ) -> None:
     """An edited bounded comment fails closed even when updatedAt is stable."""
-    original = {
+    original: JsonObject = {
         "author": "commenter",
         "body": "original",
         "created_at": "2026-01-01T00:00:00Z",
