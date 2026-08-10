@@ -87,11 +87,7 @@ def run_process(
     input_text: str | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run one test-controlled process and capture bytes.
-
-    Returns:
-        The completed subprocess result with captured byte streams.
-    """
+    """Return one completed test-controlled process with captured bytes."""
     return subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         list(args),
         cwd=cwd,
@@ -107,11 +103,7 @@ def git(
     *args: str,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Run Git in a test repository.
-
-    Returns:
-        Stripped UTF-8 stdout.
-    """
+    """Return stripped UTF-8 stdout from Git in a test repository."""
     return (
         run_process([GIT, *args], cwd=repo, env=env)
         .stdout.decode("utf-8", "strict")
@@ -138,11 +130,7 @@ def commit_all(
     allow_empty: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Commit the full worktree.
-
-    Returns:
-        The new commit SHA.
-    """
+    """Return the new commit SHA after committing the full worktree."""
     git(repo, "add", "-A", env=env)
     args = ["commit", "--quiet"]
     if allow_empty:
