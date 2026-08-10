@@ -21,7 +21,7 @@ from scripts.models import (
 from scripts.process import CommandRunner
 from scripts.review import execute_review
 
-from .support import SHA_A, SHA_B, SHA_C, sample_pr
+from .support import SHA_B, SHA_C, sample_pr
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -955,12 +955,18 @@ def test_head_change_during_anchor_discovery_blocks_publication(
             super().__init__(runner, repo_dir)
             self._drifted = False
 
+        @override
         def snapshot(self) -> PullRequest:
             """Return the original full review snapshot."""
             return sample_pr()
 
+        @override
         def identity_snapshot(self) -> PullRequest:
-            """Expose the drift to the identity-only freshness read."""
+            """Expose the drift to the identity-only freshness read.
+
+            Returns:
+                The current simulated PR identity.
+            """
             return sample_pr(head_sha=SHA_C if self._drifted else SHA_B)
 
         def diff_anchors(
