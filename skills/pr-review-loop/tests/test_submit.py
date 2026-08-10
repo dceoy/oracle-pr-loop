@@ -20,7 +20,9 @@ from scripts.submit import (
     execute_submit,
 )
 
-from .support import GIT, git as _git, run_process as _run_process
+from .support import GIT
+from .support import git as _git
+from .support import run_process as _run_process
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
