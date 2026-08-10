@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from .artifacts import temporary_file_writer
 from .github import GitHubClient
-from .github_prompt import review_prompt
 from .models import (
     EXIT_ORACLE,
     EXIT_RACE,
@@ -19,6 +18,7 @@ from .models import (
 )
 from .oracle import (
     MAX_ORACLE_ATTACHMENTS,
+    PROMPT,
     build_review_bundle,
     invoke_oracle,
     parse_review,
@@ -30,6 +30,16 @@ if TYPE_CHECKING:
 
     from .artifacts import TemporaryFileWriter
     from .models import OracleReview, PullRequest
+
+
+def review_prompt(pull_request: PullRequest) -> str:
+    """Return the trusted review prompt with direct GitHub app invocation."""
+    return "@GitHub\n" + PROMPT.format(
+        repository=pull_request.repository,
+        pr_number=pull_request.number,
+        base_sha=pull_request.base_sha,
+        head_sha=pull_request.head_sha,
+    )
 
 
 def _generate_review(
@@ -48,7 +58,7 @@ def _generate_review(
     attachments = build_review_bundle(command_runner, github, writer, pull_request)
     prompt = review_prompt(pull_request)
     slug = (
-        f"loopr-review-{pull_request.number}-"
+        f"pr-review-loop-review-{pull_request.number}-"
         f"{pull_request.head_sha[:12]}-{uuid.uuid4().hex[:8]}"
     )
     raw = invoke_oracle(
