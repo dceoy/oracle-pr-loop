@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
@@ -30,6 +29,7 @@ from scripts.models import (
     EXIT_PRECONDITION,
     JsonValue,
     PullRequest,
+    PullRequestIdentity,
     ReviewLoopError,
 )
 from scripts.process import CommandRunner
@@ -62,6 +62,25 @@ def sample_pr(
         head_sha=SHA_B,
         head_repository="owner/repository",
         changed_paths=changed_paths,
+    )
+
+
+def sample_identity(
+    *,
+    base_sha: str = SHA_A,
+    head_sha: str = SHA_B,
+) -> PullRequestIdentity:
+    return PullRequestIdentity(
+        repository="owner/repository",
+        number=21,
+        url="https://github.com/owner/repository/pull/21",
+        state="OPEN",
+        is_draft=False,
+        base_ref="main",
+        base_sha=base_sha,
+        head_ref="feature",
+        head_sha=head_sha,
+        head_repository="owner/repository",
     )
 
 
@@ -540,11 +559,13 @@ def test_review_event_rejects_unknown_verdict() -> None:
 
 def test_same_snapshot_depends_only_on_frozen_base_and_head() -> None:
     first = sample_pr()
-    same = replace(first, title="Changed title")
-    changed = replace(first, head_sha=SHA_C)
+    same = sample_identity()
+    changed_base = sample_identity(base_sha=SHA_C)
+    changed_head = sample_identity(head_sha=SHA_C)
 
     assert GitHubClient.same_snapshot(first, same)
-    assert not GitHubClient.same_snapshot(first, changed)
+    assert not GitHubClient.same_snapshot(first, changed_base)
+    assert not GitHubClient.same_snapshot(first, changed_head)
 
 
 def test_bounded_comments_keeps_newest_comments_and_marks_oversized() -> None:

@@ -15,6 +15,7 @@ from scripts.models import (
     JsonObject,
     OracleReview,
     PullRequest,
+    PullRequestIdentity,
     ReviewComment,
     ReviewLoopError,
 )
@@ -51,6 +52,26 @@ def sample_pr(*, base_sha: str = SHA_A, head_sha: str = SHA_B) -> PullRequest:
     )
 
 
+def sample_identity(
+    *,
+    base_sha: str = SHA_A,
+    head_sha: str = SHA_B,
+) -> PullRequestIdentity:
+    """Return one valid identity-only pull-request snapshot."""
+    return PullRequestIdentity(
+        repository="owner/repository",
+        number=21,
+        url="https://github.com/owner/repository/pull/21",
+        state="OPEN",
+        is_draft=False,
+        base_ref="main",
+        base_sha=base_sha,
+        head_ref="feature",
+        head_sha=head_sha,
+        head_repository="owner/repository",
+    )
+
+
 def finding(
     identifier: str,
     location: FindingLocation | None = None,
@@ -84,7 +105,8 @@ class FakeGitHubClient:
     """A deterministic PR/review transport for orchestration race tests."""
 
     instance: ClassVar[FakeGitHubClient | None] = None
-    snapshots: ClassVar[list[PullRequest]] = []
+    full_snapshots: ClassVar[list[PullRequest]] = []
+    identity_snapshots: ClassVar[list[PullRequestIdentity]] = []
     authenticated_login_value: ClassVar[str] = "reviewer"
     anchors: ClassVar[frozenset[tuple[str, str, int]]] = frozenset()
 
@@ -98,18 +120,27 @@ class FakeGitHubClient:
         self.authenticated_login = type(self).authenticated_login_value
         self.dismissed: list[int] = []
         self.post_count = 0
+        self.full_snapshot_count = 0
+        self.identity_snapshot_count = 0
         self.posted_events: list[str] = []
         self.posted_bodies: list[str] = []
         self.posted_comments: list[tuple[ReviewComment, ...]] = []
         type(self).instance = self
-        self._snapshots = list(type(self).snapshots)
+        self._full_snapshots = list(type(self).full_snapshots)
+        self._identity_snapshots = list(type(self).identity_snapshots)
 
     def initialize(self, _pr_value: str) -> None:
         """Accept the configured fake target."""
 
     def snapshot(self) -> PullRequest:
-        """Return the next deterministic snapshot."""
-        return self._snapshots.pop(0)
+        """Return the next deterministic full snapshot."""
+        self.full_snapshot_count += 1
+        return self._full_snapshots.pop(0)
+
+    def identity_snapshot(self) -> PullRequestIdentity:
+        """Return the next deterministic identity-only snapshot."""
+        self.identity_snapshot_count += 1
+        return self._identity_snapshots.pop(0)
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         """Treat fake SHAs as available commit objects."""
@@ -130,7 +161,10 @@ class FakeGitHubClient:
         return "COMMENT" if pull_request.author == self.authenticated_login else verdict
 
     @staticmethod
-    def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
+    def same_snapshot(
+        first: PullRequest | PullRequestIdentity,
+        second: PullRequest | PullRequestIdentity,
+    ) -> bool:
         """Compare base and head SHAs.
 
         Returns:
@@ -210,7 +244,8 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
 ) -> None:
     """A PR author can publish either canonical Oracle verdict as a comment."""
     initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(), sample_identity()]
     mocker.patch.object(FakeGitHubClient, "authenticated_login_value", initial.author)
     install_orchestration_fakes(mocker)
 
@@ -237,6 +272,8 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     assert result.blocking_findings == expected_findings
     assert FakeGitHubClient.instance is not None
     assert FakeGitHubClient.instance.posted_events == ["COMMENT"]
+    assert FakeGitHubClient.instance.full_snapshot_count == 1
+    assert FakeGitHubClient.instance.identity_snapshot_count == 2
     assert (
         f"Reviewed base: `{initial.base_sha}`"
         in FakeGitHubClient.instance.posted_bodies[0]
@@ -253,7 +290,8 @@ def test_execute_review_forwards_oracle_overrides(
 ) -> None:
     """Review forwards model and effort values to the shared Oracle call."""
     initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(), sample_identity()]
     install_orchestration_fakes(mocker)
     calls: list[tuple[object, object]] = []
 
@@ -280,7 +318,8 @@ def test_formal_review_rejects_mismatched_persisted_state(
 ) -> None:
     """A formal review whose re-read state does not match the event is rejected."""
     initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(), sample_identity()]
     mocker.patch.object(FakeGitHubClient, "authenticated_login_value", "another-user")
     install_orchestration_fakes(mocker)
 
@@ -323,7 +362,8 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
     "Approved." body attached to a REQUEST_CHANGES verdict).
     """
     initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(), sample_identity()]
     mocker.patch.object(FakeGitHubClient, "authenticated_login_value", initial.author)
     install_orchestration_fakes(mocker)
 
@@ -371,8 +411,11 @@ def test_self_authored_post_write_race_skips_dismissal(
 ) -> None:
     """A stale comment is reported without an impossible formal dismissal."""
     initial = sample_pr()
-    changed = sample_pr(head_sha=SHA_C)
-    FakeGitHubClient.snapshots = [initial, initial, changed]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [
+        sample_identity(),
+        sample_identity(head_sha=SHA_C),
+    ]
     mocker.patch.object(FakeGitHubClient, "authenticated_login_value", initial.author)
     install_orchestration_fakes(mocker)
 
@@ -395,8 +438,8 @@ def test_pre_post_snapshot_race_fails_before_review_write(
 ) -> None:
     """A base/head change before posting prevents the GitHub write."""
     initial = sample_pr()
-    changed = sample_pr(head_sha=SHA_C)
-    FakeGitHubClient.snapshots = [initial, changed]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(head_sha=SHA_C)]
     install_orchestration_fakes(mocker)
 
     with pytest.raises(ReviewLoopError) as captured:
@@ -418,8 +461,11 @@ def test_post_write_race_dismisses_stale_review(
 ) -> None:
     """A base/head change after posting dismisses the stale GitHub review."""
     initial = sample_pr()
-    changed = sample_pr(head_sha=SHA_C)
-    FakeGitHubClient.snapshots = [initial, initial, changed]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [
+        sample_identity(),
+        sample_identity(head_sha=SHA_C),
+    ]
     install_orchestration_fakes(mocker)
 
     with pytest.raises(ReviewLoopError) as captured:
@@ -441,7 +487,8 @@ def test_execute_review_rejects_oversized_posted_body(
 ) -> None:
     """The review body plus audit footer is bounded before the GitHub write."""
     initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = []
     install_orchestration_fakes(mocker)
 
     def parse_oversized_review(
@@ -485,6 +532,9 @@ class _StableGitHubClient:
     def snapshot(self) -> PullRequest:  # ruff: ignore[no-self-use] -- overridden with instance state below
         return sample_pr()
 
+    def identity_snapshot(self) -> PullRequestIdentity:  # ruff: ignore[no-self-use] -- overridden with instance state below
+        return sample_identity()
+
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         pass
 
@@ -496,7 +546,10 @@ class _StableGitHubClient:
         return "COMMENT" if pull_request.author == self.authenticated_login else verdict
 
     @staticmethod
-    def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
+    def same_snapshot(
+        first: PullRequest | PullRequestIdentity,
+        second: PullRequest | PullRequestIdentity,
+    ) -> bool:
         return first.base_sha == second.base_sha and first.head_sha == second.head_sha
 
     @staticmethod
@@ -529,14 +582,14 @@ class _InterruptingGitHubClient(_StableGitHubClient):
         repo_dir: Path,
     ) -> None:
         super().__init__(_runner, repo_dir)
-        self.snapshot_count = 0
+        self.identity_snapshot_count = 0
         type(self).instance = self
 
-    def snapshot(self) -> PullRequest:
-        self.snapshot_count += 1
-        if self.snapshot_count == 3:
+    def identity_snapshot(self) -> PullRequestIdentity:
+        self.identity_snapshot_count += 1
+        if self.identity_snapshot_count == 2:
             raise KeyboardInterrupt
-        return sample_pr()
+        return sample_identity()
 
 
 def test_post_write_snapshot_interrupt_dismisses_review(
@@ -568,7 +621,8 @@ def _install_findings(
 ) -> None:
     """Install a REQUEST_CHANGES verdict carrying findings over a fake diff."""
     initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(), sample_identity()]
     mocker.patch.object(FakeGitHubClient, "authenticated_login_value", "another-user")
     mocker.patch.object(FakeGitHubClient, "anchors", anchors)
     install_orchestration_fakes(mocker)
@@ -690,7 +744,8 @@ def test_anchor_discovery_is_skipped_when_no_finding_requests_a_location(
     in ``diff_anchors()`` must not run at all.
     """
     initial = sample_pr()
-    FakeGitHubClient.snapshots = [initial, initial, initial]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(), sample_identity()]
     mocker.patch.object(FakeGitHubClient, "authenticated_login_value", "another-user")
     install_orchestration_fakes(mocker)
 
@@ -889,13 +944,16 @@ def test_post_write_race_dismisses_review_carrying_inline_comments(
 ) -> None:
     """Inline publication keeps the stale-review dismissal safeguard intact."""
     initial = sample_pr()
-    changed = sample_pr(head_sha=SHA_C)
     _install_findings(
         mocker,
         (finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
-    FakeGitHubClient.snapshots = [initial, initial, changed]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [
+        sample_identity(),
+        sample_identity(head_sha=SHA_C),
+    ]
 
     with pytest.raises(ReviewLoopError) as captured:
         execute_review(
@@ -917,13 +975,13 @@ def test_pre_post_race_blocks_inline_publication(
 ) -> None:
     """A head change before posting prevents any inline comment from being written."""
     initial = sample_pr()
-    changed = sample_pr(head_sha=SHA_C)
     _install_findings(
         mocker,
         (finding("F1", FindingLocation(path="file.py", line=7, side="RIGHT")),),
         frozenset({("file.py", "RIGHT", 7)}),
     )
-    FakeGitHubClient.snapshots = [initial, changed]
+    FakeGitHubClient.full_snapshots = [initial]
+    FakeGitHubClient.identity_snapshots = [sample_identity(head_sha=SHA_C)]
 
     with pytest.raises(ReviewLoopError) as captured:
         execute_review(
@@ -968,6 +1026,11 @@ def test_head_change_during_anchor_discovery_blocks_publication(
             """Return the original head until anchor discovery causes drift."""
             return sample_pr(head_sha=SHA_C if self._drifted else SHA_B)
 
+        @override
+        def identity_snapshot(self) -> PullRequestIdentity:
+            """Return the current identity after anchor discovery changes it."""
+            return sample_identity(head_sha=SHA_C if self._drifted else SHA_B)
+
         def diff_anchors(
             self,
             pull_request: PullRequest,
@@ -976,8 +1039,6 @@ def test_head_change_during_anchor_discovery_blocks_publication(
             return super().diff_anchors(pull_request)
 
     mocker.patch.object(review_module, "GitHubClient", DriftDuringAnchorsGitHubClient)
-    FakeGitHubClient.snapshots = []
-
     with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",

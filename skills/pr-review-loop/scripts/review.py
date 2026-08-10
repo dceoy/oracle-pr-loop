@@ -28,7 +28,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .artifacts import TemporaryFileWriter
-    from .models import BlockingFinding, FindingLocation, OracleReview, PullRequest
+    from .models import (
+        BlockingFinding,
+        FindingLocation,
+        OracleReview,
+        PullRequest,
+        PullRequestIdentity,
+    )
 
 
 def review_prompt(pull_request: PullRequest) -> str:
@@ -110,7 +116,7 @@ def execute_review(
         )
 
     body, comments = _publication(github, initial, verdict)
-    before_post = github.snapshot()
+    before_post = github.identity_snapshot()
     if not github.same_snapshot(initial, before_post):
         raise ReviewLoopError(
             EXIT_RACE,
@@ -121,7 +127,7 @@ def execute_review(
     review_id, _ = github.post_review(initial, event, body, comments)
 
     try:
-        after_post = github.snapshot()
+        after_post = github.identity_snapshot()
         verified = github.verify_posted(initial, review_id, body)
         _require_fresh_state(github, initial, after_post, verified, event)
     except BaseException as exc:
@@ -276,7 +282,7 @@ _EXPECTED_REVIEW_STATE = {
 def _require_fresh_state(
     github: GitHubClient,
     initial: PullRequest,
-    after_post: PullRequest,
+    after_post: PullRequestIdentity,
     verified: JsonValue,
     event: str,
 ) -> None:

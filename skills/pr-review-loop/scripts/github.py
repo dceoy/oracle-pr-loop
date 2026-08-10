@@ -1762,7 +1762,10 @@ class GitHubClient(_ImmutableGitMixin):
         return data
 
     @staticmethod
-    def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
+    def same_snapshot(
+        first: PullRequest | PullRequestIdentity,
+        second: PullRequest | PullRequestIdentity,
+    ) -> bool:
         """Compare only the frozen base/head identity.
 
         Returns:
