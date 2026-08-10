@@ -124,7 +124,10 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Execute one command and emit exactly one JSON object on stdout.
+    """Execute one command; normal execution emits one JSON object on stdout.
+
+    Argparse `-h`/`--help` remains human-readable and exits before the structured
+    result path.
 
     Returns:
         The process exit code.
