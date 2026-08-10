@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,33 +44,13 @@ STAGED_STATUSES = frozenset({b"A", b"C", b"M", b"R", b"T"})
 GITLINK_STATUSES = frozenset({b"A", b"C", b"D", b"M", b"R", b"T"})
 
 
-class _RawDiffRecord(tuple):
+@dataclass(frozen=True, slots=True)
+class _RawDiffRecord:
     """The validated metadata needed by submit's raw-diff callers."""
 
-    __slots__ = ()
-
-    def __new__(
-        cls,
-        old_mode: bytes,
-        new_mode: bytes,
-        new_object_id: str | None,
-    ) -> _RawDiffRecord:
-        return tuple.__new__(cls, (old_mode, new_mode, new_object_id))
-
-    @property
-    def old_mode(self) -> bytes:
-        """Return the validated old mode."""
-        return self[0]
-
-    @property
-    def new_mode(self) -> bytes:
-        """Return the validated new mode."""
-        return self[1]
-
-    @property
-    def new_object_id(self) -> str | None:
-        """Return the validated new object ID."""
-        return self[2]
+    old_mode: bytes
+    new_mode: bytes
+    new_object_id: str | None
 
 
 def _raw_status(
@@ -442,7 +423,13 @@ def _parse_raw_diff(
         ):
             raise ValueError
         index += path_count
-        records.append(_RawDiffRecord(old_mode, new_mode, new_object_id))
+        records.append(
+            _RawDiffRecord(
+                old_mode=old_mode,
+                new_mode=new_mode,
+                new_object_id=new_object_id,
+            )
+        )
     return tuple(records)
 
 
