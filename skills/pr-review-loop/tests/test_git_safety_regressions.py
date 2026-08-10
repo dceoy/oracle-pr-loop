@@ -57,14 +57,19 @@ def test_local_info_attributes_cannot_force_inline_filtering(tmp_path: Path) -> 
 
     client = GitHubClient(runner, repo)
 
-    assert client.paths_with_diff_unset(
-        sha,
-        frozenset({"file.py"}),
-        max_output=4096,
-    ) == frozenset()
+    assert (
+        client.paths_with_diff_unset(
+            sha,
+            frozenset({"file.py"}),
+            max_output=4096,
+        )
+        == frozenset()
+    )
 
 
-def test_committed_attributes_are_read_from_the_immutable_commit(tmp_path: Path) -> None:
+def test_committed_attributes_are_read_from_the_immutable_commit(
+    tmp_path: Path,
+) -> None:
     runner, repo = _init_repo(tmp_path)
     (repo / "file.py").write_text("print('safe')\n", encoding="utf-8")
     (repo / ".gitattributes").write_text("file.py -diff\n", encoding="utf-8")

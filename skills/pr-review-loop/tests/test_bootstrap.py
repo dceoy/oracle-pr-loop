@@ -514,9 +514,7 @@ class MissingBaseIssueClient(FakeIssueClient):
 
     def ensure_commit_object(self, sha: str) -> None:  # ruff: ignore[no-self-use] -- overrides base
         """Fail closed as the shared immutable-Git mixin would."""
-        raise ReviewLoopError(
-            EXIT_PRECONDITION, "git", f"{sha} is not a commit object"
-        )
+        raise ReviewLoopError(EXIT_PRECONDITION, "git", f"{sha} is not a commit object")
 
 
 def test_execute_bootstrap_names_fetch_remedy_when_base_missing(

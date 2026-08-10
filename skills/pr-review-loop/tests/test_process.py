@@ -217,8 +217,7 @@ def test_run_enforces_watched_file_bound(tmp_path: Path) -> None:
     runner = CommandRunner({"PATH": os.environ.get("PATH", "")})
     watched = tmp_path / "out"
     program = (
-        "from pathlib import Path; "
-        f"Path({str(watched)!r}).write_bytes(b'x' * 10000)"
+        f"from pathlib import Path; Path({str(watched)!r}).write_bytes(b'x' * 10000)"
     )
 
     with pytest.raises(CommandError, match="command output exceeded bound"):

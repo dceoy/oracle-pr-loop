@@ -242,13 +242,11 @@ def test_frozen_diff_analysis_derives_anchors_shas_and_section_metadata() -> Non
     patch = patch_for()
     analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
-    assert analysis.anchors == frozenset(
-        {
-            ("file.py", "RIGHT", 1),
-            ("file.py", "LEFT", 2),
-            ("file.py", "RIGHT", 2),
-        }
-    )
+    assert analysis.anchors == frozenset({
+        ("file.py", "RIGHT", 1),
+        ("file.py", "LEFT", 2),
+        ("file.py", "RIGHT", 2),
+    })
     file_analysis = analysis.files["file.py"]
     assert file_analysis.base_path == "file.py"
     assert file_analysis.old_sha == SHA_A
@@ -281,12 +279,10 @@ def test_frozen_diff_rename_maps_head_path_to_base_path() -> None:
     analysis = analyze_frozen_diff(patch, frozenset({"new.py"}))
 
     assert analysis.files["new.py"].base_path == "old.py"
-    assert analysis.anchors == frozenset(
-        {
-            ("new.py", "LEFT", 1),
-            ("new.py", "RIGHT", 1),
-        }
-    )
+    assert analysis.anchors == frozenset({
+        ("new.py", "LEFT", 1),
+        ("new.py", "RIGHT", 1),
+    })
 
 
 def test_frozen_diff_deletion_keeps_base_path_for_left_anchor() -> None:
@@ -426,12 +422,10 @@ def test_exact_no_newline_marker_does_not_consume_hunk_lines() -> None:
     )
     analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
-    assert analysis.anchors == frozenset(
-        {
-            ("file.py", "LEFT", 1),
-            ("file.py", "RIGHT", 1),
-        }
-    )
+    assert analysis.anchors == frozenset({
+        ("file.py", "LEFT", 1),
+        ("file.py", "RIGHT", 1),
+    })
 
 
 class FrozenDiffClient(GitHubClient):
@@ -481,13 +475,11 @@ def test_diff_anchors_layers_attribute_and_binary_validation_after_parsing() -> 
 
     anchors = client.diff_anchors(pull_request)
 
-    assert anchors == frozenset(
-        {
-            ("file.py", "RIGHT", 1),
-            ("file.py", "LEFT", 2),
-            ("file.py", "RIGHT", 2),
-        }
-    )
+    assert anchors == frozenset({
+        ("file.py", "RIGHT", 1),
+        ("file.py", "LEFT", 2),
+        ("file.py", "RIGHT", 2),
+    })
     assert client.attr_calls == [
         (SHA_A, frozenset({"file.py"})),
         (SHA_B, frozenset({"file.py"})),

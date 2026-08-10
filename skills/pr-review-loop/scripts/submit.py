@@ -78,9 +78,7 @@ def execute_submit(
         max_output=MAX_PATCH_BYTES,
     )
     if not staged_patch:
-        raise ReviewLoopError(
-            EXIT_PRECONDITION, "empty_patch", "staged patch is empty"
-        )
+        raise ReviewLoopError(EXIT_PRECONDITION, "empty_patch", "staged patch is empty")
     if command_runner.contains_secret(staged_patch):
         raise ReviewLoopError(
             EXIT_PRECONDITION,
@@ -375,7 +373,9 @@ def _staged_object_ids(raw: bytes) -> list[str]:
         path_count = 2 if status in {b"C", b"R"} else 1
         if status not in {b"A", b"C", b"M", b"R", b"T"}:
             raise ReviewLoopError(
-                EXIT_PRECONDITION, "git", "Git returned an unexpected staged diff status"
+                EXIT_PRECONDITION,
+                "git",
+                "Git returned an unexpected staged diff status",
             )
         if index + path_count > len(fields) or any(
             not value for value in fields[index : index + path_count]
@@ -672,9 +672,9 @@ def _git(
 
 def _git_text(runner: CommandRunner, repo_dir: Path, args: Sequence[str]) -> str:
     try:
-        return _git(
-            runner, repo_dir, args, max_output=MAX_REMOTE_OUTPUT
-        ).decode("utf-8", "strict")
+        return _git(runner, repo_dir, args, max_output=MAX_REMOTE_OUTPUT).decode(
+            "utf-8", "strict"
+        )
     except UnicodeError as exc:
         raise ReviewLoopError(
             EXIT_PRECONDITION, "git", "Git returned non-UTF-8 output"

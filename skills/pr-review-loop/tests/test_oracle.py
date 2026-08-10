@@ -461,15 +461,13 @@ def test_remote_oracle_uses_environment_only_and_never_token_argv(
     tmp_path: Path,
 ) -> None:
     token = "remote-secret-token"
-    runner = RecordingOracleRunner(
-        {
-            "PATH": "/usr/bin",
-            "HOME": "/home/test",
-            "ORACLE_REMOTE_HOST": " 127.0.0.1:9473 ",
-            "ORACLE_REMOTE_TOKEN": token,
-            "ORACLE_HOME_DIR": "/host/oracle-config",
-        }
-    )
+    runner = RecordingOracleRunner({
+        "PATH": "/usr/bin",
+        "HOME": "/home/test",
+        "ORACLE_REMOTE_HOST": " 127.0.0.1:9473 ",
+        "ORACLE_REMOTE_TOKEN": token,
+        "ORACLE_HOME_DIR": "/host/oracle-config",
+    })
     writer = _writer(tmp_path, runner)
     attachment = writer.text("input.txt", "evidence")
 
@@ -500,13 +498,11 @@ def test_remote_oracle_uses_environment_only_and_never_token_argv(
 
 
 def test_blank_remote_host_keeps_local_manual_login(tmp_path: Path) -> None:
-    runner = RecordingOracleRunner(
-        {
-            "PATH": "/usr/bin",
-            "HOME": "/home/test",
-            "ORACLE_REMOTE_HOST": "\ufeff  ",
-        }
-    )
+    runner = RecordingOracleRunner({
+        "PATH": "/usr/bin",
+        "HOME": "/home/test",
+        "ORACLE_REMOTE_HOST": "\ufeff  ",
+    })
     writer = _writer(tmp_path, runner)
 
     invoke_oracle(
@@ -527,14 +523,12 @@ def test_remote_token_is_rejected_from_attachment_before_oracle_runs(
     tmp_path: Path,
 ) -> None:
     token = "remote-secret-token"
-    runner = RecordingOracleRunner(
-        {
-            "PATH": "/usr/bin",
-            "HOME": "/home/test",
-            "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
-            "ORACLE_REMOTE_TOKEN": token,
-        }
-    )
+    runner = RecordingOracleRunner({
+        "PATH": "/usr/bin",
+        "HOME": "/home/test",
+        "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
+        "ORACLE_REMOTE_TOKEN": token,
+    })
     writer = _writer(tmp_path, runner)
     attachment = writer.root / "untrusted.txt"
     attachment.write_text(f"evidence {token}\n", encoding="utf-8")
@@ -613,18 +607,14 @@ def test_remote_busy_detection_requires_routing_and_terminal_error() -> None:
     retryable = CommandError(
         "busy",
         returncode=1,
-        stdout=(
-            "Routing browser automation to remote host http://host\n"
-            "ERROR: busy\n"
-        ),
+        stdout=("Routing browser automation to remote host http://host\nERROR: busy\n"),
     )
     local = CommandError("busy", returncode=1, stdout="ERROR: busy\n")
     ambiguous = CommandError(
         "busy",
         returncode=1,
         stdout=(
-            "Routing browser automation to remote host http://host\n"
-            "ERROR: busy later\n"
+            "Routing browser automation to remote host http://host\nERROR: busy later\n"
         ),
     )
 
@@ -643,10 +633,7 @@ def test_remote_busy_retries_are_bounded(tmp_path: Path) -> None:
     busy = CommandError(
         "busy",
         returncode=1,
-        stdout=(
-            "Routing browser automation to remote host http://host\n"
-            "ERROR: busy\n"
-        ),
+        stdout=("Routing browser automation to remote host http://host\nERROR: busy\n"),
     )
     runner = RecordingOracleRunner(
         {

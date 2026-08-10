@@ -93,9 +93,7 @@ def test_recognized_command_missing_required_option_keeps_attribution(
 def test_recognized_command_unknown_option_keeps_attribution(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = cli.main(
-        ["submit", "--pr", "1", "--expected-head", SHA_A, "--wat"]
-    )
+    code = cli.main(["submit", "--pr", "1", "--expected-head", SHA_A, "--wat"])
     value, stderr = _stdout_object(capsys)
 
     assert code == 2
@@ -109,15 +107,13 @@ def test_recognized_command_unknown_option_keeps_attribution(
 def test_invalid_option_value_keeps_recognized_command_attribution(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = cli.main(
-        [
-            "bootstrap",
-            "--issue",
-            "7",
-            "--oracle-thinking-time",
-            "maximum",
-        ]
-    )
+    code = cli.main([
+        "bootstrap",
+        "--issue",
+        "7",
+        "--oracle-thinking-time",
+        "maximum",
+    ])
     value, stderr = _stdout_object(capsys)
 
     assert code == 2
@@ -164,7 +160,9 @@ def test_root_help_is_issue_and_pr_oriented() -> None:
 def test_subcommand_help_describes_bootstrap_issue_and_pr_commands() -> None:
     root = cli.parser()
     subparsers = next(
-        action for action in root._actions if hasattr(action, "choices") and action.choices
+        action
+        for action in root._actions
+        if hasattr(action, "choices") and action.choices
     )
     choices = subparsers.choices
 
@@ -189,19 +187,17 @@ def test_bootstrap_success_schema_is_stable(
     )
     execute = mocker.patch.object(cli, "execute_bootstrap", return_value=result)
 
-    code = cli.main(
-        [
-            "bootstrap",
-            "--issue",
-            "7",
-            "--repo-dir",
-            str(tmp_path),
-            "--oracle-model",
-            "gpt-5.6-sol",
-            "--oracle-thinking-time",
-            "heavy",
-        ]
-    )
+    code = cli.main([
+        "bootstrap",
+        "--issue",
+        "7",
+        "--repo-dir",
+        str(tmp_path),
+        "--oracle-model",
+        "gpt-5.6-sol",
+        "--oracle-thinking-time",
+        "heavy",
+    ])
     value, stderr = _stdout_object(capsys)
 
     assert code == 0
@@ -258,17 +254,15 @@ def test_submit_success_schema_is_stable(
     )
     execute = mocker.patch.object(cli, "execute_submit", return_value=result)
 
-    code = cli.main(
-        [
-            "submit",
-            "--pr",
-            "21",
-            "--expected-head",
-            SHA_B,
-            "--repo-dir",
-            str(tmp_path),
-        ]
-    )
+    code = cli.main([
+        "submit",
+        "--pr",
+        "21",
+        "--expected-head",
+        SHA_B,
+        "--repo-dir",
+        str(tmp_path),
+    ])
     value, stderr = _stdout_object(capsys)
 
     assert code == 0

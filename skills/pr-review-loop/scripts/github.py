@@ -113,9 +113,7 @@ def normalize_repo(remote: str) -> str:
             parsed = urllib.parse.urlsplit(remote)
         except ValueError:
             message = "origin must be an unambiguous github.com URL"
-            raise ReviewLoopError(
-                EXIT_PRECONDITION, "repository", message
-            ) from None
+            raise ReviewLoopError(EXIT_PRECONDITION, "repository", message) from None
         if (
             parsed.scheme not in {"https", "ssh"}
             or parsed.netloc not in {"github.com", "git@github.com"}
@@ -232,9 +230,7 @@ def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
         origin_repo,
         route="pull",
         numeric_message="numeric --pr requires an unambiguous local origin",
-        invalid_message=(
-            "--pr must be a positive number or canonical GitHub pull URL"
-        ),
+        invalid_message=("--pr must be a positive number or canonical GitHub pull URL"),
         target_name="pull request",
     )
     return repository, number, f"https://github.com/{repository}/pull/{number}"
@@ -299,8 +295,7 @@ def validate_path(path: str) -> str:
         or "\\" in path
         or "\0" in path
         or any(
-            ord(character) < MIN_PRINTABLE_CODEPOINT
-            or ord(character) == DEL_CODEPOINT
+            ord(character) < MIN_PRINTABLE_CODEPOINT or ord(character) == DEL_CODEPOINT
             for character in path
         )
     ):
@@ -622,9 +617,7 @@ def parse_json_object(text: str, *, category: str) -> JsonObject:
             category,
             "GitHub returned malformed JSON",
         ) from exc
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ReviewLoopError(
             EXIT_GITHUB,
             category,
@@ -830,13 +823,11 @@ class _ImmutableGitMixin:
     def _git_env(self) -> dict[str, str]:
         """Return a Git environment that ignores host-controlled config."""
         env = self.runner.allowlisted_env()
-        env.update(
-            {
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_NO_REPLACE_OBJECTS": "1",
-            }
-        )
+        env.update({
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_NO_REPLACE_OBJECTS": "1",
+        })
         return env
 
     def git_bytes(
@@ -875,9 +866,7 @@ class _ImmutableGitMixin:
             ReviewLoopError: Git fails or returns non-UTF-8 output.
         """
         try:
-            return self.git_bytes(args, max_output=max_output).decode(
-                "utf-8", "strict"
-            )
+            return self.git_bytes(args, max_output=max_output).decode("utf-8", "strict")
         except UnicodeError as exc:
             raise ReviewLoopError(
                 EXIT_PRECONDITION,
@@ -1035,7 +1024,8 @@ class _ImmutableGitMixin:
     ) -> bytes:
         """Evaluate immutable `diff` attributes in an isolated bare repository."""
         common_dir = Path(
-            self.git_bytes(
+            self
+            .git_bytes(
                 ["rev-parse", "--git-common-dir"],
                 max_output=4096,
             )
@@ -1150,9 +1140,14 @@ class GitHubClient(_ImmutableGitMixin):
             require_push_url=False,
         )
         self._set_target(pr_value, origin_repo)
-        self.authenticated_login = self._text(
-            ["api", "--hostname", "github.com", "user", "--jq", ".login"]
-        ).strip()
+        self.authenticated_login = self._text([
+            "api",
+            "--hostname",
+            "github.com",
+            "user",
+            "--jq",
+            ".login",
+        ]).strip()
         if not self.authenticated_login:
             raise ReviewLoopError(
                 EXIT_GITHUB,
@@ -1362,9 +1357,7 @@ class GitHubClient(_ImmutableGitMixin):
                 "identity",
                 "ambiguous pull request identity",
             )
-        if require_open and (
-            pull_request.state != "OPEN" or pull_request.is_draft
-        ):
+        if require_open and (pull_request.state != "OPEN" or pull_request.is_draft):
             raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "state",
@@ -1496,9 +1489,7 @@ class GitHubClient(_ImmutableGitMixin):
             max_output=MAX_ANCHOR_ATTR_BYTES,
         )
         forced = {
-            head_path
-            for base_path in base_forced
-            for head_path in grouped[base_path]
+            head_path for base_path in base_forced for head_path in grouped[base_path]
         }
         forced.update(
             self.paths_with_diff_unset(
@@ -1521,11 +1512,7 @@ class GitHubClient(_ImmutableGitMixin):
             file_analysis = analysis.files.get(path)
             if file_analysis is None or path in attribute_forced:
                 continue
-            sha = (
-                file_analysis.new_sha
-                if side == "RIGHT"
-                else file_analysis.old_sha
-            )
+            sha = file_analysis.new_sha if side == "RIGHT" else file_analysis.old_sha
             if sha == NULL_SHA:
                 is_binary = False
             else:
@@ -1557,9 +1544,7 @@ class GitHubClient(_ImmutableGitMixin):
         )
         if not analysis.anchors:
             return frozenset()
-        candidate_paths = frozenset(
-            path for path, _side, _line in analysis.anchors
-        )
+        candidate_paths = frozenset(path for path, _side, _line in analysis.anchors)
         forced = self._attribute_forced_paths(
             pull_request,
             analysis,
@@ -1642,9 +1627,7 @@ class GitHubClient(_ImmutableGitMixin):
             ReviewLoopError: GitHub rejects the dismissal.
         """
         payload: JsonObject = {
-            "message": (
-                "Dismissed automatically: reviewed PR snapshot became stale."
-            )
+            "message": ("Dismissed automatically: reviewed PR snapshot became stale.")
         }
         self._text(
             [
@@ -1678,17 +1661,15 @@ class GitHubClient(_ImmutableGitMixin):
             ReviewLoopError: The published identity, author, commit, or body differs.
         """
         data = parse_json_object(
-            self._text(
-                [
-                    "api",
-                    "--hostname",
-                    "github.com",
-                    (
-                        f"repos/{pull_request.repository}/pulls/"
-                        f"{pull_request.number}/reviews/{review_id}"
-                    ),
-                ]
-            ),
+            self._text([
+                "api",
+                "--hostname",
+                "github.com",
+                (
+                    f"repos/{pull_request.repository}/pulls/"
+                    f"{pull_request.number}/reviews/{review_id}"
+                ),
+            ]),
             category="github_schema",
         )
         user = require_object(data.get("user"), field="user")
@@ -1734,29 +1715,23 @@ def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
                 "github_schema",
                 "GitHub comment entry must be an object",
             )
-        parsed.append(
-            (
-                _optional_author_login(
-                    item.get("author"),
-                    field="comments.author",
-                ),
-                require_string(
-                    item.get("body"),
-                    field="comments.body",
-                    allow_empty=True,
-                ),
-                require_string(
-                    item.get("createdAt"),
-                    field="comments.createdAt",
-                ),
-            )
-        )
+        parsed.append((
+            _optional_author_login(
+                item.get("author"),
+                field="comments.author",
+            ),
+            require_string(
+                item.get("body"),
+                field="comments.body",
+                allow_empty=True,
+            ),
+            require_string(
+                item.get("createdAt"),
+                field="comments.createdAt",
+            ),
+        ))
     parsed.sort(key=operator.itemgetter(2))
-    kept = (
-        parsed[-MAX_ISSUE_COMMENTS:]
-        if len(parsed) > MAX_ISSUE_COMMENTS
-        else parsed
-    )
+    kept = parsed[-MAX_ISSUE_COMMENTS:] if len(parsed) > MAX_ISSUE_COMMENTS else parsed
     omitted_flags = [False] * len(kept)
     total = 0
     for index in range(len(kept) - 1, -1, -1):
@@ -1938,15 +1913,13 @@ class IssueClient(_ImmutableGitMixin):
             ReviewLoopError: GitHub returns invalid default-branch metadata.
         """
         data = parse_json_object(
-            self._text(
-                [
-                    "repo",
-                    "view",
-                    self.repository,
-                    "--json",
-                    "defaultBranchRef",
-                ]
-            ),
+            self._text([
+                "repo",
+                "view",
+                self.repository,
+                "--json",
+                "defaultBranchRef",
+            ]),
             category="github_schema",
         )
         ref = require_object(
@@ -1971,14 +1944,12 @@ class IssueClient(_ImmutableGitMixin):
         """
         encoded_branch = urllib.parse.quote(branch, safe="")
         data = parse_json_object(
-            self._text(
-                [
-                    "api",
-                    "--hostname",
-                    "github.com",
-                    f"repos/{self.repository}/branches/{encoded_branch}",
-                ]
-            ),
+            self._text([
+                "api",
+                "--hostname",
+                "github.com",
+                f"repos/{self.repository}/branches/{encoded_branch}",
+            ]),
             category="github_schema",
         )
         commit = require_object(data.get("commit"), field="commit")
