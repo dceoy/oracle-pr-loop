@@ -38,7 +38,7 @@ jobs:
           replace_once(
               cli,
               '''    subparsers = next(\n        action\n        for action in root._actions\n        if hasattr(action, "choices") and action.choices\n    )\n    choices = subparsers.choices\n\n    assert "GitHub Issue" in choices["bootstrap"].description\n    assert "pull-request snapshot" in choices["review"].description\n    assert "GitHub pull request" in choices["submit"].description\n''',
-              '''    choices = cast(\n        "dict[str, argparse.ArgumentParser]",\n        next(\n            action.choices\n            for action in root._actions\n            if isinstance(action, argparse._SubParsersAction)\n        ),\n    )\n    bootstrap_description = choices["bootstrap"].description\n    review_description = choices["review"].description\n    submit_description = choices["submit"].description\n\n    assert bootstrap_description is not None\n    assert review_description is not None\n    assert submit_description is not None\n    assert "GitHub Issue" in bootstrap_description\n    assert "pull-request snapshot" in review_description\n    assert "GitHub pull request" in submit_description\n''',
+              '''    subparsers = cast(\n        "argparse._SubParsersAction[argparse.ArgumentParser]",\n        next(\n            action\n            for action in root._actions\n            if isinstance(action, argparse._SubParsersAction)\n        ),\n    )\n    choices = subparsers.choices\n    bootstrap_description = choices["bootstrap"].description\n    review_description = choices["review"].description\n    submit_description = choices["submit"].description\n\n    assert bootstrap_description is not None\n    assert review_description is not None\n    assert submit_description is not None\n    assert "GitHub Issue" in bootstrap_description\n    assert "pull-request snapshot" in review_description\n    assert "GitHub pull request" in submit_description\n''',
           )
 
           github = "skills/pr-review-loop/tests/test_github.py"
@@ -104,6 +104,13 @@ jobs:
           process = "skills/pr-review-loop/scripts/process.py"
           replace_once(
               process,
+              "        timeout: int = 120,\n",
+              "        timeout: float = 120,\n",
+          )
+
+          submit_test = "skills/pr-review-loop/tests/test_submit.py"
+          replace_once(
+              submit_test,
               "        timeout: int = 120,\n",
               "        timeout: float = 120,\n",
           )
