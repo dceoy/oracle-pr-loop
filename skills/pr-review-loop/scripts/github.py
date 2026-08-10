@@ -326,6 +326,11 @@ def _header_path(value: str, prefix: str) -> str | None:
         return None
 
 
+def _header_is_dev_null(value: str) -> bool:
+    """Return whether a diff header explicitly names the absent-file sentinel."""
+    return value.split("\t", 1)[0] == "/dev/null"
+
+
 @dataclass(frozen=True)
 class DiffFileAnalysis:
     """Structural facts from one canonical frozen-diff file section."""
@@ -434,7 +439,13 @@ def _record_old_header(line: str, state: _SectionState) -> None:
     if state.saw_old_header:
         state.malformed = True
     state.saw_old_header = True
-    state.old_path = _header_path(line.removeprefix("--- "), "a/")
+    value = line.removeprefix("--- ")
+    if _header_is_dev_null(value):
+        state.old_path = None
+        return
+    state.old_path = _header_path(value, "a/")
+    if state.old_path is None:
+        state.malformed = True
 
 
 def _record_new_header(line: str, state: _SectionState) -> None:
@@ -442,9 +453,15 @@ def _record_new_header(line: str, state: _SectionState) -> None:
     if state.saw_new_header:
         state.malformed = True
     state.saw_new_header = True
-    state.head_path = _header_path(line.removeprefix("+++ "), "b/")
-    if state.head_path is None:
+    value = line.removeprefix("+++ ")
+    if _header_is_dev_null(value):
         state.head_path = state.old_path
+        if state.old_path is None:
+            state.malformed = True
+        return
+    state.head_path = _header_path(value, "b/")
+    if state.head_path is None:
+        state.malformed = True
 
 
 def _start_hunk(line: str, state: _SectionState) -> None:
@@ -565,10 +582,13 @@ def analyze_frozen_diff(
     anchors: set[tuple[str, str, int]] = set()
     invalid_paths: set[str] = set()
     state: _SectionState | None = None
+    lines = text.split("\n")
 
-    for raw_line in text.splitlines(keepends=True):
-        line = raw_line[:-1] if raw_line.endswith("\n") else raw_line
-        byte_size = len(raw_line.encode("utf-8"))
+    for index, line in enumerate(lines):
+        has_lf = index < len(lines) - 1
+        if not has_lf and not line:
+            break
+        byte_size = len(line.encode("utf-8")) + int(has_lf)
         if line.startswith("diff --git "):
             _finalize_diff_section(
                 state,
