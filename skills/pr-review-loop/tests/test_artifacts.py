@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 from scripts import artifacts as artifacts_module
 from scripts.artifacts import TemporaryFileWriter, temporary_file_writer
-from scripts.models import LooprError
+from scripts.models import ReviewLoopError
 from scripts.process import CommandRunner
 
 if TYPE_CHECKING:
@@ -21,7 +21,9 @@ def test_temporary_file_writer_cleans_up_after_success() -> None:
     """The command-owned temporary directory is removed on success."""
     observed: list[Path] = []
 
-    with temporary_file_writer(CommandRunner(), prefix="loopr-test-") as writer:
+    with temporary_file_writer(
+        CommandRunner(), prefix="pr-review-loop-test-"
+    ) as writer:
         observed.append(writer.root)
         writer.text("input.txt", "temporary")
         assert writer.root.is_dir()
@@ -37,7 +39,7 @@ def test_temporary_file_writer_cleans_up_after_error() -> None:
     def fail_inside_context() -> None:
         with temporary_file_writer(
             CommandRunner(),
-            prefix="loopr-test-",
+            prefix="pr-review-loop-test-",
         ) as writer:
             observed.append(writer.root)
             message = "stop"
@@ -73,10 +75,10 @@ def test_temporary_file_writer_fails_closed_on_cleanup_error(
     )
 
     def fail_cleanup() -> None:
-        with temporary_file_writer(CommandRunner(), prefix="loopr-test-"):
+        with temporary_file_writer(CommandRunner(), prefix="pr-review-loop-test-"):
             pass
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         fail_cleanup()
 
     assert captured.value.category == "temporary_files"
@@ -105,7 +107,7 @@ def test_writer_rejects_non_private_root(tmp_path: Path) -> None:
     root.mkdir(mode=0o755)
     root.chmod(0o755)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         TemporaryFileWriter(root, CommandRunner())
 
     assert captured.value.category == "temporary_files"
@@ -115,7 +117,7 @@ def test_writer_rejects_path_escape(tmp_path: Path) -> None:
     """Relative temporary names cannot escape the private root."""
     writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         writer.text("../outside.txt", "unsafe")
 
     assert captured.value.category == "temporary_files"
