@@ -25,14 +25,12 @@ jobs:
     uses: dceoy/gha-for-devops/.github/workflows/python-package-lint-and-scan.yml@main  # zizmor: ignore[unpinned-uses]
     with:
       package-path: .
-      python-version: 3.x
   python-test:
     permissions:
       contents: read
     uses: dceoy/gha-for-devops/.github/workflows/python-package-test.yml@main  # zizmor: ignore[unpinned-uses]
     with:
       package-path: .
-      python-version: 3.x
   github-codeql-analysis:
     permissions:
       contents: read
