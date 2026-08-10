@@ -73,9 +73,12 @@ def sample_issue(
     )
 
 
-GIT = shutil.which("git")
-if GIT is None:
-    raise RuntimeError("git is required for integration tests")
+def git_executable() -> str:
+    """Return the Git executable required by real-Git tests."""
+    executable = shutil.which("git")
+    if executable is None:
+        raise RuntimeError("git is required for integration tests")
+    return executable
 
 
 def run_process(
@@ -104,7 +107,7 @@ def git(
 ) -> str:
     """Run Git in a test repository and return stripped UTF-8 stdout."""
     return (
-        run_process([GIT, *args], cwd=repo, env=env)
+        run_process([git_executable(), *args], cwd=repo, env=env)
         .stdout.decode("utf-8", "strict")
         .strip()
     )
