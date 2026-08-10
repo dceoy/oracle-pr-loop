@@ -107,37 +107,22 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "skills/pr-review-loop/tests/**/*.py" = [
-  "undocumented-public-method",     # D102
-  "undocumented-public-function",   # D103
-  "undocumented-public-init",       # D107
-  "docstring-missing-returns",      # DOC201
-  "docstring-missing-exception",    # DOC501
-  "import-private-name",            # PLC2701
-  "magic-value-comparison",         # PLR2004
-  "assert",                         # S101
-  "hardcoded-password-string",      # S105
-  "hardcoded-password-func-arg",    # S106
-  "private-member-access",          # SLF001
-  "implicit-namespace-package",     # INP001
-  "compare-to-empty-string",        # PLC1901
-]
-"skills/pr-review-loop/scripts/github.py" = [
-  "docstring-missing-returns",      # DOC201
-  "docstring-missing-exception",    # DOC501
-  "docstring-extraneous-exception", # DOC503
-]
-"skills/pr-review-loop/scripts/submit.py" = [
-  "docstring-missing-returns",      # DOC201
-  "docstring-missing-exception",    # DOC501
-]
-"skills/pr-review-loop/tests/test_git_safety_regressions.py" = [
-  "typing-only-standard-library-import", # TCH003
-]
-"skills/pr-review-loop/tests/test_github.py" = [
-  "boolean-positional-value-in-call", # FBT003
-]
-"skills/pr-review-loop/tests/test_process.py" = [
-  "line-too-long",                  # E501
+  "undocumented-public-method",           # D102
+  "undocumented-public-function",         # D103
+  "undocumented-public-init",             # D107
+  "docstring-missing-returns",            # DOC201
+  "docstring-missing-exception",          # DOC501
+  "import-private-name",                  # PLC2701
+  "magic-value-comparison",               # PLR2004
+  "assert",                               # S101
+  "hardcoded-password-string",            # S105
+  "hardcoded-password-func-arg",          # S106
+  "private-member-access",                # SLF001
+  "implicit-namespace-package",           # INP001
+  "compare-to-empty-string",              # PLC1901
+  "typing-only-standard-library-import",  # TCH003
+  "boolean-positional-value-in-call",     # FBT003
+  "line-too-long",                        # E501
 ]
 
 [tool.ruff.lint.pydocstyle]

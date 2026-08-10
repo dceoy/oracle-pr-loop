@@ -67,7 +67,14 @@ def _raw_status(
     *,
     accepted_statuses: frozenset[bytes],
 ) -> bytes:
-    """Validate one raw status and its optional similarity score."""
+    """Validate one raw status and its optional similarity score.
+
+    Returns:
+        The validated status byte.
+
+    Raises:
+        ValueError: The status or similarity score is malformed or disallowed.
+    """
     status = value[:1]
     if status not in RAW_STATUSES:
         raise ValueError
@@ -93,7 +100,14 @@ def execute_submit(
     repo_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Validate, commit, and lease-protect the complete workspace patch."""
+    """Validate, commit, and lease-protect the complete workspace patch.
+
+    Returns:
+        The result of the submitted review patch.
+
+    Raises:
+        ReviewLoopError: The workspace, pull request, or remote state is invalid.
+    """
     command_runner = runner or CommandRunner()
     if SHA_RE.fullmatch(expected_head) is None:
         raise ReviewLoopError(
@@ -230,7 +244,11 @@ def _validate_local_workspace(
 
 
 def _require_no_merge_state(runner: CommandRunner, repo_dir: Path) -> None:
-    """Reject a resolved or unresolved in-progress merge before commit."""
+    """Reject a resolved or unresolved in-progress merge before commit.
+
+    Raises:
+        ReviewLoopError: Git cannot be queried or a merge is in progress.
+    """
     try:
         result = runner.run(
             ["git", "rev-parse", "--git-path", "MERGE_HEAD"],
@@ -255,7 +273,14 @@ def _require_no_merge_state(runner: CommandRunner, repo_dir: Path) -> None:
 
 
 def _require_single_child_commit(github: GitHubClient, expected_head: str) -> str:
-    """Require the new HEAD to be one hook-free commit on expected_head."""
+    """Require the new HEAD to be one hook-free commit on expected_head.
+
+    Returns:
+        The newly created commit SHA.
+
+    Raises:
+        ReviewLoopError: The new commit is not a single child of expected_head.
+    """
     fields = github.git_text(
         ["rev-list", "--parents", "-n", "1", "HEAD"], max_output=MAX_REMOTE_OUTPUT
     ).split()
@@ -275,7 +300,11 @@ def _require_single_child_commit(github: GitHubClient, expected_head: str) -> st
 def _require_no_known_credentials_in_staged_blobs(
     runner: CommandRunner, github: GitHubClient
 ) -> None:
-    """Scan bounded staged path metadata and blob contents for credentials."""
+    """Scan bounded staged path metadata and blob contents for credentials.
+
+    Raises:
+        ReviewLoopError: Staged metadata or blob content is unsafe or malformed.
+    """
     raw = _git(
         runner,
         github.repo_dir,
@@ -339,7 +368,14 @@ def _require_no_known_credentials_in_staged_blobs(
 
 
 def _raw_object_id(value: bytes) -> str | None:
-    """Decode one raw-diff object ID, allowing Git's null object ID."""
+    """Decode one raw-diff object ID, allowing Git's null object ID.
+
+    Returns:
+        The validated object ID, or None for Git's null object ID.
+
+    Raises:
+        ValueError: The object ID is not valid ASCII or a SHA.
+    """
     try:
         object_id = value.decode("ascii", "strict")
     except UnicodeError as exc:
@@ -356,7 +392,14 @@ def _parse_raw_diff(
     *,
     accepted_statuses: frozenset[bytes],
 ) -> tuple[_RawDiffRecord, ...]:
-    """Parse one NUL-delimited Git raw diff with a caller's status policy."""
+    """Parse one NUL-delimited Git raw diff with a caller's status policy.
+
+    Returns:
+        The validated raw-diff records.
+
+    Raises:
+        ValueError: The raw diff contains malformed metadata or paths.
+    """
     if not raw:
         return ()
     fields = raw.split(b"\0")
@@ -402,7 +445,11 @@ def _parse_raw_diff(
 
 
 def _staged_object_ids(raw: bytes) -> list[str]:
-    """Return distinct new object IDs from staged raw diff records."""
+    """Return distinct new object IDs from staged raw diff records.
+
+    Raises:
+        ReviewLoopError: Git returned malformed or unsafe staged metadata.
+    """
     try:
         records = _parse_raw_diff(raw, accepted_statuses=STAGED_STATUSES)
     except ValueError as exc:
@@ -426,7 +473,11 @@ def _staged_object_ids(raw: bytes) -> list[str]:
 
 
 def _reject_gitlink_changes(github: GitHubClient, commit_sha: str) -> None:
-    """Fail closed when the exact candidate commit changes a gitlink."""
+    """Fail closed when the exact candidate commit changes a gitlink.
+
+    Raises:
+        ReviewLoopError: The diff cannot be validated or changes a gitlink.
+    """
     try:
         raw = github.git_bytes(
             [
@@ -452,7 +503,11 @@ def _reject_gitlink_changes(github: GitHubClient, commit_sha: str) -> None:
 
 
 def _contains_gitlink_change(raw: bytes) -> bool:
-    """Return whether a bounded raw diff changes a gitlink mode."""
+    """Return whether a bounded raw diff changes a gitlink mode.
+
+    Raises:
+        ReviewLoopError: The raw diff metadata is malformed.
+    """
     try:
         records = _parse_raw_diff(raw, accepted_statuses=GITLINK_STATUSES)
     except ValueError as exc:
@@ -470,7 +525,11 @@ def _require_same_snapshot(
     *,
     phase: str,
 ) -> None:
-    """Reject a pre-write PR identity, SHA, or ref-name change."""
+    """Reject a pre-write PR identity, SHA, or ref-name change.
+
+    Raises:
+        ReviewLoopError: The pull request changed during the submit phase.
+    """
     if (
         current.base_sha != initial.base_sha
         or current.head_sha != initial.head_sha
@@ -487,7 +546,14 @@ def _require_same_snapshot(
 def _poll_result(
     github: GitHubClient, initial: PullRequestIdentity, commit_sha: str
 ) -> PullRequestIdentity:
-    """Wait until GitHub exposes the pushed commit as the PR head."""
+    """Wait until GitHub exposes the pushed commit as the PR head.
+
+    Returns:
+        The refreshed pull-request identity.
+
+    Raises:
+        ReviewLoopError: The remote state changes unexpectedly or times out.
+    """
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     while True:
         try:
@@ -527,7 +593,11 @@ def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
 
 
 def _parse_remote_ref(output: str, expected_ref: str) -> _RemoteRef | None:
-    """Parse exactly one validated ``git ls-remote --refs`` record."""
+    """Parse exactly one validated ``git ls-remote --refs`` record.
+
+    Returns:
+        The validated remote ref, or None when the output is invalid.
+    """
     lines = output.splitlines()
     if len(lines) != 1:
         return None
@@ -568,7 +638,12 @@ def _remote_matches(
     commit_sha: str,
     expected_head: str,
 ) -> bool | None:
-    """Read one exact remote ref state during push-failure recovery."""
+    """Read one exact remote ref state during push-failure recovery.
+
+    Returns:
+        True for the candidate commit, False for another commit, or None when
+        the remote state cannot yet be determined.
+    """
     try:
         result = runner.run(
             ["git", "ls-remote", "--refs", remote, ref],
@@ -598,7 +673,11 @@ def _poll_remote_confirmation(
     commit_sha: str,
     expected_head: str,
 ) -> bool:
-    """Poll bounded remote reads for confirmation of an ambiguous push."""
+    """Poll bounded remote reads for confirmation of an ambiguous push.
+
+    Returns:
+        Whether the remote confirms the candidate commit.
+    """
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     while True:
         matches = _remote_matches(
@@ -626,7 +705,11 @@ def _recover_from_push_failure(
     expected_head: str,
     push_error: CommandError,
 ) -> None:
-    """Recover only when the remote already holds this exact candidate commit."""
+    """Recover only when the remote already holds this exact candidate commit.
+
+    Raises:
+        ReviewLoopError: The push result is ambiguous or the lease was lost.
+    """
     if _poll_remote_confirmation(
         runner,
         repo_dir=repo_dir,
