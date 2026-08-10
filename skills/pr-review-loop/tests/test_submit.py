@@ -6,23 +6,28 @@ import json
 import os
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
-from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import pytest
-from scripts.models import EXIT_PRECONDITION, EXIT_RACE, JsonObject, ReviewLoopError
+from scripts.models import (
+    EXIT_PRECONDITION,
+    EXIT_RACE,
+    JsonObject,
+    ReviewLoopError,
+)
 from scripts.process import CommandError, CommandResult, CommandRunner
 from scripts.submit import execute_submit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
 
 def _git_executable() -> str:
     executable = shutil.which("git")
     if executable is None:
-        msg = "git is required for submit integration tests"
-        raise RuntimeError(msg)
+        message = "git is required for submit integration tests"
+        raise RuntimeError(message)
     return executable
 
 
@@ -79,13 +84,18 @@ def _fixture_repo(tmp_path: Path) -> tuple[Path, Path, JsonObject, str, str]:
         "baseRefOid": base,
         "headRefName": "feature",
         "headRefOid": head,
-        "headRepository": {"nameWithOwner": "acme/demo", "name": "demo"},
+        "headRepository": {
+            "nameWithOwner": "acme/demo",
+            "name": "demo",
+        },
         "headRepositoryOwner": {"login": "acme"},
     }
     return repo, remote, state, base, head
 
 
 class ScenarioRunner(CommandRunner):
+    """Execute local Git while replacing GitHub CLI reads with mutable state."""
+
     def __init__(
         self,
         repo: Path,
@@ -150,28 +160,35 @@ class ScenarioRunner(CommandRunner):
         stdout = completed.stdout
         stderr = self.redact(completed.stderr.decode("utf-8", "replace"))
         if len(stdout) > max_output:
-            msg = "command output exceeded bound"
-            raise CommandError(msg)
+            message = "command output exceeded bound"
+            raise CommandError(message)
         if argv[:2] == ["git", "push"] and completed.returncode == 0:
             candidate = argv[-1].split(":", 1)[0]
             self.state["headRefOid"] = candidate
             if self.fail_push_after_success:
                 self.fail_push_after_success = False
+                message = "ambiguous transport failure"
                 raise CommandError(
-                    "ambiguous transport failure",
+                    message,
                     returncode=1,
                     stdout="",
                     stderr="transport closed",
                 )
         if check and completed.returncode != 0:
             detail = stderr.strip() or stdout.decode("utf-8", "replace").strip()
+            message = detail or f"command failed: {' '.join(argv)}"
             raise CommandError(
-                detail or f"command failed: {' '.join(argv)}",
+                message,
                 returncode=completed.returncode,
                 stdout=self.redact(stdout.decode("utf-8", "replace")),
                 stderr=stderr,
             )
-        return CommandResult(tuple(argv), completed.returncode, stdout, stderr)
+        return CommandResult(
+            tuple(argv),
+            completed.returncode,
+            stdout,
+            stderr,
+        )
 
 
 def _modify(repo: Path, value: str = "fixed\n") -> None:
@@ -196,7 +213,12 @@ def test_success_creates_single_child_and_lease_protected_remote_head(
     assert result.resulting_head_sha == result.commit_sha
     assert result.pushed_branch == "feature"
     assert _git(repo, "rev-parse", "HEAD^") == head
-    remote_head = _git(repo, "ls-remote", str(remote), "refs/heads/feature").split()[0]
+    remote_head = _git(
+        repo,
+        "ls-remote",
+        str(remote),
+        "refs/heads/feature",
+    ).split()[0]
     assert remote_head == result.commit_sha
     assert _git(repo, "show", "-s", "--format=%s", result.commit_sha) == (
         "apply reviewed changes"
@@ -237,7 +259,9 @@ def test_submit_rejects_remote_head_that_no_longer_matches_review(
     assert captured.value.category == "stale_head"
 
 
-def test_submit_rejects_local_head_not_equal_to_reviewed_head(tmp_path: Path) -> None:
+def test_submit_rejects_local_head_not_equal_to_reviewed_head(
+    tmp_path: Path,
+) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     (repo / "other.txt").write_text("local commit\n", encoding="utf-8")
     _git(repo, "add", "other.txt")
@@ -301,7 +325,14 @@ def test_untracked_reserved_runtime_artifacts_are_never_committed(
     )
 
     assert runtime.exists()
-    assert ".pr-review-loop" not in _git(repo, "show", "--name-only", "--format=", result.commit_sha)
+    changed = _git(
+        repo,
+        "show",
+        "--name-only",
+        "--format=",
+        result.commit_sha,
+    )
+    assert ".pr-review-loop" not in changed
 
 
 def test_tracked_reserved_runtime_artifacts_fail_closed(tmp_path: Path) -> None:
@@ -328,7 +359,9 @@ def test_tracked_reserved_runtime_artifacts_fail_closed(tmp_path: Path) -> None:
     assert captured.value.category == "legacy_artifacts"
 
 
-def test_forced_staged_reserved_runtime_artifact_fails_closed(tmp_path: Path) -> None:
+def test_forced_staged_reserved_runtime_artifact_fails_closed(
+    tmp_path: Path,
+) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     runtime = repo / ".pr-review-loop" / "state.json"
     runtime.parent.mkdir()
@@ -353,7 +386,12 @@ def test_submit_rejects_known_credential_in_staged_blob(tmp_path: Path) -> None:
     _modify(repo, f"fixed {secret}\n")
     source_env = dict(os.environ)
     source_env["GH_TOKEN"] = secret
-    runner = ScenarioRunner(repo, remote, state, source_env=source_env)
+    runner = ScenarioRunner(
+        repo,
+        remote,
+        state,
+        source_env=source_env,
+    )
 
     with pytest.raises(ReviewLoopError) as captured:
         execute_submit(
@@ -381,6 +419,7 @@ def test_submit_detects_lease_loss_without_overwriting_concurrent_update(
     _git(other, "add", "concurrent.txt")
     _git(other, "commit", "-m", "concurrent")
     concurrent_sha = _git(other, "rev-parse", "HEAD")
+    _git(repo, "fetch", str(other), concurrent_sha)
 
     with pytest.raises(ReviewLoopError) as captured:
         execute_submit(
@@ -397,7 +436,12 @@ def test_submit_detects_lease_loss_without_overwriting_concurrent_update(
 
     assert captured.value.code == EXIT_RACE
     assert captured.value.category == "lease_lost"
-    remote_head = _git(repo, "ls-remote", str(remote), "refs/heads/feature").split()[0]
+    remote_head = _git(
+        repo,
+        "ls-remote",
+        str(remote),
+        "refs/heads/feature",
+    ).split()[0]
     assert remote_head == concurrent_sha
 
 
@@ -406,7 +450,12 @@ def test_ambiguous_push_failure_is_accepted_only_when_exact_commit_landed(
 ) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
     _modify(repo)
-    runner = ScenarioRunner(repo, remote, state, fail_push_after_success=True)
+    runner = ScenarioRunner(
+        repo,
+        remote,
+        state,
+        fail_push_after_success=True,
+    )
 
     result = execute_submit(
         pr_value="1",
@@ -415,15 +464,27 @@ def test_ambiguous_push_failure_is_accepted_only_when_exact_commit_landed(
         runner=runner,
     )
 
-    remote_head = _git(repo, "ls-remote", str(remote), "refs/heads/feature").split()[0]
+    remote_head = _git(
+        repo,
+        "ls-remote",
+        str(remote),
+        "refs/heads/feature",
+    ).split()[0]
     assert remote_head == result.commit_sha
     assert result.resulting_head_sha == result.commit_sha
 
 
 def test_submit_rejects_gitlink_change(tmp_path: Path) -> None:
     repo, remote, state, _base, head = _fixture_repo(tmp_path)
-    object_sha = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "update-index", "--add", "--cacheinfo", "160000", object_sha, "vendor/sub")
+    subrepo = repo / "vendor" / "sub"
+    subrepo.mkdir(parents=True)
+    _git(subrepo, "init", "-q")
+    _git(subrepo, "config", "user.name", "Nested")
+    _git(subrepo, "config", "user.email", "nested@example.invalid")
+    (subrepo / "nested.txt").write_text("nested\n", encoding="utf-8")
+    _git(subrepo, "add", "nested.txt")
+    _git(subrepo, "commit", "-m", "nested")
+    _git(repo, "add", "vendor/sub")
 
     with pytest.raises(ReviewLoopError) as captured:
         execute_submit(
