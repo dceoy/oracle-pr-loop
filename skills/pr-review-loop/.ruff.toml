@@ -1,27 +1,41 @@
 extend = "../../pyproject.toml"
+src = ["."]
 
 # The canonical skill inherits the repository-wide lint policy. Keep narrowly
 # scoped exceptions local to the refactored command boundary instead of
 # weakening root-level checks for unrelated code.
 [lint.extend-per-file-ignores]
-"scripts/github.py" = ["DOC201", "DOC501", "DOC502", "FURB188"]
-"scripts/submit.py" = ["DOC201", "DOC501", "DOC502", "E501"]
-"tests/**/*.py" = [
-  "D102",
-  "D103",
-  "D107",
-  "DOC201",
-  "DOC501",
-  "PLC2701",
-  "PLR2004",
-  "S101",
-  "S105",
-  "S106",
-  "SLF001",
-  "INP001",
-  "PLC1901",
+"scripts/github.py" = [
+  "docstring-missing-returns",
+  "docstring-missing-exception",
+  "docstring-extraneous-exception",
+  "slice-to-remove-prefix-or-suffix",
 ]
-"tests/test_cli.py" = ["E501"]
-"tests/test_git_safety_regressions.py" = ["E501", "TCH003"]
-"tests/test_github.py" = ["FBT003"]
-"tests/test_process.py" = ["E501"]
+"scripts/submit.py" = [
+  "docstring-missing-returns",
+  "docstring-missing-exception",
+  "docstring-extraneous-exception",
+  "line-too-long",
+]
+"tests/**/*.py" = [
+  "undocumented-public-method",
+  "undocumented-public-function",
+  "undocumented-public-init",
+  "docstring-missing-returns",
+  "docstring-missing-exception",
+  "import-private-name",
+  "magic-value-comparison",
+  "assert",
+  "hardcoded-password-string",
+  "hardcoded-password-func-arg",
+  "private-member-access",
+  "implicit-namespace-package",
+  "compare-to-empty-string",
+]
+"tests/test_cli.py" = ["line-too-long"]
+"tests/test_git_safety_regressions.py" = [
+  "line-too-long",
+  "typing-only-standard-library-import",
+]
+"tests/test_github.py" = ["boolean-positional-value-in-call"]
+"tests/test_process.py" = ["line-too-long"]
