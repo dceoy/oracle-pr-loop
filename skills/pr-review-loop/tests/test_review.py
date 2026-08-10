@@ -15,6 +15,7 @@ from scripts.models import (
     JsonObject,
     OracleReview,
     PullRequest,
+    PullRequestIdentity,
     ReviewComment,
     ReviewLoopError,
 )
@@ -58,6 +59,22 @@ def approve_review(pull_request: PullRequest) -> OracleReview:
     )
 
 
+def identity_snapshot(pull_request: PullRequest) -> PullRequestIdentity:
+    """Return the reduced PR identity shape used by review race checks."""
+    return PullRequestIdentity(
+        repository=pull_request.repository,
+        number=pull_request.number,
+        url=pull_request.url,
+        state=pull_request.state,
+        is_draft=pull_request.is_draft,
+        base_ref=pull_request.base_ref,
+        base_sha=pull_request.base_sha,
+        head_ref=pull_request.head_ref,
+        head_sha=pull_request.head_sha,
+        head_repository=pull_request.head_repository,
+    )
+
+
 class FakeGitHubClient:
     """A deterministic PR/review transport for orchestration race tests."""
 
@@ -92,10 +109,10 @@ class FakeGitHubClient:
         self.full_snapshot_calls += 1
         return self._snapshots.pop(0)
 
-    def identity_snapshot(self) -> PullRequest:
+    def identity_snapshot(self) -> PullRequestIdentity:
         """Return the next deterministic identity-only state."""
         self.identity_snapshot_calls += 1
-        return self._snapshots.pop(0)
+        return identity_snapshot(self._snapshots.pop(0))
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         """Treat fake SHAs as available commit objects."""
@@ -473,8 +490,8 @@ class _StableGitHubClient:
     def snapshot(self) -> PullRequest:  # ruff: ignore[no-self-use] -- test fake
         return sample_pr()
 
-    def identity_snapshot(self) -> PullRequest:  # ruff: ignore[no-self-use] -- test fake
-        return sample_pr()
+    def identity_snapshot(self) -> PullRequestIdentity:  # ruff: ignore[no-self-use] -- test fake
+        return identity_snapshot(sample_pr())
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
         pass
@@ -523,11 +540,11 @@ class _InterruptingGitHubClient(_StableGitHubClient):
         self.identity_count = 0
         type(self).instance = self
 
-    def identity_snapshot(self) -> PullRequest:
+    def identity_snapshot(self) -> PullRequestIdentity:
         self.identity_count += 1
         if self.identity_count == 2:
             raise KeyboardInterrupt
-        return sample_pr()
+        return identity_snapshot(sample_pr())
 
 
 def test_post_write_snapshot_interrupt_dismisses_review(
@@ -961,13 +978,15 @@ def test_head_change_during_anchor_discovery_blocks_publication(
             return sample_pr()
 
         @override
-        def identity_snapshot(self) -> PullRequest:
+        def identity_snapshot(self) -> PullRequestIdentity:
             """Expose the drift to the identity-only freshness read.
 
             Returns:
                 The current simulated PR identity.
             """
-            return sample_pr(head_sha=SHA_C if self._drifted else SHA_B)
+            return identity_snapshot(
+                sample_pr(head_sha=SHA_C if self._drifted else SHA_B)
+            )
 
         def diff_anchors(
             self,
