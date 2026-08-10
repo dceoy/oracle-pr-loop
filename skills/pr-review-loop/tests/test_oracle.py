@@ -13,7 +13,6 @@ from scripts.models import (
     EXIT_PRECONDITION,
     BlockingFinding,
     FindingLocation,
-    IssueSnapshot,
     JsonObject,
     JsonValue,
     OracleReview,
@@ -37,46 +36,12 @@ from scripts.oracle import (
 )
 from scripts.process import CommandError, CommandResult, CommandRunner
 
+from .support import SHA_A, SHA_B, sample_issue, sample_pr
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from scripts.github import GitHubClient, IssueClient
-
-SHA_A = "a" * 40
-SHA_B = "b" * 40
-
-
-def sample_pr() -> PullRequest:
-    return PullRequest(
-        repository="owner/repository",
-        number=21,
-        url="https://github.com/owner/repository/pull/21",
-        title="Title",
-        body="Body",
-        author="author",
-        state="OPEN",
-        is_draft=False,
-        base_ref="main",
-        base_sha=SHA_A,
-        head_ref="feature",
-        head_sha=SHA_B,
-        head_repository="owner/repository",
-        changed_paths=("file.py",),
-    )
-
-
-def sample_issue() -> IssueSnapshot:
-    return IssueSnapshot(
-        repository="owner/repository",
-        number=7,
-        url="https://github.com/owner/repository/issues/7",
-        title="Issue",
-        body="Body",
-        author="author",
-        state="OPEN",
-        updated_at="2026-01-01T00:00:00Z",
-        comments=(),
-    )
 
 
 def review_payload(**overrides: JsonValue) -> JsonObject:

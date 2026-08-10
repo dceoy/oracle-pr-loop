@@ -48,18 +48,9 @@ GITLINK_STATUSES = frozenset({b"A", b"C", b"D", b"M", b"R", b"T"})
 class _RawDiffRecord:
     """The validated metadata needed by submit's raw-diff callers."""
 
-    status: bytes
     old_mode: bytes
     new_mode: bytes
     new_object_id: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _RemoteRef:
-    """One validated remote ref record."""
-
-    sha: str
-    ref: str
 
 
 def _raw_status(
@@ -426,7 +417,6 @@ def _parse_raw_diff(
         new_object_id = _raw_object_id(parts[3])
 
         status = _raw_status(parts[4], accepted_statuses=accepted_statuses)
-
         path_count = RAW_RENAME_PATH_COUNT if status in RAW_RENAME_STATUSES else 1
         if index + path_count > len(fields) or any(
             not path for path in fields[index : index + path_count]
@@ -435,7 +425,6 @@ def _parse_raw_diff(
         index += path_count
         records.append(
             _RawDiffRecord(
-                status=status,
                 old_mode=old_mode,
                 new_mode=new_mode,
                 new_object_id=new_object_id,
@@ -582,21 +571,21 @@ def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
     output = _git_text(
         runner, repo_dir, ["ls-remote", "--refs", "origin", f"refs/heads/{ref}"]
     )
-    record = _parse_remote_ref(output, f"refs/heads/{ref}")
-    if record is None:
+    sha = _parse_remote_ref(output, f"refs/heads/{ref}")
+    if sha is None:
         raise ReviewLoopError(
             EXIT_GITHUB,
             "remote_ref",
             "remote pull-request branch was missing or malformed",
         )
-    return record.sha
+    return sha
 
 
-def _parse_remote_ref(output: str, expected_ref: str) -> _RemoteRef | None:
+def _parse_remote_ref(output: str, expected_ref: str) -> str | None:
     """Parse exactly one validated ``git ls-remote --refs`` record.
 
     Returns:
-        The validated remote ref, or None when the output is invalid.
+        The validated remote SHA, or None when the output is invalid.
     """
     lines = output.splitlines()
     if len(lines) != 1:
@@ -606,7 +595,7 @@ def _parse_remote_ref(output: str, expected_ref: str) -> _RemoteRef | None:
         return None
     if SHA_RE.fullmatch(fields[0]) is None:
         return None
-    return _RemoteRef(sha=fields[0], ref=fields[1])
+    return fields[0]
 
 
 def _push_env(runner: CommandRunner) -> dict[str, str]:
@@ -654,12 +643,12 @@ def _remote_matches(
         output = result.stdout.decode("utf-8", "strict")
     except (CommandError, UnicodeError):
         return None
-    record = _parse_remote_ref(output, ref)
-    if record is None:
+    sha = _parse_remote_ref(output, ref)
+    if sha is None:
         return None
-    if record.sha == commit_sha:
+    if sha == commit_sha:
         return True
-    if record.sha == expected_head:
+    if sha == expected_head:
         return None
     return False
 

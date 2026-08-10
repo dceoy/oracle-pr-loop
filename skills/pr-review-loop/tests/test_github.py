@@ -34,35 +34,12 @@ from scripts.models import (
 )
 from scripts.process import CommandRunner
 
+from .support import SHA_A, SHA_B, SHA_C, sample_pr
+
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
-SHA_A = "a" * 40
-SHA_B = "b" * 40
-SHA_C = "c" * 40
 NULL_SHA = "0" * 40
-
-
-def sample_pr(
-    *,
-    changed_paths: tuple[str, ...] = ("file.py",),
-) -> PullRequest:
-    return PullRequest(
-        repository="owner/repository",
-        number=21,
-        url="https://github.com/owner/repository/pull/21",
-        title="Title",
-        body="Body",
-        author="author",
-        state="OPEN",
-        is_draft=False,
-        base_ref="main",
-        base_sha=SHA_A,
-        head_ref="feature",
-        head_sha=SHA_B,
-        head_repository="owner/repository",
-        changed_paths=changed_paths,
-    )
 
 
 def patch_for(

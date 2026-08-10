@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise Git directly
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
@@ -21,49 +19,12 @@ from scripts.models import (
 )
 from scripts.process import CommandRunner
 
+from .support import SHA_A, SHA_B, commit_all, git, init_git_repo, sample_issue
+
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pytest_mock import MockerFixture
-
-SHA_A = "a" * 40
-SHA_B = "b" * 40
-
-
-def _git(git: str, args: list[str], *, cwd: Path) -> str:
-    """Run one test-controlled Git command and return stripped stdout.
-
-    Returns:
-        The command's stripped standard output.
-    """
-    result = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true] -- fixed test argv
-        [git, *args],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return result.stdout.strip()
-
-
-def sample_issue(
-    *,
-    number: int = 7,
-    updated_at: str = "2026-01-01T00:00:00Z",
-    comments: tuple[JsonObject, ...] = (),
-) -> IssueSnapshot:
-    """Return one valid open Issue snapshot."""
-    return IssueSnapshot(
-        repository="owner/repository",
-        number=number,
-        url=f"https://github.com/owner/repository/issues/{number}",
-        title="Title",
-        body="Body",
-        author="author",
-        state="OPEN",
-        updated_at=updated_at,
-        comments=comments,
-    )
 
 
 class FakeIssueClient:
@@ -404,21 +365,11 @@ def test_execute_bootstrap_rejects_dirty_workspace(
     assert captured.value.category == "workspace"
 
 
-def _init_repo(git: str, repo: Path) -> None:
-    """Initialize a test-controlled Git repository with an empty base commit."""
-    repo.mkdir()
-    _git(git, ["init", "-q"], cwd=repo)
-    _git(git, ["config", "user.email", "test@example.com"], cwd=repo)
-    _git(git, ["config", "user.name", "Test"], cwd=repo)
-    _git(git, ["commit", "-q", "--allow-empty", "-m", "base"], cwd=repo)
-
-
 def test_worktree_is_dirty_checks_the_whole_tree(tmp_path: Path) -> None:
     """The workspace check has no pathspec exclusions."""
-    git = shutil.which("git")
-    assert git is not None
     repo = tmp_path / "repo"
-    _init_repo(git, repo)
+    init_git_repo(repo)
+    commit_all(repo, "base", allow_empty=True)
     client = IssueClient(CommandRunner(), repo)
 
     assert bootstrap_module._worktree_is_dirty(client) is False
@@ -428,11 +379,10 @@ def test_worktree_is_dirty_checks_the_whole_tree(tmp_path: Path) -> None:
 
 def test_worktree_is_dirty_honors_explicit_untracked_files(tmp_path: Path) -> None:
     """A repo-local status.showUntrackedFiles setting cannot hide files."""
-    git = shutil.which("git")
-    assert git is not None
     repo = tmp_path / "repo"
-    _init_repo(git, repo)
-    _git(git, ["config", "status.showUntrackedFiles", "no"], cwd=repo)
+    init_git_repo(repo)
+    commit_all(repo, "base", allow_empty=True)
+    git(repo, "config", "status.showUntrackedFiles", "no")
     client = IssueClient(CommandRunner(), repo)
 
     (repo / "untracked-file.py").write_text("x\n")
