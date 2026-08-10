@@ -28,6 +28,7 @@ from scripts.github import (
 from scripts.models import (
     EXIT_GITHUB,
     EXIT_PRECONDITION,
+    JsonValue,
     PullRequest,
     ReviewLoopError,
 )
@@ -446,8 +447,8 @@ class FrozenDiffClient(GitHubClient):
         self.binary_calls: list[str] = []
 
     @override
-    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:
-        del max_output
+    def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:
+        del pull_request, max_output
         return self._patch
 
     @override
@@ -546,7 +547,7 @@ def test_same_snapshot_depends_only_on_frozen_base_and_head() -> None:
 
 
 def test_bounded_comments_keeps_newest_comments_and_marks_oversized() -> None:
-    comments = [
+    comments: list[JsonValue] = [
         {
             "author": {"login": f"user-{index}"},
             "body": "x" * (25_000 if index == 31 else 1),

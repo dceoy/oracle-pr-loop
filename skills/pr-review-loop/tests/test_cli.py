@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from scripts import cli
@@ -15,6 +15,7 @@ from scripts.models import (
 )
 
 if TYPE_CHECKING:
+    import argparse
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -159,16 +160,21 @@ def test_root_help_is_issue_and_pr_oriented() -> None:
 
 def test_subcommand_help_describes_bootstrap_issue_and_pr_commands() -> None:
     root = cli.parser()
-    subparsers = next(
-        action
-        for action in root._actions
-        if hasattr(action, "choices") and action.choices
+    subparsers = cast(
+        "argparse._SubParsersAction[argparse.ArgumentParser]",
+        next(action for action in root._actions if action.dest == "command"),
     )
     choices = subparsers.choices
+    bootstrap_description = choices["bootstrap"].description
+    review_description = choices["review"].description
+    submit_description = choices["submit"].description
 
-    assert "GitHub Issue" in choices["bootstrap"].description
-    assert "pull-request snapshot" in choices["review"].description
-    assert "GitHub pull request" in choices["submit"].description
+    assert bootstrap_description is not None
+    assert review_description is not None
+    assert submit_description is not None
+    assert "GitHub Issue" in bootstrap_description
+    assert "pull-request snapshot" in review_description
+    assert "GitHub pull request" in submit_description
 
 
 def test_bootstrap_success_schema_is_stable(

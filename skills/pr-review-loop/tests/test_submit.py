@@ -121,7 +121,7 @@ class ScenarioRunner(CommandRunner):
         *,
         cwd: Path,
         env: Mapping[str, str],
-        timeout: int = 120,
+        timeout: float = 120,
         input_text: str | None = None,
         check: bool = True,
         max_output: int = 24 * 1024 * 1024,

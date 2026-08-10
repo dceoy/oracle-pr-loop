@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 import pytest
 from scripts.artifacts import TemporaryFileWriter
@@ -13,6 +13,7 @@ from scripts.models import (
     EXIT_PRECONDITION,
     IssueSnapshot,
     JsonObject,
+    JsonValue,
     OracleReview,
     PullRequest,
     ReviewLoopError,
@@ -36,6 +37,8 @@ from scripts.process import CommandError, CommandResult, CommandRunner
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from scripts.github import GitHubClient, IssueClient
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -74,7 +77,7 @@ def sample_issue() -> IssueSnapshot:
     )
 
 
-def review_payload(**overrides: object) -> JsonObject:
+def review_payload(**overrides: JsonValue) -> JsonObject:
     value: JsonObject = {
         "schema_version": 1,
         "repository": "owner/repository",
@@ -91,7 +94,7 @@ def review_payload(**overrides: object) -> JsonObject:
     return value
 
 
-def bootstrap_payload(**overrides: object) -> JsonObject:
+def bootstrap_payload(**overrides: JsonValue) -> JsonObject:
     value: JsonObject = {
         "schema_version": 1,
         "repository": "owner/repository",
@@ -327,7 +330,7 @@ def test_review_bundle_contains_snapshot_patch_manifest_and_text_evidence(
 
     attachments = build_review_bundle(
         runner,
-        FakeReviewGitHub(),
+        cast("GitHubClient", FakeReviewGitHub()),
         writer,
         sample_pr(),
     )
@@ -359,7 +362,7 @@ def test_review_bundle_rejects_known_credentials_in_patch(tmp_path: Path) -> Non
     with pytest.raises(ReviewLoopError) as captured:
         build_review_bundle(
             runner,
-            SecretPatchGitHub(),
+            cast("GitHubClient", SecretPatchGitHub()),
             writer,
             sample_pr(),
         )
@@ -374,7 +377,7 @@ def test_bootstrap_bundle_only_attaches_instruction_files(tmp_path: Path) -> Non
 
     attachments = build_bootstrap_bundle(
         runner,
-        FakeIssueClient(),
+        cast("IssueClient", FakeIssueClient()),
         writer,
         sample_issue(),
         SHA_A,
@@ -410,7 +413,7 @@ class RecordingOracleRunner(CommandRunner):
         *,
         cwd: Path,
         env: Mapping[str, str],
-        timeout: int = 120,
+        timeout: float = 120,
         input_text: str | None = None,
         check: bool = True,
         max_output: int = 24 * 1024 * 1024,
