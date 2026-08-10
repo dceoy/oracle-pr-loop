@@ -73,10 +73,16 @@ def sample_issue(
     )
 
 
-GIT = shutil.which("git")
-if GIT is None:
-    message = "git is required for integration tests"
-    raise RuntimeError(message)
+def git_executable() -> str:
+    """Return the Git executable required by real-Git tests."""
+    executable = shutil.which("git")
+    if executable is None:
+        message = "git is required for integration tests"
+        raise RuntimeError(message)
+    return executable
+
+
+GIT = git_executable()
 
 
 def run_process(
