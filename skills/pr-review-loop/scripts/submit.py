@@ -6,16 +6,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .github import (
-    SHA_RE,
-    GitHubClient,
-)
+from .github import SHA_RE, GitHubClient
 from .models import (
     EXIT_GITHUB,
     EXIT_PRECONDITION,
     EXIT_RACE,
-    LooprError,
     PullRequestIdentity,
+    ReviewLoopError,
     SubmitResult,
 )
 from .process import CommandError, CommandRunner
@@ -45,24 +42,10 @@ def execute_submit(
     repo_dir: Path,
     runner: CommandRunner | None = None,
 ) -> SubmitResult:
-    """Validate, commit, and lease-protect the complete workspace patch.
-
-    The flow is linear and locally auditable: resolve and validate the
-    repository/PR identity; validate the local workspace and staged
-    candidate; create exactly one child commit; revalidate the PR and
-    remote lease; push the exact commit with an explicit lease; confirm the
-    resulting GitHub PR head.
-
-    Returns:
-        The stable submit command result.
-
-    Raises:
-        LooprError: The workspace, patch, remote, or PR lease violated a
-            fail-closed precondition.
-    """
+    """Validate, commit, and lease-protect the complete workspace patch."""
     command_runner = runner or CommandRunner()
     if SHA_RE.fullmatch(expected_head) is None:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "sha",
             "--expected-head must be a full lowercase commit SHA",
@@ -72,18 +55,14 @@ def execute_submit(
     github.initialize_for_submit(pr_value)
     initial = github.identity_snapshot()
     if initial.head_sha != expected_head:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_RACE,
             "stale_head",
             "remote pull request head does not match --expected-head",
         )
 
     _validate_local_workspace(command_runner, github.repo_dir, expected_head)
-    _require_same_snapshot(
-        initial,
-        github.identity_snapshot(),
-        phase="before staging",
-    )
+    _require_same_snapshot(initial, github.identity_snapshot(), phase="before staging")
 
     add_args = ["add", "--all", "--", "."]
     if not _legacy_artifacts_already_ignored(command_runner, github.repo_dir):
@@ -99,23 +78,17 @@ def execute_submit(
         max_output=MAX_PATCH_BYTES,
     )
     if not staged_patch:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "empty_patch",
-            "staged patch is empty",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "empty_patch", "staged patch is empty"
         )
     if command_runner.contains_secret(staged_patch):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "credentials",
             "staged patch metadata contains a known credential value",
         )
     _require_no_known_credentials_in_staged_blobs(command_runner, github)
-    _require_same_snapshot(
-        initial,
-        github.identity_snapshot(),
-        phase="before commit",
-    )
+    _require_same_snapshot(initial, github.identity_snapshot(), phase="before commit")
 
     _require_no_merge_state(command_runner, github.repo_dir)
     _git(
@@ -135,17 +108,11 @@ def execute_submit(
     )
     commit_sha = _require_single_child_commit(github, expected_head)
 
-    _require_same_snapshot(
-        initial,
-        github.identity_snapshot(),
-        phase="before push",
-    )
+    _require_same_snapshot(initial, github.identity_snapshot(), phase="before push")
     remote_head = _remote_head(command_runner, github.repo_dir, initial.head_ref)
     if remote_head != expected_head:
-        raise LooprError(
-            EXIT_RACE,
-            "lease_lost",
-            "remote branch head changed before push",
+        raise ReviewLoopError(
+            EXIT_RACE, "lease_lost", "remote branch head changed before push"
         )
     _reject_gitlink_changes(github, commit_sha)
 
@@ -188,19 +155,8 @@ def execute_submit(
     )
 
 
-def _legacy_artifacts_already_ignored(
-    runner: CommandRunner,
-    repo_dir: Path,
-) -> bool:
-    """Detect whether an ignore rule already covers the legacy artifacts path.
-
-    Returns:
-        Whether `.pr-review-loop` is already excluded by an existing Git
-        ignore rule.
-
-    Raises:
-        LooprError: Git could not evaluate the ignore rules.
-    """
+def _legacy_artifacts_already_ignored(runner: CommandRunner, repo_dir: Path) -> bool:
+    """Return whether an ignore rule already covers `.pr-review-loop`."""
     try:
         result = runner.run(
             ["git", "check-ignore", "--quiet", "--", LEGACY_ARTIFACTS_PATH],
@@ -209,9 +165,9 @@ def _legacy_artifacts_already_ignored(
             check=False,
         )
     except CommandError as exc:
-        raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+        raise ReviewLoopError(EXIT_PRECONDITION, "git", str(exc)) from exc
     if result.returncode not in {0, 1}:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "git",
             "could not evaluate ignore rules for .pr-review-loop",
@@ -219,16 +175,8 @@ def _legacy_artifacts_already_ignored(
     return result.returncode == 0
 
 
-def _reject_staged_legacy_artifacts(
-    runner: CommandRunner,
-    repo_dir: Path,
-) -> None:
-    """Fail closed if the reserved legacy `.pr-review-loop` path is indexed.
-
-    Raises:
-        LooprError: A `.pr-review-loop` entry is staged or tracked, whether
-            pre-staged before submit ran or already committed to Git.
-    """
+def _reject_staged_legacy_artifacts(runner: CommandRunner, repo_dir: Path) -> None:
+    """Reject reserved `.pr-review-loop` runtime content if indexed."""
     staged = _git(
         runner,
         repo_dir,
@@ -240,7 +188,7 @@ def _reject_staged_legacy_artifacts(
         ["ls-files", "--cached", "-z", "--", LEGACY_ARTIFACTS_PATH],
     )
     if staged or tracked:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "legacy_artifacts",
             "workspace contains reserved .pr-review-loop runtime content",
@@ -248,27 +196,19 @@ def _reject_staged_legacy_artifacts(
 
 
 def _validate_local_workspace(
-    runner: CommandRunner,
-    repo_dir: Path,
-    expected_head: str,
+    runner: CommandRunner, repo_dir: Path, expected_head: str
 ) -> None:
     head = _git_text(runner, repo_dir, ["rev-parse", "HEAD"]).strip()
     if head != expected_head:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "stale_workspace",
             "local HEAD must equal --expected-head",
         )
-    _git(
-        runner,
-        repo_dir,
-        ["cat-file", "-e", f"{expected_head}^{{commit}}"],
-    )
+    _git(runner, repo_dir, ["cat-file", "-e", f"{expected_head}^{{commit}}"])
     if _git(runner, repo_dir, ["ls-files", "-u", "-z", "--"]):
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "conflict",
-            "workspace contains unresolved conflicts",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "conflict", "workspace contains unresolved conflicts"
         )
     status = _git(
         runner,
@@ -276,7 +216,7 @@ def _validate_local_workspace(
         ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )
     if not status:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "empty_patch",
             "workspace has no implementation changes",
@@ -285,11 +225,7 @@ def _validate_local_workspace(
 
 
 def _require_no_merge_state(runner: CommandRunner, repo_dir: Path) -> None:
-    """Reject a resolved or unresolved in-progress merge before commit.
-
-    Raises:
-        LooprError: The merge state could not be read, or a merge is in progress.
-    """
+    """Reject a resolved or unresolved in-progress merge before commit."""
     try:
         result = runner.run(
             ["git", "rev-parse", "--git-path", "MERGE_HEAD"],
@@ -299,47 +235,31 @@ def _require_no_merge_state(runner: CommandRunner, repo_dir: Path) -> None:
         )
         value = result.stdout.decode("utf-8", "strict").strip()
     except (CommandError, UnicodeError) as exc:
-        raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+        raise ReviewLoopError(EXIT_PRECONDITION, "git", str(exc)) from exc
     if not value:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "git",
-            "Git returned an empty MERGE_HEAD path",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "git", "Git returned an empty MERGE_HEAD path"
         )
     merge_head = Path(value)
     if not merge_head.is_absolute():
         merge_head = repo_dir / merge_head
     if merge_head.is_file():
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "conflict",
-            "workspace contains an in-progress merge",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "conflict", "workspace contains an in-progress merge"
         )
 
 
-def _require_single_child_commit(
-    github: GitHubClient,
-    expected_head: str,
-) -> str:
-    """Require the new HEAD to be one hook-free commit on expected_head.
-
-    Returns:
-        The created commit's SHA.
-
-    Raises:
-        LooprError: The created commit does not have exactly one parent, or
-            its parent is not expected_head.
-    """
+def _require_single_child_commit(github: GitHubClient, expected_head: str) -> str:
+    """Require the new HEAD to be one hook-free commit on expected_head."""
     fields = github.git_text(
-        ["rev-list", "--parents", "-n", "1", "HEAD"],
-        max_output=MAX_REMOTE_OUTPUT,
+        ["rev-list", "--parents", "-n", "1", "HEAD"], max_output=MAX_REMOTE_OUTPUT
     ).split()
     if (
         len(fields) != COMMIT_PARENTS_FIELD_COUNT
         or SHA_RE.fullmatch(fields[0]) is None
         or fields[1] != expected_head
     ):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "commit",
             "created commit is not a single child of the expected head",
@@ -348,16 +268,9 @@ def _require_single_child_commit(
 
 
 def _require_no_known_credentials_in_staged_blobs(
-    runner: CommandRunner,
-    github: GitHubClient,
+    runner: CommandRunner, github: GitHubClient
 ) -> None:
-    """Scan bounded staged path metadata and blob contents for credentials.
-
-    Raises:
-        LooprError: Git returned malformed or oversized blob metadata, or
-            staged path metadata or a staged blob contains a known credential
-            value.
-    """
+    """Scan bounded staged path metadata and blob contents for credentials."""
     raw = _git(
         runner,
         github.repo_dir,
@@ -373,7 +286,7 @@ def _require_no_known_credentials_in_staged_blobs(
         max_output=MAX_PATCH_BYTES,
     )
     if runner.contains_secret(raw):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "credentials",
             "staged path metadata contains a known credential value",
@@ -381,46 +294,39 @@ def _require_no_known_credentials_in_staged_blobs(
     scanned_bytes = 0
     for object_id in _staged_object_ids(raw):
         object_type = github.git_text(
-            ["cat-file", "-t", object_id],
-            max_output=MAX_REMOTE_OUTPUT,
+            ["cat-file", "-t", object_id], max_output=MAX_REMOTE_OUTPUT
         ).strip()
         if object_type != "blob":
             continue
         size_text = github.git_text(
-            ["cat-file", "-s", object_id],
-            max_output=MAX_REMOTE_OUTPUT,
+            ["cat-file", "-s", object_id], max_output=MAX_REMOTE_OUTPUT
         ).strip()
         try:
             size = int(size_text)
         except ValueError as exc:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned an invalid staged blob size",
+            raise ReviewLoopError(
+                EXIT_PRECONDITION, "git", "Git returned an invalid staged blob size"
             ) from exc
         if (
             size < 0
             or size > MAX_STAGED_CONTENT_BYTES
             or scanned_bytes + size > MAX_STAGED_CONTENT_BYTES
         ):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "credentials",
                 "staged blob content exceeds the credential scan bound",
             )
         content = github.git_bytes(
-            ["cat-file", "blob", object_id],
-            max_output=max(1, size),
+            ["cat-file", "blob", object_id], max_output=max(1, size)
         )
         if len(content) != size:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned a truncated staged blob",
+            raise ReviewLoopError(
+                EXIT_PRECONDITION, "git", "Git returned a truncated staged blob"
             )
         scanned_bytes += size
         if runner.contains_secret(content):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "credentials",
                 "staged blob contains a known credential value",
@@ -428,50 +334,30 @@ def _require_no_known_credentials_in_staged_blobs(
 
 
 def _staged_object_id(parts: list[bytes]) -> str | None:
-    """Return the staged blob ID, excluding gitlinks from blob scanning.
-
-    Returns:
-        The staged blob's object ID, or None for a gitlink.
-
-    Raises:
-        LooprError: Git returned a non-ASCII or invalid staged object ID.
-    """
+    """Return the staged blob ID, excluding gitlinks from blob scanning."""
     if parts[1] == GITLINK_MODE:
         return None
     try:
         object_id = parts[3].decode("ascii", "strict")
     except UnicodeError as exc:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "git",
-            "Git returned a non-ASCII staged object ID",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "git", "Git returned a non-ASCII staged object ID"
         ) from exc
     if SHA_RE.fullmatch(object_id) is None:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "git",
-            "Git returned an invalid staged object ID",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "git", "Git returned an invalid staged object ID"
         )
     return object_id
 
 
 def _staged_object_ids(raw: bytes) -> list[str]:
-    """Parse new blob object IDs from NUL-delimited staged raw diff records.
-
-    Returns:
-        The distinct new (non-gitlink) staged blob object IDs.
-
-    Raises:
-        LooprError: `raw` is malformed staged diff metadata.
-    """
+    """Parse new blob object IDs from NUL-delimited staged raw diff records."""
     if not raw:
         return []
     fields = raw.split(b"\0")
     if fields[-1]:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "git",
-            "Git returned malformed staged diff metadata",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "git", "Git returned malformed staged diff metadata"
         )
     fields.pop()
     object_ids: list[str] = []
@@ -482,26 +368,20 @@ def _staged_object_ids(raw: bytes) -> list[str]:
         index += 1
         parts = header.split()
         if len(parts) != RAW_DIFF_HEADER_FIELD_COUNT or not parts[0].startswith(b":"):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned malformed staged diff metadata",
+            raise ReviewLoopError(
+                EXIT_PRECONDITION, "git", "Git returned malformed staged diff metadata"
             )
         status = parts[4][:1]
         path_count = 2 if status in {b"C", b"R"} else 1
         if status not in {b"A", b"C", b"M", b"R", b"T"}:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned an unexpected staged diff status",
+            raise ReviewLoopError(
+                EXIT_PRECONDITION, "git", "Git returned an unexpected staged diff status"
             )
         if index + path_count > len(fields) or any(
             not value for value in fields[index : index + path_count]
         ):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "git",
-                "Git returned malformed staged diff paths",
+            raise ReviewLoopError(
+                EXIT_PRECONDITION, "git", "Git returned malformed staged diff paths"
             )
         index += path_count
         object_id = _staged_object_id(parts)
@@ -511,15 +391,8 @@ def _staged_object_ids(raw: bytes) -> list[str]:
     return object_ids
 
 
-def _reject_gitlink_changes(
-    github: GitHubClient,
-    commit_sha: str,
-) -> None:
-    """Fail closed when the exact candidate commit changes a gitlink.
-
-    Raises:
-        LooprError: The commit's diff could not be read, or it changes a gitlink.
-    """
+def _reject_gitlink_changes(github: GitHubClient, commit_sha: str) -> None:
+    """Fail closed when the exact candidate commit changes a gitlink."""
     try:
         raw = github.git_bytes(
             [
@@ -536,30 +409,21 @@ def _reject_gitlink_changes(
             ],
             max_output=MAX_GITLINK_DIFF_BYTES,
         )
-    except LooprError as exc:
-        raise LooprError(EXIT_PRECONDITION, "submodule", str(exc)) from exc
+    except ReviewLoopError as exc:
+        raise ReviewLoopError(EXIT_PRECONDITION, "submodule", str(exc)) from exc
     if _contains_gitlink_change(raw):
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "submodule",
-            "submit does not support gitlink changes",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "submodule", "submit does not support gitlink changes"
         )
 
 
 def _contains_gitlink_change(raw: bytes) -> bool:
-    """Parse a bounded NUL-delimited raw diff and detect mode 160000.
-
-    Returns:
-        Whether the diff contains a gitlink (submodule) change.
-
-    Raises:
-        LooprError: raw is malformed commit diff metadata.
-    """
+    """Parse a bounded NUL-delimited raw diff and detect mode 160000."""
     if not raw:
         return False
     fields = raw.split(b"\0")
     if fields[-1]:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "submodule",
             "Git returned malformed commit diff metadata",
@@ -571,7 +435,7 @@ def _contains_gitlink_change(raw: bytes) -> bool:
         index += 1
         parts = header.split()
         if len(parts) != RAW_DIFF_HEADER_FIELD_COUNT or not parts[0].startswith(b":"):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "submodule",
                 "Git returned malformed commit diff metadata",
@@ -579,7 +443,7 @@ def _contains_gitlink_change(raw: bytes) -> bool:
         status = parts[4][:1]
         path_count = 2 if status in {b"C", b"R"} else 1
         if status not in {b"A", b"C", b"D", b"M", b"R", b"T"}:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "submodule",
                 "Git returned an unexpected commit diff status",
@@ -587,7 +451,7 @@ def _contains_gitlink_change(raw: bytes) -> bool:
         if index + path_count > len(fields) or any(
             not value for value in fields[index : index + path_count]
         ):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "submodule",
                 "Git returned malformed commit diff paths",
@@ -606,46 +470,29 @@ def _require_same_snapshot(
     *,
     phase: str,
 ) -> None:
-    """Reject a pre-write PR identity, SHA, or ref-name change.
-
-    Comparing ref names (not just SHAs) rejects a base or head ref
-    rebinding that leaves the observed SHAs unchanged.
-
-    Raises:
-        LooprError: current's base or head SHA or ref name differs from
-            initial's.
-    """
+    """Reject a pre-write PR identity, SHA, or ref-name change."""
     if (
         current.base_sha != initial.base_sha
         or current.head_sha != initial.head_sha
         or current.base_ref != initial.base_ref
         or current.head_ref != initial.head_ref
     ):
-        message = f"pull request base or head changed {phase}"
-        raise LooprError(EXIT_RACE, "stale_state", message)
+        raise ReviewLoopError(
+            EXIT_RACE,
+            "stale_state",
+            f"pull request base or head changed {phase}",
+        )
 
 
 def _poll_result(
-    github: GitHubClient,
-    initial: PullRequestIdentity,
-    commit_sha: str,
+    github: GitHubClient, initial: PullRequestIdentity, commit_sha: str
 ) -> PullRequestIdentity:
-    """Wait until GitHub exposes the pushed commit as the PR head.
-
-    Transient GitHub read failures are retried within the poll budget;
-    malformed or schema-invalid responses fail immediately.
-
-    Returns:
-        The snapshot containing commit_sha as the PR head.
-
-    Raises:
-        LooprError: The remote snapshot is malformed, stale, or unavailable.
-    """
+    """Wait until GitHub exposes the pushed commit as the PR head."""
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     while True:
         try:
             current = github.identity_snapshot(require_open=False)
-        except LooprError as exc:
+        except ReviewLoopError as exc:
             if exc.category != "github" or time.monotonic() >= deadline:
                 raise
             time.sleep(POLL_INTERVAL_SECONDS)
@@ -653,13 +500,11 @@ def _poll_result(
         if current.head_sha == commit_sha:
             return current
         if current.head_sha != initial.head_sha:
-            raise LooprError(
-                EXIT_RACE,
-                "stale_state",
-                "pull request head changed after push",
+            raise ReviewLoopError(
+                EXIT_RACE, "stale_state", "pull request head changed after push"
             )
         if time.monotonic() >= deadline:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_GITHUB,
                 "github",
                 "GitHub did not expose the pushed head before timeout",
@@ -669,27 +514,25 @@ def _poll_result(
 
 def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
     output = _git_text(
-        runner,
-        repo_dir,
-        ["ls-remote", "--refs", "origin", f"refs/heads/{ref}"],
+        runner, repo_dir, ["ls-remote", "--refs", "origin", f"refs/heads/{ref}"]
     )
     lines = output.splitlines()
     if len(lines) != 1:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_GITHUB,
             "remote_ref",
             "remote pull-request branch was missing or ambiguous",
         )
     fields = lines[0].split("\t")
     if len(fields) != REMOTE_REF_LINE_FIELD_COUNT or fields[1] != f"refs/heads/{ref}":
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_GITHUB,
             "remote_ref",
             "remote pull-request branch response was malformed",
         )
     sha = fields[0]
     if SHA_RE.fullmatch(sha) is None:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_GITHUB,
             "remote_ref",
             "remote pull-request branch returned an invalid SHA",
@@ -698,15 +541,7 @@ def _remote_head(runner: CommandRunner, repo_dir: Path, ref: str) -> str:
 
 
 def _push_env(runner: CommandRunner) -> dict[str, str]:
-    """Return the base environment with follow-tags disabled for one push.
-
-    A highest-precedence `push.followTags=false` override is appended so no
-    inherited or repository Git configuration can enable implicit tag
-    publication for the guarded push.
-
-    Returns:
-        The runner's base environment, extended with the override.
-    """
+    """Return the base environment with implicit follow-tags disabled."""
     env = runner.base_env()
     parameters = " ".join(
         value.strip()
@@ -734,14 +569,7 @@ def _remote_matches(
     commit_sha: str,
     expected_head: str,
 ) -> bool | None:
-    """Read one exact remote ref state during push-failure recovery.
-
-    Returns:
-        True if the remote already holds commit_sha, False if it holds
-        anything else, or None if the remote read was inconclusive (a
-        transient error, or the remote still shows the pre-push
-        expected_head, so the caller should retry).
-    """
+    """Read one exact remote ref state during push-failure recovery."""
     try:
         result = runner.run(
             ["git", "ls-remote", "--refs", remote, ref],
@@ -774,12 +602,7 @@ def _poll_remote_confirmation(
     commit_sha: str,
     expected_head: str,
 ) -> bool:
-    """Poll bounded remote reads for confirmation of an ambiguous push.
-
-    Returns:
-        Whether the remote already shows the exact commit created by this
-        submission (True), or does not within the poll budget (False).
-    """
+    """Poll bounded remote reads for confirmation of an ambiguous push."""
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     while True:
         matches = _remote_matches(
@@ -807,17 +630,7 @@ def _recover_from_push_failure(
     expected_head: str,
     push_error: CommandError,
 ) -> None:
-    """Recover from a failed or ambiguous push report.
-
-    Success is accepted only when the remote already holds the exact commit
-    created by this submission. A remote branch that still shows
-    expected_head re-raises the original push failure; any other remote
-    commit is a lease loss.
-
-    Raises:
-        LooprError: The push did not land, or the lease was lost to a
-            competing update.
-    """
+    """Recover only when the remote already holds this exact candidate commit."""
     if _poll_remote_confirmation(
         runner,
         repo_dir=repo_dir,
@@ -829,9 +642,9 @@ def _recover_from_push_failure(
         return
     current_remote = _remote_head(runner, repo_dir, head_ref)
     if current_remote == expected_head:
-        raise LooprError(EXIT_GITHUB, "push", str(push_error)) from push_error
+        raise ReviewLoopError(EXIT_GITHUB, "push", str(push_error)) from push_error
     if current_remote != commit_sha:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_RACE,
             "lease_lost",
             "remote head changed and the lease-protected push was rejected",
@@ -853,26 +666,16 @@ def _git(
             max_output=max_output,
         )
     except CommandError as exc:
-        raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
-    else:
-        return result.stdout
+        raise ReviewLoopError(EXIT_PRECONDITION, "git", str(exc)) from exc
+    return result.stdout
 
 
-def _git_text(
-    runner: CommandRunner,
-    repo_dir: Path,
-    args: Sequence[str],
-) -> str:
+def _git_text(runner: CommandRunner, repo_dir: Path, args: Sequence[str]) -> str:
     try:
         return _git(
-            runner,
-            repo_dir,
-            args,
-            max_output=MAX_REMOTE_OUTPUT,
+            runner, repo_dir, args, max_output=MAX_REMOTE_OUTPUT
         ).decode("utf-8", "strict")
     except UnicodeError as exc:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "git",
-            "Git returned non-UTF-8 output",
+        raise ReviewLoopError(
+            EXIT_PRECONDITION, "git", "Git returned non-UTF-8 output"
         ) from exc
