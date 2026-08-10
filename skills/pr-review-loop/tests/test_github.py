@@ -25,7 +25,12 @@ from scripts.github import (
     validate_path,
     validate_ref,
 )
-from scripts.models import EXIT_GITHUB, EXIT_PRECONDITION, JsonObject, PullRequest, ReviewLoopError
+from scripts.models import (
+    EXIT_GITHUB,
+    EXIT_PRECONDITION,
+    PullRequest,
+    ReviewLoopError,
+)
 from scripts.process import CommandRunner
 
 if TYPE_CHECKING:
@@ -37,7 +42,10 @@ SHA_C = "c" * 40
 NULL_SHA = "0" * 40
 
 
-def sample_pr(*, changed_paths: tuple[str, ...] = ("file.py",)) -> PullRequest:
+def sample_pr(
+    *,
+    changed_paths: tuple[str, ...] = ("file.py",),
+) -> PullRequest:
     return PullRequest(
         repository="owner/repository",
         number=21,
@@ -115,7 +123,10 @@ def test_resolve_target_accepts_positive_number_and_canonical_url() -> None:
         21,
         "https://github.com/owner/repository/pull/21",
     )
-    assert resolve_target("https://github.com/owner/repository/pull/21", None) == (
+    assert resolve_target(
+        "https://github.com/owner/repository/pull/21",
+        None,
+    ) == (
         "owner/repository",
         21,
         "https://github.com/owner/repository/pull/21",
@@ -129,7 +140,10 @@ def test_resolve_issue_target_is_issue_specific() -> None:
         "https://github.com/owner/repository/issues/7",
     )
     with pytest.raises(ReviewLoopError):
-        resolve_issue_target("https://github.com/owner/repository/pull/7", None)
+        resolve_issue_target(
+            "https://github.com/owner/repository/pull/7",
+            None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -144,7 +158,9 @@ def test_resolve_issue_target_is_issue_specific() -> None:
         "https://github.com/owner/repository/issues/21",
     ],
 )
-def test_resolve_target_rejects_noncanonical_or_nonpositive_values(value: str) -> None:
+def test_resolve_target_rejects_noncanonical_or_nonpositive_values(
+    value: str,
+) -> None:
     with pytest.raises(ReviewLoopError):
         resolve_target(value, "owner/repository")
 
@@ -158,7 +174,16 @@ def test_numeric_target_requires_origin() -> None:
 
 @pytest.mark.parametrize(
     "ref",
-    ["", "-danger", ".hidden", "feature..other", "feature@{1}", "a b", "a~b", "x.lock"],
+    [
+        "",
+        "-danger",
+        ".hidden",
+        "feature..other",
+        "feature@{1}",
+        "a b",
+        "a~b",
+        "x.lock",
+    ],
 )
 def test_validate_ref_rejects_unsafe_git_refs(ref: str) -> None:
     with pytest.raises(ReviewLoopError):
@@ -171,7 +196,15 @@ def test_validate_ref_accepts_normal_feature_ref() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["", "/absolute", "../escape", "dir/../escape", ".git/config", "dir/.GIT/x", "a\\b"],
+    [
+        "",
+        "/absolute",
+        "../escape",
+        "dir/../escape",
+        ".git/config",
+        "dir/.GIT/x",
+        "a\\b",
+    ],
 )
 def test_validate_path_rejects_unsafe_paths(path: str) -> None:
     with pytest.raises(ReviewLoopError):
@@ -183,11 +216,14 @@ def test_validate_path_returns_safe_posix_path() -> None:
 
 
 def test_json_object_and_required_field_helpers_are_strict() -> None:
-    value = parse_json_object('{"s":"x","i":7,"b":true,"o":{}}', category="schema")
+    value = parse_json_object(
+        '{"s":"x","i":7,"b":true,"o":{}}',
+        category="schema",
+    )
 
     assert require_string(value["s"], field="s") == "x"
     assert require_integer(value["i"], field="i") == 7
-    assert require_boolean(value["b"], field="b") is True
+    assert require_boolean(value["b"], field="b")
     assert require_object(value["o"], field="o") == {}
 
     with pytest.raises(ReviewLoopError):
@@ -206,11 +242,13 @@ def test_frozen_diff_analysis_derives_anchors_shas_and_section_metadata() -> Non
     patch = patch_for()
     analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
-    assert analysis.anchors == frozenset({
-        ("file.py", "RIGHT", 1),
-        ("file.py", "LEFT", 2),
-        ("file.py", "RIGHT", 2),
-    })
+    assert analysis.anchors == frozenset(
+        {
+            ("file.py", "RIGHT", 1),
+            ("file.py", "LEFT", 2),
+            ("file.py", "RIGHT", 2),
+        }
+    )
     file_analysis = analysis.files["file.py"]
     assert file_analysis.base_path == "file.py"
     assert file_analysis.old_sha == SHA_A
@@ -228,7 +266,7 @@ def test_frozen_diff_context_line_is_right_only() -> None:
 
 def test_frozen_diff_rename_maps_head_path_to_base_path() -> None:
     patch = (
-        f"diff --git a/old.py b/new.py\n"
+        "diff --git a/old.py b/new.py\n"
         "similarity index 80%\n"
         "rename from old.py\n"
         "rename to new.py\n"
@@ -243,10 +281,12 @@ def test_frozen_diff_rename_maps_head_path_to_base_path() -> None:
     analysis = analyze_frozen_diff(patch, frozenset({"new.py"}))
 
     assert analysis.files["new.py"].base_path == "old.py"
-    assert analysis.anchors == frozenset({
-        ("new.py", "LEFT", 1),
-        ("new.py", "RIGHT", 1),
-    })
+    assert analysis.anchors == frozenset(
+        {
+            ("new.py", "LEFT", 1),
+            ("new.py", "RIGHT", 1),
+        }
+    )
 
 
 def test_frozen_diff_deletion_keeps_base_path_for_left_anchor() -> None:
@@ -288,7 +328,7 @@ def test_frozen_diff_new_file_uses_null_old_sha_and_right_anchor() -> None:
     "patch",
     [
         patch_for(old_sha="a" * 7),
-        patch_for(hunk="@@ -1,1 +1,1 @@", body=" context\n-old\n+new\n"),
+        patch_for(hunk="@@ -1 +1 @@", body=" context\n-old\n+new\n"),
         patch_for(body="?malformed\n"),
         (
             f"diff --git a/file.py b/file.py\n"
@@ -299,7 +339,20 @@ def test_frozen_diff_new_file_uses_null_old_sha_and_right_anchor() -> None:
         ).encode(),
     ],
 )
-def test_malformed_or_unverifiable_diff_never_proves_anchors(patch: bytes) -> None:
+def test_malformed_or_unverifiable_diff_never_proves_anchors(
+    patch: bytes,
+) -> None:
+    analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
+
+    assert analysis.anchors == frozenset()
+
+
+def test_arbitrary_backslash_line_is_not_a_no_newline_marker() -> None:
+    patch = patch_for(
+        hunk="@@ -1 +1 @@",
+        body="-old\n\\ attacker-controlled marker\n+new\n",
+    )
+
     analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
     assert analysis.anchors == frozenset()
@@ -340,13 +393,26 @@ def test_aggregate_github_truncation_boundary_removes_all_anchors(
     assert "file.py" in analysis.files
 
 
-def test_per_file_github_truncation_boundary_removes_only_oversized_anchors(
+def test_per_file_truncation_boundary_removes_oversized_anchors(
     mocker: MockerFixture,
 ) -> None:
     first = patch_for(old_path="a.py", new_path="a.py")
-    second = patch_for(old_path="b.py", new_path="b.py", old_sha=SHA_B, new_sha=SHA_C)
-    mocker.patch.object(github_module, "MAX_GITHUB_FILE_DIFF_BYTES", len(first))
-    analysis = analyze_frozen_diff(first + second, frozenset({"a.py", "b.py"}))
+    second = patch_for(
+        old_path="b.py",
+        new_path="b.py",
+        old_sha=SHA_B,
+        new_sha=SHA_C,
+    )
+    mocker.patch.object(
+        github_module,
+        "MAX_GITHUB_FILE_DIFF_BYTES",
+        len(first),
+    )
+
+    analysis = analyze_frozen_diff(
+        first + second,
+        frozenset({"a.py", "b.py"}),
+    )
 
     assert not any(anchor[0] == "a.py" for anchor in analysis.anchors)
     assert "a.py" in analysis.files
@@ -354,16 +420,23 @@ def test_per_file_github_truncation_boundary_removes_only_oversized_anchors(
 
 
 def test_exact_no_newline_marker_does_not_consume_hunk_lines() -> None:
-    patch = patch_for(body="-old\n\\ No newline at end of file\n+new\n")
+    patch = patch_for(
+        hunk="@@ -1 +1 @@",
+        body="-old\n\\ No newline at end of file\n+new\n",
+    )
     analysis = analyze_frozen_diff(patch, frozenset({"file.py"}))
 
-    assert analysis.anchors == frozenset({
-        ("file.py", "LEFT", 1),
-        ("file.py", "RIGHT", 1),
-    })
+    assert analysis.anchors == frozenset(
+        {
+            ("file.py", "LEFT", 1),
+            ("file.py", "RIGHT", 1),
+        }
+    )
 
 
 class FrozenDiffClient(GitHubClient):
+    """Replace Git and attribute probes with deterministic frozen evidence."""
+
     def __init__(
         self,
         patch: bytes,
@@ -371,7 +444,7 @@ class FrozenDiffClient(GitHubClient):
         forced_paths: frozenset[str] = frozenset(),
         binary_shas: frozenset[str] = frozenset(),
     ) -> None:
-        super().__init__(CommandRunner({"PATH": "/usr/bin"}), Path("."))
+        super().__init__(CommandRunner({"PATH": "/usr/bin"}), Path())
         self._patch = patch
         self._forced_paths = forced_paths
         self._binary_shas = binary_shas
@@ -408,11 +481,13 @@ def test_diff_anchors_layers_attribute_and_binary_validation_after_parsing() -> 
 
     anchors = client.diff_anchors(pull_request)
 
-    assert anchors == frozenset({
-        ("file.py", "RIGHT", 1),
-        ("file.py", "LEFT", 2),
-        ("file.py", "RIGHT", 2),
-    })
+    assert anchors == frozenset(
+        {
+            ("file.py", "RIGHT", 1),
+            ("file.py", "LEFT", 2),
+            ("file.py", "RIGHT", 2),
+        }
+    )
     assert client.attr_calls == [
         (SHA_A, frozenset({"file.py"})),
         (SHA_B, frozenset({"file.py"})),
@@ -421,14 +496,20 @@ def test_diff_anchors_layers_attribute_and_binary_validation_after_parsing() -> 
 
 
 def test_diff_anchors_rejects_attribute_forced_text_path() -> None:
-    client = FrozenDiffClient(patch_for(), forced_paths=frozenset({"file.py"}))
+    client = FrozenDiffClient(
+        patch_for(),
+        forced_paths=frozenset({"file.py"}),
+    )
 
     assert client.diff_anchors(sample_pr()) == frozenset()
     assert client.binary_calls == []
 
 
 def test_diff_anchors_rejects_only_side_backed_by_binary_blob() -> None:
-    client = FrozenDiffClient(patch_for(), binary_shas=frozenset({SHA_A}))
+    client = FrozenDiffClient(
+        patch_for(),
+        binary_shas=frozenset({SHA_A}),
+    )
 
     anchors = client.diff_anchors(sample_pr())
 
@@ -447,7 +528,7 @@ def test_diff_anchors_cache_binary_probe_per_blob_sha() -> None:
 
 
 def test_review_event_preserves_self_review_comment_semantics() -> None:
-    client = GitHubClient(CommandRunner({"PATH": "/usr/bin"}), Path("."))
+    client = GitHubClient(CommandRunner({"PATH": "/usr/bin"}), Path())
     client.authenticated_login = "author"
 
     assert client.review_event(sample_pr(), "APPROVE") == "COMMENT"
@@ -457,7 +538,7 @@ def test_review_event_preserves_self_review_comment_semantics() -> None:
 
 
 def test_review_event_rejects_unknown_verdict() -> None:
-    client = GitHubClient(CommandRunner({"PATH": "/usr/bin"}), Path("."))
+    client = GitHubClient(CommandRunner({"PATH": "/usr/bin"}), Path())
 
     with pytest.raises(ReviewLoopError):
         client.review_event(sample_pr(), "COMMENT")
@@ -499,10 +580,13 @@ def test_bounded_comments_rejects_malformed_comment_entry() -> None:
 
 
 def test_parse_json_object_preserves_exact_json_values() -> None:
-    value = parse_json_object(json.dumps({"path": " a.py ", "number": 1}), category="x")
+    value = parse_json_object(
+        json.dumps({"path": " a.py ", "number": 1}),
+        category="x",
+    )
 
     assert value == {"path": " a.py ", "number": 1}
 
 
-def test_original_diff_limit_constant_remains_larger_than_minimal_patch() -> None:
-    assert MAX_GITHUB_DIFF_BYTES > len(patch_for())
+def test_original_diff_limit_constant_exceeds_minimal_patch() -> None:
+    assert len(patch_for()) < MAX_GITHUB_DIFF_BYTES
