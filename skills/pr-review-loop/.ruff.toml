@@ -1,9 +1,11 @@
 extend = "../../pyproject.toml"
-src = ["."]
 
 # The canonical skill inherits the repository-wide lint policy. Keep narrowly
 # scoped exceptions local to the refactored command boundary instead of
 # weakening root-level checks for unrelated code.
+[lint.isort]
+known-third-party = ["scripts"]
+
 [lint.extend-per-file-ignores]
 "scripts/github.py" = [
   "docstring-missing-returns",
