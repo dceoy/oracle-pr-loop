@@ -1,0 +1,124 @@
+name: Fix PR 67 pyright
+
+on:
+  push:
+    branches:
+      - agent/fix-pr-review-loop-63-66
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: true
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - name: Apply type fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}: {old!r}")
+              target.write_text(text.replace(old, new), encoding="utf-8")
+
+          cli = "skills/pr-review-loop/tests/test_cli.py"
+          replace_once(cli, "import json\nfrom typing import TYPE_CHECKING\n", "import argparse\nimport json\nfrom typing import TYPE_CHECKING, cast\n")
+          replace_once(
+              cli,
+              '''    subparsers = next(\n        action\n        for action in root._actions\n        if hasattr(action, "choices") and action.choices\n    )\n    choices = subparsers.choices\n\n    assert "GitHub Issue" in choices["bootstrap"].description\n    assert "pull-request snapshot" in choices["review"].description\n    assert "GitHub pull request" in choices["submit"].description\n''',
+              '''    choices = cast(\n        "dict[str, argparse.ArgumentParser]",\n        next(\n            action.choices\n            for action in root._actions\n            if isinstance(action, argparse._SubParsersAction)\n        ),\n    )\n    bootstrap_description = choices["bootstrap"].description\n    review_description = choices["review"].description\n    submit_description = choices["submit"].description\n\n    assert bootstrap_description is not None\n    assert review_description is not None\n    assert submit_description is not None\n    assert "GitHub Issue" in bootstrap_description\n    assert "pull-request snapshot" in review_description\n    assert "GitHub pull request" in submit_description\n''',
+          )
+
+          github = "skills/pr-review-loop/tests/test_github.py"
+          replace_once(
+              github,
+              "    EXIT_PRECONDITION,\n    PullRequest,\n",
+              "    EXIT_PRECONDITION,\n    JsonValue,\n    PullRequest,\n",
+          )
+          replace_once(
+              github,
+              "    def patch(self, _pull_request: PullRequest, *, max_output: int) -> bytes:\n        del max_output\n",
+              "    def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:\n        del pull_request, max_output\n",
+          )
+          replace_once(github, "    comments = [\n", "    comments: list[JsonValue] = [\n")
+
+          oracle = "skills/pr-review-loop/tests/test_oracle.py"
+          replace_once(
+              oracle,
+              "from typing import TYPE_CHECKING, override\n",
+              "from typing import TYPE_CHECKING, cast, override\n",
+          )
+          replace_once(
+              oracle,
+              "    JsonObject,\n    OracleReview,\n",
+              "    JsonObject,\n    JsonValue,\n    OracleReview,\n",
+          )
+          replace_once(
+              oracle,
+              "if TYPE_CHECKING:\n    from collections.abc import Mapping, Sequence\n",
+              "if TYPE_CHECKING:\n    from collections.abc import Mapping, Sequence\n\n    from scripts.github import GitHubClient, IssueClient\n",
+          )
+          replace_once(
+              oracle,
+              "def review_payload(**overrides: object) -> JsonObject:\n",
+              "def review_payload(**overrides: JsonValue) -> JsonObject:\n",
+          )
+          replace_once(
+              oracle,
+              "def bootstrap_payload(**overrides: object) -> JsonObject:\n",
+              "def bootstrap_payload(**overrides: JsonValue) -> JsonObject:\n",
+          )
+          replace_once(
+              oracle,
+              "        FakeReviewGitHub(),\n",
+              "        cast(\"GitHubClient\", FakeReviewGitHub()),\n",
+          )
+          replace_once(
+              oracle,
+              "            SecretPatchGitHub(),\n",
+              "            cast(\"GitHubClient\", SecretPatchGitHub()),\n",
+          )
+          replace_once(
+              oracle,
+              "        FakeIssueClient(),\n",
+              "        cast(\"IssueClient\", FakeIssueClient()),\n",
+          )
+          replace_once(
+              oracle,
+              "        timeout: int = 120,\n",
+              "        timeout: float = 120,\n",
+          )
+
+          process = "skills/pr-review-loop/scripts/process.py"
+          replace_once(
+              process,
+              "        timeout: int = 120,\n",
+              "        timeout: float = 120,\n",
+          )
+          PY
+      - name: Validate fixes
+        run: |
+          uv sync --all-groups
+          uv run ruff format skills/pr-review-loop
+          uv run ruff check skills/pr-review-loop
+          uv run pyright --threads=0 .
+          uv run pytest -q
+      - name: Commit fixes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add skills/pr-review-loop
+          git commit -m "Fix canonical skill type checks"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
