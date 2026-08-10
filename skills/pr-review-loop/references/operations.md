@@ -15,6 +15,11 @@ artifacts.
 implement a separate Oracle transport. It invokes the local `oracle` CLI; where
 browser automation runs is Oracle configuration.
 
+For optional diagnostics against an authorized Oracle checkout,
+`scripts/browser-tools.ts` may inspect the active CDP endpoint. Pass the
+observed browser port explicitly with `--port`. Production `review` does not
+depend on this diagnostic path.
+
 ## Local Oracle browser
 
 Initialize and sign in to the persistent browser profile once:
@@ -68,8 +73,8 @@ Run this only with Oracle, the authenticated browser profile, and `gh` available
    under test, verify an actual GitHub app/tool invocation retrieves the known
    outside fact; matching prose alone is not sufficient evidence.
 4. Compare the command result's repository/PR/base/head identity with the
-   frozen values from step 1 and confirm the GitHub review is anchored to the
-   expected head.
+   frozen values from step 1 and confirm the GitHub review's commit anchor is
+   the expected head.
 
 The immutable attachments remain sufficient review evidence. Connector use is
 supplemental and does not change the command's identity, schema, or publication
