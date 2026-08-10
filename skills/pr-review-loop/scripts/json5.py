@@ -33,10 +33,6 @@ _JSON5_WHITESPACE = frozenset(
     "\u2008\u2009\u200a"
     "\u2028\u2029\u202f\u205f\u3000\ufeff"
 )
-# Recursive descent needs stack headroom for callers and Python's own frames.
-# Keep the input cap below the default recursion limit and translate any
-# lower process-wide recursion limit to the same ordinary parse failure.
-_MAX_NESTING = 256
 _UNICODE_ESCAPE_LENGTH = 4
 _HIGH_SURROGATE_START = 0xD800
 _HIGH_SURROGATE_END = 0xDBFF
@@ -61,7 +57,6 @@ class _Parser:
         self.text = text
         self.index = 0
         self.length = len(text)
-        self.depth = 0
 
     def _error(self) -> NoReturn:
         message = f"Invalid JSON5 at offset {self.index}."
@@ -359,65 +354,49 @@ class _Parser:
             return self._parse_string()
         return self._parse_identifier()
 
-    def _enter_container(self) -> None:
-        self.depth += 1
-        if self.depth > _MAX_NESTING:
-            self._error()
-
-    def _leave_container(self) -> None:
-        self.depth -= 1
-
     def _parse_object(self) -> dict[str, object]:
-        self._enter_container()
-        try:
-            self._advance()
-            result: dict[str, object] = {}
+        self._advance()
+        result: dict[str, object] = {}
+        self._skip_trivia()
+        if self._peek() == "}":
+            self.index += 1
+            return result
+        while True:
+            key = self._parse_member_name()
+            self._skip_trivia()
+            if self._advance() != ":":
+                self._error()
+            result[key] = self._parse_value()
+            self._skip_trivia()
+            char = self._advance()
+            if char == "}":
+                return result
+            if char != ",":
+                self._error()
             self._skip_trivia()
             if self._peek() == "}":
                 self.index += 1
                 return result
-            while True:
-                key = self._parse_member_name()
-                self._skip_trivia()
-                if self._advance() != ":":
-                    self._error()
-                result[key] = self._parse_value()
-                self._skip_trivia()
-                char = self._advance()
-                if char == "}":
-                    return result
-                if char != ",":
-                    self._error()
-                self._skip_trivia()
-                if self._peek() == "}":
-                    self.index += 1
-                    return result
-        finally:
-            self._leave_container()
 
     def _parse_array(self) -> list[object]:
-        self._enter_container()
-        try:
-            self._advance()
-            result: list[object] = []
+        self._advance()
+        result: list[object] = []
+        self._skip_trivia()
+        if self._peek() == "]":
+            self.index += 1
+            return result
+        while True:
+            result.append(self._parse_value())
+            self._skip_trivia()
+            char = self._advance()
+            if char == "]":
+                return result
+            if char != ",":
+                self._error()
             self._skip_trivia()
             if self._peek() == "]":
                 self.index += 1
                 return result
-            while True:
-                result.append(self._parse_value())
-                self._skip_trivia()
-                char = self._advance()
-                if char == "]":
-                    return result
-                if char != ",":
-                    self._error()
-                self._skip_trivia()
-                if self._peek() == "]":
-                    self.index += 1
-                    return result
-        finally:
-            self._leave_container()
 
 
 def loads(text: str) -> object:
@@ -427,7 +406,8 @@ def loads(text: str) -> object:
         The parsed Python value.
 
     Raises:
-        _JSON5Error: If the document is malformed or too deeply nested.
+        _JSON5Error: If the document is malformed or exceeds Python's
+            recursion capacity.
     """
     parser = _Parser(text)
     try:

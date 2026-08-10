@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import pytest
+from scripts import json5
 from scripts.json5 import loads, may_declare_member
 
 
@@ -130,12 +131,18 @@ def test_loads_rejects_identifier_from_newer_unicode_table() -> None:
         loads("{" + "\U00010d00" + ": 1}")
 
 
-def test_loads_rejects_excessive_nesting_without_recursion_error() -> None:
-    """Excessive nesting becomes a normal JSON5 parse failure."""
-    source = "[" * 500 + "0" + "]" * 500
+def test_loads_converts_recursion_error_to_json5_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python recursion exhaustion remains an ordinary JSON5 parse failure."""
+
+    def raise_recursion_error(_parser: object) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr(json5._Parser, "parse", raise_recursion_error)
 
     with pytest.raises(ValueError, match="Invalid JSON5"):
-        loads(source)
+        loads("0")
 
 
 def test_may_declare_member_is_string_and_comment_aware() -> None:

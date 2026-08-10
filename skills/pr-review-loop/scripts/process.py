@@ -182,14 +182,14 @@ class CommandRunner:
     def _read_oracle_config_remote(self) -> tuple[str | None, str | None]:
         r"""Read Oracle's own remote-transport fields from its config file.
 
-        Oracle resolves `browser.remoteHost`/`browser.remoteToken` from its
+        Oracle reads `browser.remoteHost`/`browser.remoteToken` from its
         config file (`$ORACLE_HOME_DIR/config.json`, or `~/.oracle/config.json`
-        when unset) ahead of `ORACLE_REMOTE_HOST`/`ORACLE_REMOTE_TOKEN`, so
+        when unset) as well as `ORACLE_REMOTE_HOST`/`ORACLE_REMOTE_TOKEN`, so
         this module must know the config-declared values too rather than
         trusting its own env export alone. Values are trimmed the way
         Oracle's own `resolveRemoteServiceConfig()` trims them, so a
-        whitespace-padded config value cannot desync from what Oracle
-        actually uses for transport selection and secret redaction.
+        whitespace-padded config value cannot desync from Oracle's transport
+        signal or this module's secret redaction.
 
         A relative `ORACLE_HOME_DIR` is resolved against `self._repo_dir`
         (Oracle's own launch cwd), not this process's own current

@@ -871,40 +871,19 @@ def build_bootstrap_bundle(
     )
 
 
-def _effective_oracle_remote_host(
+def _oracle_uses_remote_transport(
     runner: CommandRunner,
     env: Mapping[str, str],
-) -> str | None:
-    """Resolve the remote host Oracle will actually use, or None for local.
+) -> bool:
+    """Return whether either Oracle remote-transport source is configured.
 
-    Oracle resolves `browser.remoteHost` from its own config file ahead of
-    `ORACLE_REMOTE_HOST`. A config-only `browser.remoteHost` is Oracle's
-    supported remote-transport path and is honored here too; only a config
-    value that disagrees with an explicitly exported `ORACLE_REMOTE_HOST`
-    would otherwise silently route the run to an unverified endpoint. Both
-    sources are trimmed the way Oracle's own resolver trims them, so a
-    whitespace-only value is treated as unset rather than as a live remote
-    host.
-
-    Returns:
-        The agreed-upon remote host, or None when neither source sets one.
-
-    Raises:
-        LooprError: both the config file and the exported environment
-            declare a `browser.remoteHost`/`ORACLE_REMOTE_HOST`, and they
-            disagree.
+    Both sources are trimmed the way Oracle's own resolver trims them, so a
+    whitespace-only value is treated as unset. Endpoint selection and
+    config/environment precedence remain Oracle's responsibility.
     """
     env_remote_host = normalize_oracle_remote_value(env.get("ORACLE_REMOTE_HOST"))
     config_remote_host = runner.oracle_config_remote_host
-    if config_remote_host and env_remote_host and config_remote_host != env_remote_host:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "bundle",
-            "Oracle's config file declares a browser.remoteHost that does "
-            "not match the exported ORACLE_REMOTE_HOST; align them or "
-            "remove the config-backed remote-transport fields",
-        )
-    return env_remote_host or config_remote_host
+    return env_remote_host is not None or config_remote_host is not None
 
 
 def _oracle_command(
@@ -984,7 +963,7 @@ def invoke_oracle(
         )
     raw_path = writer.root / "oracle-raw.json"
     env = runner.oracle_env()
-    remote_host = _effective_oracle_remote_host(runner, env)
+    uses_remote_transport = _oracle_uses_remote_transport(runner, env)
     command = _oracle_command(
         raw_path,
         thinking_time,
@@ -992,7 +971,7 @@ def invoke_oracle(
         prompt,
         attachments,
         slug,
-        manual_login=not bool(remote_host),
+        manual_login=not uses_remote_transport,
     )
     _validate_oracle_command(command)
     _reject_credentials_in_attachments(runner, attachments)

@@ -685,13 +685,13 @@ def test_oracle_config_with_extended_json5_numbers_is_parsed(
     assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
-def test_oracle_config_with_excessive_nesting_fails_closed(
+def test_oracle_config_with_nesting_beyond_previous_limit_is_parsed(
     tmp_path: Path,
 ) -> None:
-    """Deep malformed remote config raises a structured precondition error."""
+    """Valid Oracle JSON5 nesting is not subject to a local artificial cap."""
     oracle_dir = tmp_path / ".oracle"
     oracle_dir.mkdir()
-    nested = "[" * 500 + "0" + "]" * 500
+    nested = "[" * 300 + "0" + "]" * 300
     (oracle_dir / "config.json").write_text(
         '{"browser": {"remoteHost": "10.0.0.9:9473"}, "extra": ' + nested + "}",
         encoding="utf-8",
@@ -699,8 +699,7 @@ def test_oracle_config_with_excessive_nesting_fails_closed(
 
     runner = CommandRunner({"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
 
-    with pytest.raises(LooprError, match="could not be parsed"):
-        _ = runner.oracle_config_remote_host
+    assert runner.oracle_config_remote_host == "10.0.0.9:9473"
 
 
 def test_oracle_config_with_extended_json5_syntax_does_not_break_construction(

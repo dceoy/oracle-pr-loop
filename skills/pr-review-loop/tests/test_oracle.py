@@ -1575,24 +1575,46 @@ def test_oracle_invocation_rejects_rotated_config_token_in_patch(
     assert runner.commands == []
 
 
-def test_oracle_invocation_rejects_config_remote_host_disagreeing_with_env(
+def test_oracle_invocation_accepts_config_remote_host_disagreeing_with_env(
     tmp_path: Path,
 ) -> None:
-    """A config `browser.remoteHost` disagreeing with the exported env is rejected."""
+    """Oracle owns precedence when config and env hosts differ."""
     home = tmp_path / "home"
     home.mkdir()
-    _write_oracle_config_remote_host(home, "10.0.0.9:9473")
+    oracle_dir = home / ".oracle"
+    oracle_dir.mkdir()
+    (oracle_dir / "config.json").write_text(
+        json.dumps({
+            "browser": {
+                "remoteHost": "10.0.0.9:9473",
+                "remoteToken": "config-secret-token",
+            }
+        }),
+        encoding="utf-8",
+    )
     issue = _sample_issue()
     writer = TemporaryFileWriter(tmp_path / "oracle", CommandRunner())
     github = cast("IssueClient", _FakeIssueGitHub(tmp_path))
     payload = _bootstrap_payload(issue, SHA_A)
     runner = _FakeOracleRunner(
         payload,
-        {"HOME": str(home), "ORACLE_REMOTE_HOST": "127.0.0.1:9473"},
+        {
+            "HOME": str(home),
+            "ORACLE_REMOTE_HOST": "127.0.0.1:9473",
+            "ORACLE_REMOTE_TOKEN": "environment-secret-token",
+        },
     )
-    with pytest.raises(LooprError, match="remoteHost"):
-        _generate_bootstrap(runner, writer, github, issue, SHA_A)
-    assert runner.commands == []
+    _generate_bootstrap(runner, writer, github, issue, SHA_A)
+
+    oracle_argv = runner.commands[0]
+    assert "--browser-manual-login" not in oracle_argv
+    assert runner.contains_secret("config-secret-token")
+    assert runner.contains_secret("environment-secret-token")
+    assert all(
+        token not in argument
+        for argument in oracle_argv
+        for token in ("config-secret-token", "environment-secret-token")
+    )
 
 
 def test_oracle_invocation_treats_whitespace_only_env_host_as_unset(
