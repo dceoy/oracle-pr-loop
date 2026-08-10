@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import EXIT_PRECONDITION, JsonValue, LooprError
+from .models import EXIT_PRECONDITION, JsonValue, ReviewLoopError
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -27,7 +27,7 @@ class TemporaryFileWriter:
         """Validate the command-owned private temporary root.
 
         Raises:
-            LooprError: The directory could not be inspected or is not a
+            ReviewLoopError: The directory could not be inspected or is not a
                 private real directory.
         """
         self.root = root.absolute()
@@ -36,7 +36,7 @@ class TemporaryFileWriter:
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             metadata = self.root.lstat()
         except OSError as exc:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "temporary_files",
                 "failed to inspect the private temporary directory",
@@ -46,7 +46,7 @@ class TemporaryFileWriter:
             or self.root.is_symlink()
             or metadata.st_mode & 0o077
         ):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "temporary_files",
                 "temporary directory must be a private real directory",
@@ -60,13 +60,13 @@ class TemporaryFileWriter:
             The resolved path under the private artifact root.
 
         Raises:
-            LooprError: The resolved path escapes the artifact root.
+            ReviewLoopError: The resolved path escapes the artifact root.
         """
         path = self.root / relative
         try:
             path.parent.resolve().relative_to(self.root)
         except (OSError, ValueError) as exc:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "temporary_files",
                 "temporary file path escaped the private root",
@@ -80,7 +80,7 @@ class TemporaryFileWriter:
             The path the artifact was written to.
 
         Raises:
-            LooprError: The write failed.
+            ReviewLoopError: The write failed.
         """
         path = self._path(relative)
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -88,7 +88,7 @@ class TemporaryFileWriter:
         try:
             self._atomic_write(path, temporary, safe)
         except OSError as exc:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "artifacts",
                 "failed to write a private artifact",
@@ -163,12 +163,12 @@ def temporary_file_writer(
         A writer rooted in the command-owned temporary directory.
 
     Raises:
-        LooprError: The temp directory could not be created or cleaned.
+        ReviewLoopError: The temp directory could not be created or cleaned.
     """
     try:
         temporary = tempfile.TemporaryDirectory(prefix=prefix)
     except OSError as exc:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "temporary_files",
             "failed to create the private temporary directory",
@@ -179,7 +179,7 @@ def temporary_file_writer(
         try:
             temporary.cleanup()
         except OSError as exc:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "temporary_files",
                 "failed to clean the private temporary directory",
