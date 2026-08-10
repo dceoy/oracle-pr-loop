@@ -34,7 +34,16 @@ jobs:
               target.write_text(text.replace(old, new), encoding="utf-8")
 
           cli = "skills/pr-review-loop/tests/test_cli.py"
-          replace_once(cli, "import json\nfrom typing import TYPE_CHECKING\n", "import argparse\nimport json\nfrom typing import TYPE_CHECKING, cast\n")
+          replace_once(
+              cli,
+              "import json\nfrom typing import TYPE_CHECKING\n\nimport pytest\n",
+              "import json\nfrom typing import TYPE_CHECKING, cast\n\nimport pytest\n",
+          )
+          replace_once(
+              cli,
+              "if TYPE_CHECKING:\n    from pathlib import Path\n",
+              "if TYPE_CHECKING:\n    import argparse\n    from pathlib import Path\n",
+          )
           replace_once(
               cli,
               '''    subparsers = next(\n        action\n        for action in root._actions\n        if hasattr(action, "choices") and action.choices\n    )\n    choices = subparsers.choices\n\n    assert "GitHub Issue" in choices["bootstrap"].description\n    assert "pull-request snapshot" in choices["review"].description\n    assert "GitHub pull request" in choices["submit"].description\n''',
