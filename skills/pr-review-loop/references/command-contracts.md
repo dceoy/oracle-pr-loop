@@ -59,7 +59,6 @@ Success fields are `schema_version`, `command`, `repository`, `pr_number`,
 `base_sha`, `head_sha`, `verdict`, `github_review_id`, `blocking_findings`, and
 `implementation_prompt`. `APPROVE` and `REQUEST_CHANGES` are exit-0 results; a
 changes-request result has non-empty findings and an implementation prompt.
-Each finding contains `id`, `title`, `description`, and `required_change`.
 
 Each blocking finding is `{id, title, description, required_change, location}`,
 where `location` is `null` for a global or cross-file finding or
@@ -86,10 +85,7 @@ permits, while stale `COMMENT` reviews remain as commit-anchored audit
 comments.
 
 The command requires an open, non-draft, same-repository GitHub.com PR, exact
-base/head binding, unambiguous `origin`, Oracle, and GitHub permissions. It
-freezes identity, builds immutable Git evidence, validates Oracle output, and
-publishes a commit-anchored comment for self-authored PRs or a formal event
-otherwise. The Oracle verdict is authoritative, not GitHub's review state.
+base/head binding, unambiguous `origin`, Oracle, and GitHub permissions.
 
 The attached snapshot, patch, changed-file contents, and instruction files are
 mandatory, authoritative evidence. The exact prompt sent through Oracle starts
