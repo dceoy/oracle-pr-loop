@@ -3,9 +3,6 @@ extend = "../../pyproject.toml"
 # The canonical skill inherits the repository-wide lint policy. Keep narrowly
 # scoped exceptions local to the refactored command boundary instead of
 # weakening root-level checks for unrelated code.
-[format]
-preview = false
-
 [lint.isort]
 known-third-party = ["scripts"]
 
