@@ -1,7 +1,7 @@
 # pr-review-loop
 
-`pr-review-loop` is an agent skill for taking GitHub work through independent
-Oracle/ChatGPT review, starting from an open Issue or existing PR.
+`pr-review-loop` is an agent skill for taking GitHub work through
+independent Oracle/ChatGPT review, starting from an open Issue or existing PR.
 
 [![CI/CD](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml)
 
