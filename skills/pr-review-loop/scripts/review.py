@@ -12,8 +12,8 @@ from .models import (
     EXIT_RACE,
     JsonObject,
     JsonValue,
-    LooprError,
     ReviewComment,
+    ReviewLoopError,
     ReviewResult,
 )
 from .oracle import (
@@ -89,7 +89,7 @@ def execute_review(
         The stable review command result.
 
     Raises:
-        LooprError: The pull request, bundle, or Oracle verdict violated a
+        ReviewLoopError: The pull request, bundle, or Oracle verdict violated a
             precondition, or the posted review could not be verified fresh.
     """
     command_runner = runner if runner is not None else CommandRunner(repo_dir=repo_dir)
@@ -113,7 +113,7 @@ def execute_review(
     body, comments = _publication(github, initial, verdict)
     before_post = github.snapshot()
     if not github.same_snapshot(initial, before_post):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_RACE,
             "stale_state",
             "pull request base or head changed before review posting",
@@ -153,8 +153,8 @@ def _publication(
         The aggregate body and the inline comments to publish with it.
 
     Raises:
-        LooprError: The composed body or the inline comments exceed GitHub's
-            body limit.
+        ReviewLoopError: The composed body or the inline comments exceed
+            GitHub's body limit.
     """
     anchors: frozenset[tuple[str, str, int]] = (
         github.diff_anchors(pull_request)
@@ -166,14 +166,14 @@ def _publication(
     comments, unanchored = _partition_findings(verdict, anchors)
     body = _aggregate_body(pull_request, verdict, unanchored)
     if len(body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "review body with audit footer exceeds GitHub's body limit",
         )
     for comment in comments:
         if len(comment.body.encode("utf-8")) > MAX_POSTED_BODY_BYTES:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_ORACLE,
                 "oracle_schema",
                 "an inline review comment exceeds GitHub's body limit",
@@ -265,12 +265,15 @@ def _aggregate_body(
     verdict: OracleReview,
     unanchored: tuple[JsonObject, ...],
 ) -> str:
-    """Compose the review body from the verdict, unanchored findings, and audit footer.
+    """Compose the review body, notes, unanchored findings, and audit footer.
 
     Returns:
         The exact body text posted with the review.
     """
     sections = [verdict.review_body]
+    if verdict.non_blocking_notes:
+        notes = "\n".join(f"- {note}" for note in verdict.non_blocking_notes)
+        sections.append(f"## Non-blocking notes\n\n{notes}")
     if unanchored:
         findings = "\n\n".join(_finding_text(finding) for finding in unanchored)
         sections.append(f"## Findings without a diff anchor\n\n{findings}")
@@ -298,7 +301,7 @@ def _require_fresh_state(
     """Confirm the posted review's state and snapshot are still fresh.
 
     Raises:
-        LooprError: The verified state or repository snapshot went stale.
+        ReviewLoopError: The verified state or repository snapshot went stale.
 
     The Oracle verdict stays canonical in the command result, but GitHub's
     persisted review state must still correspond to the selected transport
@@ -308,7 +311,7 @@ def _require_fresh_state(
     expected_state = _EXPECTED_REVIEW_STATE[event]
     state = verified.get("state") if isinstance(verified, dict) else None
     if state != expected_state or not github.same_snapshot(initial, after_post):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_RACE,
             "stale_state",
             "posted review verification or PR snapshot became stale",
@@ -328,16 +331,17 @@ def _dismiss_stale(
     """Neutralize a stale review and preserve failure context if dismissal fails.
 
     Raises:
-        LooprError: Dismissal itself failed; raised from the original error.
+        ReviewLoopError: Dismissal itself failed; raised from the original
+            error.
     """
     if event == "COMMENT":
         return
     try:
         github.dismiss(pull_request, review_id)
-    except LooprError as dismiss_error:
+    except ReviewLoopError as dismiss_error:
         original_message = str(original) or type(original).__name__
         message = (
             f"{original_message}; stale review {review_id} could not be dismissed: "
             f"{dismiss_error}"
         )
-        raise LooprError(EXIT_RACE, "stale_state", message) from original
+        raise ReviewLoopError(EXIT_RACE, "stale_state", message) from original
