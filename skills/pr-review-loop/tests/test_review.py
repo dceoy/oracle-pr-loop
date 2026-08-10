@@ -12,10 +12,10 @@ from scripts.models import (
     EXIT_RACE,
     JsonObject,
     JsonValue,
-    LooprError,
     OracleReview,
     PullRequest,
     ReviewComment,
+    ReviewLoopError,
 )
 from scripts.process import CommandRunner
 from scripts.review import execute_review
@@ -47,7 +47,6 @@ def sample_pr(*, base_sha: str = SHA_A, head_sha: str = SHA_B) -> PullRequest:
         head_sha=head_sha,
         head_repository="owner/repository",
         changed_paths=("file.py",),
-        raw={},
     )
 
 
@@ -77,7 +76,6 @@ def approve_review(pull_request: PullRequest) -> OracleReview:
         blocking_findings=(),
         implementation_prompt=None,
         non_blocking_notes=(),
-        raw={},
     )
 
 
@@ -309,7 +307,7 @@ def test_formal_review_rejects_mismatched_persisted_state(
 
     mocker.patch.object(review_module, "GitHubClient", MismatchedStateGitHubClient)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -366,7 +364,7 @@ def test_self_authored_review_rejects_body_disagreeing_with_verdict_via_state(
 
     mocker.patch.object(review_module, "GitHubClient", WrongStateGitHubClient)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -389,7 +387,7 @@ def test_self_authored_post_write_race_skips_dismissal(
     mocker.patch.object(FakeGitHubClient, "authenticated_login_value", initial.author)
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -412,7 +410,7 @@ def test_pre_post_snapshot_race_fails_before_review_write(
     FakeGitHubClient.snapshots = [initial, changed]
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -435,7 +433,7 @@ def test_post_write_race_dismisses_stale_review(
     FakeGitHubClient.snapshots = [initial, initial, changed]
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -465,7 +463,7 @@ def test_execute_review_rejects_oversized_posted_body(
 
     mocker.patch.object(review_module, "parse_review", parse_oversized_review)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -850,7 +848,7 @@ def test_one_oversized_inline_comment_is_bounded_before_publication(
     oversized["description"] = "x" * 70_000
     _install_findings(mocker, (oversized,), frozenset({("file.py", "RIGHT", 7)}))
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -902,7 +900,7 @@ def test_post_write_race_dismisses_review_carrying_inline_comments(
     )
     FakeGitHubClient.snapshots = [initial, initial, changed]
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -930,7 +928,7 @@ def test_pre_post_race_blocks_inline_publication(
     )
     FakeGitHubClient.snapshots = [initial, changed]
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
@@ -983,7 +981,7 @@ def test_head_change_during_anchor_discovery_blocks_publication(
     mocker.patch.object(review_module, "GitHubClient", DriftDuringAnchorsGitHubClient)
     FakeGitHubClient.snapshots = []
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         execute_review(
             pr_value="21",
             repo_dir=tmp_path,
