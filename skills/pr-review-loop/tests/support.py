@@ -112,32 +112,50 @@ def run_process(
     )
 
 
-def git(repo: Path, *args: str) -> str:
+def git(
+    repo: Path,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+) -> str:
     """Run Git in a test repository.
 
     Returns:
         Stripped UTF-8 stdout.
     """
-    return run_process([GIT, *args], cwd=repo).stdout.decode("utf-8", "strict").strip()
+    return (
+        run_process([GIT, *args], cwd=repo, env=env)
+        .stdout.decode("utf-8", "strict")
+        .strip()
+    )
 
 
-def init_git_repo(repo: Path) -> None:
+def init_git_repo(
+    repo: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
     """Initialize a repository with deterministic test identity."""
     repo.mkdir()
-    git(repo, "init", "--quiet")
-    git(repo, "config", "user.name", "Test User")
-    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "init", "--quiet", env=env)
+    git(repo, "config", "user.name", "Test User", env=env)
+    git(repo, "config", "user.email", "test@example.com", env=env)
 
 
-def commit_all(repo: Path, message: str, *, allow_empty: bool = False) -> str:
+def commit_all(
+    repo: Path,
+    message: str,
+    *,
+    allow_empty: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> str:
     """Commit the full worktree.
 
     Returns:
         The new commit SHA.
     """
-    git(repo, "add", "-A")
+    git(repo, "add", "-A", env=env)
     args = ["commit", "--quiet"]
     if allow_empty:
         args.append("--allow-empty")
-    git(repo, *args, "-m", message)
-    return git(repo, "rev-parse", "HEAD")
+    git(repo, *args, "-m", message, env=env)
+    return git(repo, "rev-parse", "HEAD", env=env)

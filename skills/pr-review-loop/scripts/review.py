@@ -80,14 +80,6 @@ def _generate_review(
     return parse_review(raw, pull_request)
 
 
-def _same_review_identity(
-    initial: PullRequest,
-    current: PullRequestIdentity,
-) -> bool:
-    """Return whether the reviewed base/head identity is still current."""
-    return initial.base_sha == current.base_sha and initial.head_sha == current.head_sha
-
-
 def execute_review(
     *,
     pr_value: str,
@@ -125,7 +117,10 @@ def execute_review(
 
     body, comments = _publication(github, initial, verdict)
     before_post = github.identity_snapshot()
-    if not _same_review_identity(initial, before_post):
+    if (
+        initial.base_sha != before_post.base_sha
+        or initial.head_sha != before_post.head_sha
+    ):
         raise ReviewLoopError(
             EXIT_RACE,
             "stale_state",
@@ -305,7 +300,11 @@ def _require_fresh_state(
     """
     expected_state = _EXPECTED_REVIEW_STATE[event]
     state = verified.get("state") if isinstance(verified, dict) else None
-    if state != expected_state or not _same_review_identity(initial, after_post):
+    if (
+        state != expected_state
+        or initial.base_sha != after_post.base_sha
+        or initial.head_sha != after_post.head_sha
+    ):
         raise ReviewLoopError(
             EXIT_RACE,
             "stale_state",
