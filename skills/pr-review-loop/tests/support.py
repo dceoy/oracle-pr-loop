@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import shutil
 import subprocess  # ruff: ignore[suspicious-subprocess-import] -- tests exercise Git directly
-from collections.abc import Mapping, Sequence
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scripts.models import IssueSnapshot, JsonObject, PullRequest
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -71,7 +74,11 @@ def sample_issue(
 
 
 def git_executable() -> str:
-    """Return the Git executable required by real-Git tests."""
+    """Return the Git executable required by real-Git tests.
+
+    Raises:
+        RuntimeError: Git is not installed or is unavailable on PATH.
+    """
     executable = shutil.which("git")
     if executable is None:
         message = "git is required for integration tests"
@@ -90,7 +97,11 @@ def run_process(
     input_text: str | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run one test-controlled process and capture bytes."""
+    """Run one test-controlled process and capture bytes.
+
+    Returns:
+        The completed subprocess result with captured byte streams.
+    """
     return subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]
         list(args),
         cwd=cwd,
@@ -102,7 +113,11 @@ def run_process(
 
 
 def git(repo: Path, *args: str) -> str:
-    """Run Git in a test repository and return stripped UTF-8 stdout."""
+    """Run Git in a test repository.
+
+    Returns:
+        Stripped UTF-8 stdout.
+    """
     return run_process([GIT, *args], cwd=repo).stdout.decode("utf-8", "strict").strip()
 
 
@@ -115,7 +130,11 @@ def init_git_repo(repo: Path) -> None:
 
 
 def commit_all(repo: Path, message: str, *, allow_empty: bool = False) -> str:
-    """Commit the full worktree and return the new commit SHA."""
+    """Commit the full worktree.
+
+    Returns:
+        The new commit SHA.
+    """
     git(repo, "add", "-A")
     args = ["commit", "--quiet"]
     if allow_empty:
