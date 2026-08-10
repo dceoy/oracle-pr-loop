@@ -74,7 +74,11 @@ def sample_issue(
 
 
 def git_executable() -> str:
-    """Return the Git executable required by real-Git tests."""
+    """Return the Git executable required by real-Git tests.
+
+    Raises:
+        RuntimeError: Git is unavailable on PATH.
+    """
     executable = shutil.which("git")
     if executable is None:
         message = "git is required for integration tests"
