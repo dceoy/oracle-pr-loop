@@ -21,34 +21,12 @@ from scripts.models import (
 from scripts.process import CommandRunner
 from scripts.review import execute_review
 
+from .support import SHA_A, SHA_B, SHA_C, sample_pr
+
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pytest_mock import MockerFixture
-
-SHA_A = "a" * 40
-SHA_B = "b" * 40
-SHA_C = "c" * 40
-
-
-def sample_pr(*, base_sha: str = SHA_A, head_sha: str = SHA_B) -> PullRequest:
-    """Return one valid frozen pull-request snapshot."""
-    return PullRequest(
-        repository="owner/repository",
-        number=21,
-        url="https://github.com/owner/repository/pull/21",
-        title="Title",
-        body="Body",
-        author="author",
-        state="OPEN",
-        is_draft=False,
-        base_ref="main",
-        base_sha=base_sha,
-        head_ref="feature",
-        head_sha=head_sha,
-        head_repository="owner/repository",
-        changed_paths=("file.py",),
-    )
 
 
 def finding(
@@ -98,6 +76,8 @@ class FakeGitHubClient:
         self.authenticated_login = type(self).authenticated_login_value
         self.dismissed: list[int] = []
         self.post_count = 0
+        self.full_snapshot_calls = 0
+        self.identity_snapshot_calls = 0
         self.posted_events: list[str] = []
         self.posted_bodies: list[str] = []
         self.posted_comments: list[tuple[ReviewComment, ...]] = []
@@ -108,7 +88,13 @@ class FakeGitHubClient:
         """Accept the configured fake target."""
 
     def snapshot(self) -> PullRequest:
-        """Return the next deterministic snapshot."""
+        """Return the next deterministic full snapshot."""
+        self.full_snapshot_calls += 1
+        return self._snapshots.pop(0)
+
+    def identity_snapshot(self) -> PullRequest:
+        """Return the next deterministic identity-only state."""
+        self.identity_snapshot_calls += 1
         return self._snapshots.pop(0)
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
@@ -236,6 +222,8 @@ def test_self_authored_review_uses_comment_and_preserves_oracle_verdict(
     assert result.verdict == oracle_verdict
     assert result.blocking_findings == expected_findings
     assert FakeGitHubClient.instance is not None
+    assert FakeGitHubClient.instance.full_snapshot_calls == 1
+    assert FakeGitHubClient.instance.identity_snapshot_calls == 2
     assert FakeGitHubClient.instance.posted_events == ["COMMENT"]
     assert (
         f"Reviewed base: `{initial.base_sha}`"
@@ -482,7 +470,10 @@ class _StableGitHubClient:
     def initialize(self, _pr_value: str) -> None:
         pass
 
-    def snapshot(self) -> PullRequest:  # ruff: ignore[no-self-use] -- overridden with instance state below
+    def snapshot(self) -> PullRequest:  # ruff: ignore[no-self-use] -- test fake
+        return sample_pr()
+
+    def identity_snapshot(self) -> PullRequest:  # ruff: ignore[no-self-use] -- test fake
         return sample_pr()
 
     def ensure_objects(self, _pull_request: PullRequest) -> None:
@@ -521,7 +512,7 @@ class _StableGitHubClient:
 
 
 class _InterruptingGitHubClient(_StableGitHubClient):
-    """Interrupt during the post-write snapshot verification."""
+    """Interrupt during the post-write identity verification."""
 
     def __init__(
         self,
@@ -529,12 +520,12 @@ class _InterruptingGitHubClient(_StableGitHubClient):
         repo_dir: Path,
     ) -> None:
         super().__init__(_runner, repo_dir)
-        self.snapshot_count = 0
+        self.identity_count = 0
         type(self).instance = self
 
-    def snapshot(self) -> PullRequest:
-        self.snapshot_count += 1
-        if self.snapshot_count == 3:
+    def identity_snapshot(self) -> PullRequest:
+        self.identity_count += 1
+        if self.identity_count == 2:
             raise KeyboardInterrupt
         return sample_pr()
 
@@ -965,7 +956,11 @@ def test_head_change_during_anchor_discovery_blocks_publication(
             self._drifted = False
 
         def snapshot(self) -> PullRequest:
-            """Return the original head until anchor discovery causes drift."""
+            """Return the original full review snapshot."""
+            return sample_pr()
+
+        def identity_snapshot(self) -> PullRequest:
+            """Expose the drift to the identity-only freshness read."""
             return sample_pr(head_sha=SHA_C if self._drifted else SHA_B)
 
         def diff_anchors(
