@@ -10,9 +10,8 @@ NULL_SHA = "0" * 40
 
 
 def test_unicode_line_separator_cannot_split_a_physical_diff_line() -> None:
-    payload = (
-        "prefix\u2028diff --git a/fake.py b/fake.py"
-        + ("x" * MAX_GITHUB_FILE_DIFF_BYTES)
+    payload = "prefix\u2028diff --git a/fake.py b/fake.py" + (
+        "x" * MAX_GITHUB_FILE_DIFF_BYTES
     )
     patch = (
         "diff --git a/file.py b/file.py\n"
