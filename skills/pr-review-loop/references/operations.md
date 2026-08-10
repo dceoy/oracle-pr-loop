@@ -34,6 +34,16 @@ The skill preserves `HOME`, so Oracle's normal persistent manual-login profile
 continues to work. Set `ORACLE_BROWSER_PROFILE_DIR` when that profile should
 live outside Oracle's default location.
 
+`pr-review-loop` deliberately does not load the account-level
+`~/.oracle/config.json` (or an inherited `ORACLE_HOME_DIR/config.json`) during
+its Oracle invocation. This is the security boundary that prevents an
+undiscoverable config-only remote token from outranking the environment values
+the skill can register for redaction. Consequently, account-level browser
+defaults such as a custom ChatGPT URL, Chrome path, timeout, or model strategy
+must be supplied through the corresponding supported Oracle environment/CLI
+interface when the skill needs them. The persistent manual-login profile itself
+remains HOME-based and is not moved by this isolation.
+
 ## Remote `oracle serve`
 
 A host with only the local Oracle CLI may route browser work to a machine that
@@ -65,12 +75,12 @@ temporary attachments and structured output. The token is passed only through
 the Oracle process environment, never through argv.
 
 Each Oracle invocation receives a private, command-scoped `ORACLE_HOME_DIR`.
-That prevents user-level Oracle config from silently supplying a higher-priority
-remote host/token that the skill could not safely discover. `HOME` and the
-optional `ORACLE_BROWSER_PROFILE_DIR` remain available, preserving local
-authenticated-browser operation. Project Oracle configuration, where Oracle
-allows it, is still parsed by Oracle itself; the skill does not parse or emulate
-Oracle configuration files.
+That prevents account-level Oracle config from silently supplying a
+higher-priority remote host/token that the skill could not safely discover.
+`HOME` and the optional `ORACLE_BROWSER_PROFILE_DIR` remain available,
+preserving local authenticated-browser operation. Safe project configuration,
+where Oracle allows it, is still discovered and parsed by Oracle itself; the
+skill does not parse or emulate Oracle configuration files.
 
 Direct Oracle invocations outside `pr-review-loop` may support additional
 Oracle-native configuration sources. Those sources are outside this skill's
