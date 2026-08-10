@@ -16,8 +16,8 @@ from scripts.models import (
     BootstrapResult,
     IssueSnapshot,
     JsonObject,
-    LooprError,
     OracleBootstrap,
+    ReviewLoopError,
 )
 from scripts.process import CommandRunner
 
@@ -59,7 +59,6 @@ def sample_issue(
         state="OPEN",
         updated_at=updated_at,
         comments=comments,
-        raw={},
     )
 
 
@@ -154,7 +153,6 @@ def fake_parse_bootstrap(
         issue_number=issue.number,
         base_sha=base_sha,
         implementation_prompt="Implement the requested change.",
-        raw={},
     )
 
 
@@ -289,7 +287,7 @@ def test_execute_bootstrap_rejects_stale_issue_update(
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.code == EXIT_RACE
@@ -317,7 +315,7 @@ def test_execute_bootstrap_rejects_comment_edited_during_generation(
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.code == EXIT_RACE
@@ -365,7 +363,7 @@ def test_execute_bootstrap_rejects_base_or_head_drift(
     FakeIssueClient.statuses = [b""]
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.code == EXIT_RACE
@@ -388,7 +386,7 @@ def test_execute_bootstrap_rejects_default_or_detached_branch(
     FakeIssueClient.statuses = []
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.code == EXIT_PRECONDITION
@@ -411,7 +409,7 @@ def test_execute_bootstrap_rejects_dirty_workspace(
     FakeIssueClient.statuses = [status]
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.code == EXIT_PRECONDITION
@@ -467,7 +465,7 @@ def test_execute_bootstrap_rejects_workspace_dirtied_during_generation(
     FakeIssueClient.statuses = [b"", b"?? new-file.py\n"]
     install_orchestration_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.code == EXIT_RACE
@@ -485,7 +483,7 @@ class ClosingIssueClient(FakeIssueClient):
         """Raise on the second read, as a real closed-Issue re-fetch would."""
         self.snapshot_calls += 1
         if self.snapshot_calls == 2:
-            raise LooprError(EXIT_PRECONDITION, "state", "issue must be open")
+            raise ReviewLoopError(EXIT_PRECONDITION, "state", "issue must be open")
         return super().snapshot()
 
 
@@ -504,7 +502,7 @@ def test_execute_bootstrap_propagates_issue_closed_during_generation(
     mocker.patch.object(bootstrap_module, "IssueClient", ClosingIssueClient)
     install_oracle_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.code == EXIT_PRECONDITION
@@ -516,7 +514,7 @@ class MissingBaseIssueClient(FakeIssueClient):
 
     def ensure_commit_object(self, sha: str) -> None:  # ruff: ignore[no-self-use] -- overrides base
         """Fail closed as the shared immutable-Git mixin would."""
-        raise LooprError(EXIT_PRECONDITION, "git", f"{sha} is not a commit object")
+        raise ReviewLoopError(EXIT_PRECONDITION, "git", f"{sha} is not a commit object")
 
 
 def test_execute_bootstrap_names_fetch_remedy_when_base_missing(
@@ -534,7 +532,7 @@ def test_execute_bootstrap_names_fetch_remedy_when_base_missing(
     mocker.patch.object(bootstrap_module, "IssueClient", MissingBaseIssueClient)
     install_oracle_fakes(mocker)
 
-    with pytest.raises(LooprError) as captured:
+    with pytest.raises(ReviewLoopError) as captured:
         _execute(tmp_path)
 
     assert captured.value.category == "git"

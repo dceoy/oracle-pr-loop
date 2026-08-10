@@ -17,10 +17,10 @@ from .models import (
     IssueSnapshot,
     JsonObject,
     JsonValue,
-    LooprError,
     OracleBootstrap,
     OracleReview,
     PullRequest,
+    ReviewLoopError,
 )
 from .process import CommandError, normalize_oracle_remote_value
 
@@ -147,18 +147,18 @@ def _json_object(text: str) -> JsonObject:
         The decoded JSON object.
 
     Raises:
-        LooprError: text is not exactly one JSON object.
+        ReviewLoopError: text is not exactly one JSON object.
     """
     try:
         value: object = json.loads(text.strip())
     except json.JSONDecodeError as exc:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "Oracle output must be exactly one JSON object",
         ) from exc
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "Oracle output must be exactly one JSON object",
@@ -173,11 +173,11 @@ def _string(value: JsonValue | None, *, field: str) -> str:
         The stripped string value.
 
     Raises:
-        LooprError: value is not a non-empty string.
+        ReviewLoopError: value is not a non-empty string.
     """
     if not isinstance(value, str) or not value.strip():
         message = f"Oracle field {field} must be a non-empty string"
-        raise LooprError(EXIT_ORACLE, "oracle_schema", message)
+        raise ReviewLoopError(EXIT_ORACLE, "oracle_schema", message)
     return value.strip()
 
 
@@ -192,11 +192,11 @@ def _exact_string(value: JsonValue | None, *, field: str) -> str:
         The string value, exactly as given.
 
     Raises:
-        LooprError: value is not a non-empty string.
+        ReviewLoopError: value is not a non-empty string.
     """
     if not isinstance(value, str) or not value:
         message = f"Oracle field {field} must be a non-empty string"
-        raise LooprError(EXIT_ORACLE, "oracle_schema", message)
+        raise ReviewLoopError(EXIT_ORACLE, "oracle_schema", message)
     return value
 
 
@@ -207,11 +207,11 @@ def _integer(value: JsonValue | None, *, field: str) -> int:
         The integer value.
 
     Raises:
-        LooprError: value is not a non-Boolean integer.
+        ReviewLoopError: value is not a non-Boolean integer.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         message = f"Oracle field {field} must be an integer"
-        raise LooprError(EXIT_ORACLE, "oracle_schema", message)
+        raise ReviewLoopError(EXIT_ORACLE, "oracle_schema", message)
     return value
 
 
@@ -225,12 +225,12 @@ def _location(value: JsonValue | None) -> JsonObject | None:
         The validated location, or None for a global finding.
 
     Raises:
-        LooprError: value is neither null nor a well-formed location object.
+        ReviewLoopError: value is neither null nor a well-formed location object.
     """
     if value is None:
         return None
     if not isinstance(value, dict) or set(value) != LOCATION_KEYS:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "blocking finding location must be null or a path/line/side object",
@@ -238,7 +238,7 @@ def _location(value: JsonValue | None) -> JsonObject | None:
     side = _string(value.get("side"), field="blocking_findings.location.side")
     line = _integer(value.get("line"), field="blocking_findings.location.line")
     if side not in LOCATION_SIDES or line <= 0:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "blocking finding location must name a positive line on LEFT or RIGHT",
@@ -259,10 +259,10 @@ def _blocking_findings(value: JsonValue | None) -> tuple[JsonObject, ...]:
         The validated blocking findings.
 
     Raises:
-        LooprError: value is not a well-formed blocking-finding array.
+        ReviewLoopError: value is not a well-formed blocking-finding array.
     """
     if not isinstance(value, list):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "blocking_findings must be an array",
@@ -270,7 +270,7 @@ def _blocking_findings(value: JsonValue | None) -> tuple[JsonObject, ...]:
     findings: list[JsonObject] = []
     for item in value:
         if not isinstance(item, dict) or set(item) != BLOCKER_KEYS:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_ORACLE,
                 "oracle_schema",
                 "invalid blocking finding",
@@ -291,10 +291,10 @@ def _notes(value: JsonValue | None) -> tuple[str, ...]:
         The validated non-blocking notes.
 
     Raises:
-        LooprError: value is not a well-formed string array.
+        ReviewLoopError: value is not a well-formed string array.
     """
     if not isinstance(value, list):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "non_blocking_notes must be an array",
@@ -309,11 +309,11 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
         The validated Oracle review.
 
     Raises:
-        LooprError: text is not a well-formed Oracle review for pull_request.
+        ReviewLoopError: text is not a well-formed Oracle review for pull_request.
     """
     value = _json_object(text)
     if set(value) != TOP_KEYS:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "Oracle output has unknown or missing fields",
@@ -326,21 +326,21 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
         or _string(value.get("base_sha"), field="base_sha") != pull_request.base_sha
         or _string(value.get("head_sha"), field="head_sha") != pull_request.head_sha
     ):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_identity",
             "Oracle verdict identity or SHA binding mismatched",
         )
     verdict = _string(value.get("verdict"), field="verdict")
     if verdict not in {"APPROVE", "REQUEST_CHANGES"}:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "invalid Oracle verdict",
         )
     review_body = _string(value.get("review_body"), field="review_body")
     if len(review_body.encode("utf-8")) > MAX_REVIEW_BODY_BYTES:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "Oracle review_body exceeds the GitHub review body bound",
@@ -350,7 +350,7 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
     prompt_value = value.get("implementation_prompt")
     if verdict == "APPROVE":
         if blockers or prompt_value is not None:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_ORACLE,
                 "oracle_consistency",
                 "APPROVE cannot contain blockers or an implementation prompt",
@@ -358,7 +358,7 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
         prompt: str | None = None
     else:
         if not blockers:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_ORACLE,
                 "oracle_consistency",
                 "REQUEST_CHANGES requires blocking findings",
@@ -374,7 +374,6 @@ def parse_review(text: str, pull_request: PullRequest) -> OracleReview:
         blocking_findings=blockers,
         implementation_prompt=prompt,
         non_blocking_notes=notes,
-        raw=value,
     )
 
 
@@ -389,12 +388,12 @@ def parse_bootstrap(
         The validated Oracle bootstrap result.
 
     Raises:
-        LooprError: text is not a well-formed bootstrap result bound to
+        ReviewLoopError: text is not a well-formed bootstrap result bound to
             issue and base_sha.
     """
     value = _json_object(text)
     if set(value) != BOOTSTRAP_TOP_KEYS:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_schema",
             "Oracle bootstrap output has unknown or missing fields",
@@ -405,7 +404,7 @@ def parse_bootstrap(
         or _integer(value.get("issue_number"), field="issue_number") != issue.number
         or _string(value.get("base_sha"), field="base_sha") != base_sha
     ):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle_identity",
             "Oracle bootstrap identity or SHA binding mismatched",
@@ -416,7 +415,6 @@ def parse_bootstrap(
         issue_number=issue.number,
         base_sha=base_sha,
         implementation_prompt=prompt,
-        raw=value,
     )
 
 
@@ -435,11 +433,11 @@ def _validate_oracle_command(command: list[str]) -> None:
     """Reject an Oracle command whose aggregate argv exceeds its byte bound.
 
     Raises:
-        LooprError: command's aggregate argv exceeds the byte bound.
+        ReviewLoopError: command's aggregate argv exceeds the byte bound.
     """
     argument_bytes = sum(len(os.fsencode(argument)) + 1 for argument in command)
     if argument_bytes > MAX_ORACLE_ARG_BYTES:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "bundle",
             "Oracle command arguments exceed the byte bound",
@@ -531,7 +529,7 @@ def _run_oracle_with_retries(
     """Run Oracle, retrying only bounded remote-service busy failures.
 
     Raises:
-        LooprError: The Oracle command failed permanently or exhausted the
+        ReviewLoopError: The Oracle command failed permanently or exhausted the
             remote contention retry budget.
     """
     attempt = 1
@@ -548,14 +546,14 @@ def _run_oracle_with_retries(
             )
         except CommandError as exc:
             if not _is_remote_busy(exc):
-                raise LooprError(EXIT_ORACLE, "oracle", str(exc)) from exc
+                raise ReviewLoopError(EXIT_ORACLE, "oracle", str(exc)) from exc
             if busy_retries >= REMOTE_BUSY_MAX_RETRIES:
                 message = (
                     "Oracle remote service remained busy after "
                     f"{attempt} attempts; retry budget exhausted after "
                     f"{REMOTE_BUSY_MAX_RETRIES} retries"
                 )
-                raise LooprError(EXIT_ORACLE, "oracle", message) from exc
+                raise ReviewLoopError(EXIT_ORACLE, "oracle", message) from exc
             busy_retries += 1
             delay = _remote_busy_delay(busy_retries, random_value)
             _log_remote_busy_retry(attempt, attempt + 1, delay)
@@ -569,28 +567,27 @@ def _reject_credentials_in_attachments(
     runner: CommandRunner,
     attachments: tuple[Path, ...],
 ) -> None:
-    """Reject credentials that became known after bundle construction.
+    """Reject known credentials immediately before Oracle invocation.
 
-    The Oracle config is refreshed immediately before invocation. Re-checking
-    every private bundle artifact after that refresh closes the gap where a
-    config-only token rotates after the source patch or instruction files were
-    initially validated.
+    The supported remote token is environment-backed and registered when the
+    runner is created. Re-checking every private artifact here makes the
+    credential boundary explicit at the final transport handoff.
 
     Raises:
-        LooprError: An attachment cannot be inspected or contains a known
+        ReviewLoopError: An attachment cannot be inspected or contains a known
             credential.
     """
     for attachment in attachments:
         try:
             data = attachment.read_bytes()
         except OSError as exc:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "bundle",
                 "failed to inspect an Oracle attachment",
             ) from exc
         if runner.contains_secret(data):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "bundle",
                 "Oracle attachment contains a known credential",
@@ -654,7 +651,7 @@ def _bounded_text_attachment(
         size, or None if the file was omitted instead of written.
 
     Raises:
-        LooprError: data contains a known credential.
+        ReviewLoopError: data contains a known credential.
     """
     if data is None:
         return (
@@ -690,7 +687,7 @@ def _bounded_text_attachment(
         )
     if runner.contains_secret(text):
         message = f"attachment contains a known credential: {path}"
-        raise LooprError(EXIT_PRECONDITION, "bundle", message)
+        raise ReviewLoopError(EXIT_PRECONDITION, "bundle", message)
     if current_total + len(data) > MAX_ATTACHMENTS_BYTES:
         return (
             {
@@ -760,11 +757,11 @@ def build_review_bundle(
         The bundle's artifact paths, core files first.
 
     Raises:
-        LooprError: pull_request or its repository exceeds a bundle limit,
+        ReviewLoopError: pull_request or its repository exceeds a bundle limit,
             or the patch is not clean UTF-8 or contains a known credential.
     """
     if len(pull_request.changed_paths) > MAX_CHANGED_FILES:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "bundle",
             "pull request exceeds changed-file limit",
@@ -773,13 +770,13 @@ def build_review_bundle(
     try:
         patch_text = patch.decode("utf-8", "strict")
     except UnicodeDecodeError as exc:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "bundle",
             "patch is not UTF-8",
         ) from exc
     if runner.contains_secret(patch):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "bundle",
             "patch contains a known credential",
@@ -791,7 +788,7 @@ def build_review_bundle(
         if PurePosixPath(path).name in {"AGENTS.md", "CONTRIBUTING.md"}
     }
     if len(instructions) > MAX_INSTRUCTION_FILES:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "bundle",
             "repository exceeds instruction-file limit",
@@ -839,7 +836,7 @@ def build_bootstrap_bundle(
         The bundle's artifact paths, core files first.
 
     Raises:
-        LooprError: The repository exceeds an instruction-file limit, or an
+        ReviewLoopError: The repository exceeds an instruction-file limit, or an
             instruction file contains a known credential.
     """
     tracked = issue_client.tracked_paths_at(base_sha)
@@ -851,7 +848,7 @@ def build_bootstrap_bundle(
         )
     )
     if len(instructions) > MAX_INSTRUCTION_FILES:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "bundle",
             "repository exceeds instruction-file limit",
@@ -871,19 +868,9 @@ def build_bootstrap_bundle(
     )
 
 
-def _oracle_uses_remote_transport(
-    runner: CommandRunner,
-    env: Mapping[str, str],
-) -> bool:
-    """Return whether either Oracle remote-transport source is configured.
-
-    Both sources are trimmed the way Oracle's own resolver trims them, so a
-    whitespace-only value is treated as unset. Endpoint selection and
-    config/environment precedence remain Oracle's responsibility.
-    """
-    env_remote_host = normalize_oracle_remote_value(env.get("ORACLE_REMOTE_HOST"))
-    config_remote_host = runner.oracle_config_remote_host
-    return env_remote_host is not None or config_remote_host is not None
+def _oracle_uses_remote_transport(env: Mapping[str, str]) -> bool:
+    """Return whether the supported environment-backed remote host is set."""
+    return normalize_oracle_remote_value(env.get("ORACLE_REMOTE_HOST")) is not None
 
 
 def _oracle_command(
@@ -931,6 +918,29 @@ def _oracle_command(
     return command
 
 
+def _oracle_environment(
+    runner: CommandRunner,
+    writer: TemporaryFileWriter,
+) -> dict[str, str]:
+    """Build a credential-safe Oracle environment for one invocation.
+
+    Oracle user config may contain a remote token that this skill cannot know
+    without reimplementing Oracle's JSON5 grammar. Use a private empty
+    command-scoped Oracle home so user config cannot silently outrank the
+    supported environment-backed remote host/token. Oracle still owns parsing
+    of any supported project configuration, and local manual-login auth keeps
+    using the HOME-based browser profile.
+
+    Returns:
+        The isolated Oracle process environment.
+    """
+    environment = runner.oracle_env()
+    oracle_home = writer.root / "oracle-home"
+    oracle_home.mkdir(mode=0o700)
+    environment["ORACLE_HOME_DIR"] = str(oracle_home)
+    return environment
+
+
 def invoke_oracle(
     runner: CommandRunner,
     writer: TemporaryFileWriter,
@@ -951,19 +961,18 @@ def invoke_oracle(
         The Oracle command's raw output text.
 
     Raises:
-        LooprError: attachments exceed max_attachments, the Oracle command
+        ReviewLoopError: attachments exceed max_attachments, the Oracle command
             failed, or its output is missing, oversized, or contains a known
             credential.
     """
     if len(attachments) > max_attachments:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "bundle",
             "Oracle attachment count exceeds the command bound",
         )
     raw_path = writer.root / "oracle-raw.json"
-    env = runner.oracle_env()
-    uses_remote_transport = _oracle_uses_remote_transport(runner, env)
+    environment = _oracle_environment(runner, writer)
     command = _oracle_command(
         raw_path,
         thinking_time,
@@ -971,11 +980,10 @@ def invoke_oracle(
         prompt,
         attachments,
         slug,
-        manual_login=not uses_remote_transport,
+        manual_login=not _oracle_uses_remote_transport(environment),
     )
     _validate_oracle_command(command)
     _reject_credentials_in_attachments(runner, attachments)
-    environment = env
     sleep = time.sleep if _sleep is None else _sleep
     random_value = SystemRandom().random if _random_value is None else _random_value
     _run_oracle_with_retries(
@@ -998,7 +1006,7 @@ def invoke_oracle(
             descriptor = None
             raw_bytes = handle.read(MAX_ORACLE_OUTPUT + 1)
     except OSError as exc:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle",
             "Oracle output is missing or invalid UTF-8",
@@ -1007,7 +1015,7 @@ def invoke_oracle(
         if descriptor is not None:
             os.close(descriptor)
     if len(raw_bytes) > MAX_ORACLE_OUTPUT:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle",
             "Oracle output exceeded bounds or contained a credential",
@@ -1015,13 +1023,13 @@ def invoke_oracle(
     try:
         raw = raw_bytes.decode("utf-8", "strict")
     except UnicodeDecodeError as exc:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle",
             "Oracle output is missing or invalid UTF-8",
         ) from exc
     if runner.contains_secret(raw):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_ORACLE,
             "oracle",
             "Oracle output exceeded bounds or contained a credential",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 from typing import cast
 
 EXIT_PRECONDITION = 2
@@ -25,11 +25,6 @@ class ReviewLoopError(RuntimeError):
         self.category = category
 
 
-# Transitional import alias for modules that are migrated independently. The
-# canonical internal exception name is ReviewLoopError.
-LooprError = ReviewLoopError
-
-
 @dataclass(frozen=True)
 class PullRequest:
     """An immutable GitHub pull-request snapshot."""
@@ -48,7 +43,6 @@ class PullRequest:
     head_sha: str
     head_repository: str
     changed_paths: tuple[str, ...]
-    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +59,6 @@ class PullRequestIdentity:
     head_ref: str
     head_sha: str
     head_repository: str
-    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -81,7 +74,6 @@ class IssueSnapshot:
     state: str
     updated_at: str
     comments: tuple[JsonObject, ...]
-    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -120,7 +112,6 @@ class OracleReview:
     blocking_findings: tuple[JsonObject, ...]
     implementation_prompt: str | None
     non_blocking_notes: tuple[str, ...]
-    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)
@@ -131,7 +122,6 @@ class OracleBootstrap:
     issue_number: int
     base_sha: str
     implementation_prompt: str
-    raw: InitVar[JsonObject | None] = None
 
 
 @dataclass(frozen=True)

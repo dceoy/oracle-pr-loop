@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -19,10 +19,10 @@ from .models import (
     IssueSnapshot,
     JsonObject,
     JsonValue,
-    LooprError,
     PullRequest,
     PullRequestIdentity,
     ReviewComment,
+    ReviewLoopError,
 )
 from .process import MAX_INPUT, CommandError
 
@@ -30,8 +30,8 @@ if TYPE_CHECKING:
     from .process import CommandRunner
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
-HUNK_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-INDEX_RE = re.compile(r"\Aindex ([0-9a-f]{40})\.\.([0-9a-f]{40})")
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+INDEX_RE = re.compile(r"^index ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: [0-7]{6})?$")
 PART_RE = re.compile(r"[A-Za-z0-9_.-]+\Z")
 OWNER_REPO_PART_COUNT = 2
 LS_TREE_FIELD_COUNT = 4
@@ -49,7 +49,8 @@ MAX_GITHUB_DIFF_LINES = 20_000
 MAX_GITHUB_FILE_DIFF_BYTES = 500 * 1024
 MAX_GITHUB_FILE_DIFF_LINES = 20_000
 NULL_SHA = "0" * 40
-BODY_MARKERS = frozenset({" ", "+", "-", "\\"})
+NO_NEWLINE_MARKER = "\\ No newline at end of file"
+BODY_MARKERS = frozenset({" ", "+", "-"})
 PR_FIELDS = (
     "url,number,title,body,author,state,isDraft,baseRefName,baseRefOid,"
     "headRefName,headRefOid,headRepository,headRepositoryOwner,files,changedFiles"
@@ -86,53 +87,41 @@ def normalize_repo(remote: str) -> str:
     """Normalize one unambiguous GitHub.com repository remote.
 
     Returns:
-        The `owner/name` repository identifier.
+        The canonical `owner/repository` identifier.
 
     Raises:
-        LooprError: remote is not an unambiguous github.com repository URL.
+        ReviewLoopError: The remote is ambiguous, malformed, or not GitHub.com.
     """
-    value = remote
     if (
         any(
             character.isspace()
             or ord(character) < MIN_PRINTABLE_CODEPOINT
             or ord(character) == DEL_CODEPOINT
-            for character in value
+            for character in remote
         )
-        or "?" in value
-        or "#" in value
+        or "?" in remote
+        or "#" in remote
     ):
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "repository",
-            "origin must be an unambiguous github.com URL",
-        )
-    match = re.fullmatch(
-        r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?",
-        value,
-    )
+        message = "origin must be an unambiguous github.com URL"
+        raise ReviewLoopError(EXIT_PRECONDITION, "repository", message)
+
+    match = re.fullmatch(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?", remote)
     if match is not None:
         owner, name = match.groups()
     else:
         try:
-            parsed = urllib.parse.urlsplit(value)
+            parsed = urllib.parse.urlsplit(remote)
         except ValueError:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "origin must be an unambiguous github.com URL",
-            ) from None
+            message = "origin must be an unambiguous github.com URL"
+            raise ReviewLoopError(EXIT_PRECONDITION, "repository", message) from None
         if (
             parsed.scheme not in {"https", "ssh"}
             or parsed.netloc not in {"github.com", "git@github.com"}
             or parsed.query
             or parsed.fragment
         ):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "origin must be an unambiguous github.com URL",
-            )
+            message = "origin must be an unambiguous github.com URL"
+            raise ReviewLoopError(EXIT_PRECONDITION, "repository", message)
         parts = parsed.path.split("/")
         if (
             len(parts) != OWNER_REPO_PART_COUNT + 1
@@ -140,15 +129,13 @@ def normalize_repo(remote: str) -> str:
             or not parts[1]
             or not parts[2]
         ):
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
-                "origin must identify exactly one repository",
-            )
+            message = "origin must identify exactly one repository"
+            raise ReviewLoopError(EXIT_PRECONDITION, "repository", message)
         _empty, owner, name = parts
         name = name.removesuffix(".git")
+
     if not PART_RE.fullmatch(owner) or not PART_RE.fullmatch(name):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_PRECONDITION,
             "repository",
             "invalid repository name",
@@ -168,16 +155,18 @@ def _resolve_target(
     """Resolve one strict numeric or canonical GitHub target.
 
     Returns:
-        The repository and positive target number.
+        The canonical repository identifier and positive target number.
 
     Raises:
-        LooprError: value is not a positive number or canonical GitHub URL,
-            or a numeric value is given without origin_repo.
+        ReviewLoopError: The target is missing repository context or malformed.
     """
-    ascii_number = re.fullmatch(r"[0-9]+", value)
-    if ascii_number is not None:
+    if re.fullmatch(r"[0-9]+", value) is not None:
         if origin_repo is None:
-            raise LooprError(EXIT_PRECONDITION, "input", numeric_message)
+            raise ReviewLoopError(
+                EXIT_PRECONDITION,
+                "input",
+                numeric_message,
+            )
         repository, number = origin_repo, int(value)
     else:
         if (
@@ -190,11 +179,19 @@ def _resolve_target(
             or "?" in value
             or "#" in value
         ):
-            raise LooprError(EXIT_PRECONDITION, "input", invalid_message)
+            raise ReviewLoopError(
+                EXIT_PRECONDITION,
+                "input",
+                invalid_message,
+            )
         try:
             parsed = urllib.parse.urlsplit(value)
         except ValueError:
-            raise LooprError(EXIT_PRECONDITION, "input", invalid_message) from None
+            raise ReviewLoopError(
+                EXIT_PRECONDITION,
+                "input",
+                invalid_message,
+            ) from None
         target = re.fullmatch(
             rf"/([^/]+)/([^/]+)/{re.escape(route)}/([0-9]+)",
             parsed.path,
@@ -208,15 +205,17 @@ def _resolve_target(
             or not PART_RE.fullmatch(target.group(1))
             or not PART_RE.fullmatch(target.group(2))
         ):
-            raise LooprError(EXIT_PRECONDITION, "input", invalid_message)
+            raise ReviewLoopError(
+                EXIT_PRECONDITION,
+                "input",
+                invalid_message,
+            )
         repository = f"{target.group(1)}/{target.group(2)}"
         number = int(target.group(3))
+
     if number <= 0:
-        raise LooprError(
-            EXIT_PRECONDITION,
-            "input",
-            f"{target_name} number must be positive",
-        )
+        message = f"{target_name} number must be positive"
+        raise ReviewLoopError(EXIT_PRECONDITION, "input", message)
     return repository, number
 
 
@@ -224,25 +223,27 @@ def resolve_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
     """Resolve a positive PR number or canonical GitHub pull URL.
 
     Returns:
-        The repository, PR number, and canonical pull URL.
+        Repository, PR number, and canonical GitHub pull URL.
     """
     repository, number = _resolve_target(
         value,
         origin_repo,
         route="pull",
         numeric_message="numeric --pr requires an unambiguous local origin",
-        invalid_message="--pr must be a positive number or canonical GitHub pull URL",
+        invalid_message=("--pr must be a positive number or canonical GitHub pull URL"),
         target_name="pull request",
     )
-    url = f"https://github.com/{repository}/pull/{number}"
-    return repository, number, url
+    return repository, number, f"https://github.com/{repository}/pull/{number}"
 
 
-def resolve_issue_target(value: str, origin_repo: str | None) -> tuple[str, int, str]:
+def resolve_issue_target(
+    value: str,
+    origin_repo: str | None,
+) -> tuple[str, int, str]:
     """Resolve a positive Issue number or canonical GitHub issue URL.
 
     Returns:
-        The repository, Issue number, and canonical issue URL.
+        Repository, Issue number, and canonical GitHub Issue URL.
     """
     repository, number = _resolve_target(
         value,
@@ -254,15 +255,14 @@ def resolve_issue_target(value: str, origin_repo: str | None) -> tuple[str, int,
         ),
         target_name="issue",
     )
-    url = f"https://github.com/{repository}/issues/{number}"
-    return repository, number, url
+    return repository, number, f"https://github.com/{repository}/issues/{number}"
 
 
 def validate_ref(ref: str) -> None:
     """Reject Git refs that can alter command interpretation or traversal.
 
     Raises:
-        LooprError: ref is unsafe.
+        ReviewLoopError: The ref is unsafe for deterministic Git invocation.
     """
     forbidden = any(
         ord(character) < MIN_PRINTABLE_CODEPOINT
@@ -278,17 +278,17 @@ def validate_ref(ref: str) -> None:
         or "@{" in ref
         or forbidden
     ):
-        raise LooprError(EXIT_PRECONDITION, "ref", "unsafe Git ref")
+        raise ReviewLoopError(EXIT_PRECONDITION, "ref", "unsafe Git ref")
 
 
 def validate_path(path: str) -> str:
     """Reject changed paths that can escape the immutable Git snapshot.
 
     Returns:
-        path, unchanged.
+        The unchanged validated POSIX path.
 
     Raises:
-        LooprError: path is unsafe.
+        ReviewLoopError: The path is empty, unsafe, or non-portable.
     """
     if (
         not path
@@ -299,7 +299,11 @@ def validate_path(path: str) -> str:
             for character in path
         )
     ):
-        raise LooprError(EXIT_PRECONDITION, "path", "invalid changed path")
+        raise ReviewLoopError(
+            EXIT_PRECONDITION,
+            "path",
+            "invalid changed path",
+        )
     pure = PurePosixPath(path)
     if (
         pure.is_absolute()
@@ -307,312 +311,334 @@ def validate_path(path: str) -> str:
         or any(part.casefold() == ".git" for part in pure.parts)
     ):
         message = f"unsafe changed path: {path}"
-        raise LooprError(EXIT_PRECONDITION, "path", message)
+        raise ReviewLoopError(EXIT_PRECONDITION, "path", message)
     return path
 
 
 def _header_path(value: str, prefix: str) -> str | None:
-    """Return one safe diff-header path, or None when it names no usable file.
-
-    Git appends a tab after the path in `---`/`+++` lines when the path
-    contains a space, to separate it from a trailing timestamp field; that
-    separator is dropped here so it is never mistaken for an unsafe control
-    character in the path itself.
-
-    Returns:
-        The prefix-stripped path, or None for /dev/null, a quoted path, or a
-        path that is unsafe to address.
-    """
+    """Return one safe, prefix-stripped diff header path."""
     path = value.split("\t", 1)[0]
     if not path.startswith(prefix):
         return None
     try:
         return validate_path(path.removeprefix(prefix))
-    except LooprError:
+    except ReviewLoopError:
         return None
 
 
-@dataclass
-class _DiffCursor:
-    """Mutable scan position inside one unified-diff file section."""
+def _header_is_dev_null(value: str) -> bool:
+    """Return whether a diff header explicitly names the absent-file sentinel."""
+    return value.split("\t", 1)[0] == "/dev/null"
 
-    path: str | None = None
+
+@dataclass(frozen=True)
+class DiffFileAnalysis:
+    """Structural facts from one canonical frozen-diff file section."""
+
+    base_path: str
+    old_sha: str
+    new_sha: str
+    byte_size: int
+    line_count: int
+
+
+@dataclass(frozen=True)
+class FrozenDiffAnalysis:
+    """Fail-closed structural analysis of the exact frozen unified diff."""
+
+    anchors: frozenset[tuple[str, str, int]]
+    files: dict[str, DiffFileAnalysis]
+
+
+@dataclass
+class _SectionState:
+    """Mutable state for the one canonical structural diff pass."""
+
+    byte_size: int = 0
+    line_count: int = 0
+    old_path: str | None = None
+    head_path: str | None = None
+    old_sha: str | None = None
+    new_sha: str | None = None
     old_line: int = 0
     new_line: int = 0
-    in_hunk: bool = False
+    remaining_old: int | None = None
+    remaining_new: int | None = None
+    anchors: set[tuple[str, str, int]] = field(default_factory=set)
+    malformed: bool = False
+    saw_old_header: bool = False
+    saw_new_header: bool = False
 
-
-def _scan_body_line(
-    marker: str,
-    cursor: _DiffCursor,
-    anchors: set[tuple[str, str, int]],
-    allowed_paths: frozenset[str],
-) -> None:
-    """Record the anchors one hunk body line contributes and advance the cursor."""
-    if marker == "\\":
-        return
-    path = cursor.path
-    if path is not None and path in allowed_paths:
-        if marker == "-":
-            anchors.add((path, "LEFT", cursor.old_line))
-        if marker in {" ", "+"}:
-            anchors.add((path, "RIGHT", cursor.new_line))
-    if marker in {" ", "-"}:
-        cursor.old_line += 1
-    if marker in {" ", "+"}:
-        cursor.new_line += 1
-
-
-def diff_anchors(
-    patch: str, allowed_paths: frozenset[str]
-) -> frozenset[tuple[str, str, int]]:
-    """Enumerate every `(path, side, line)` GitHub can anchor a comment to.
-
-    Only lines that the frozen base-to-head patch itself contains are
-    enumerated, matching GitHub's own line-comment semantics: added and
-    unchanged/context lines on `RIGHT` with their head-file line numbers, and
-    only removed lines on `LEFT` with their base-file line numbers. A context
-    line is never a valid `LEFT` anchor. A file is addressed by the path it
-    has at head, which is the path GitHub's review API expects, so a rename's
-    `LEFT` lines and a deletion's lines stay addressable. Any path outside
-    allowed_paths, and any diff section this scanner cannot read
-    unambiguously, contributes no anchors.
-
-    Returns:
-        The anchors the reviewed diff supports.
-    """
-    anchors: set[tuple[str, str, int]] = set()
-    cursor = _DiffCursor()
-    old_path: str | None = None
-    for line in patch.split("\n"):
-        marker = line[:1]
-        if cursor.in_hunk and marker in BODY_MARKERS:
-            _scan_body_line(marker, cursor, anchors, allowed_paths)
-            continue
-        cursor.in_hunk = False
-        if line.startswith("diff --git "):
-            old_path, cursor.path = None, None
-        elif line.startswith("--- "):
-            old_path = _header_path(line.removeprefix("--- "), "a/")
-        elif line.startswith("+++ "):
-            cursor.path = _header_path(line.removeprefix("+++ "), "b/") or old_path
-        elif (match := HUNK_RE.match(line)) is not None and cursor.path is not None:
-            cursor.old_line = int(match.group(1))
-            cursor.new_line = int(match.group(2))
-            cursor.in_hunk = True
-    return frozenset(anchors)
-
-
-def diff_base_paths(patch: str, allowed_paths: frozenset[str]) -> dict[str, str]:
-    """Map each allowed head path to the base path its own diff section names.
-
-    `diff_anchors` addresses every anchor, including a rename's `LEFT`
-    lines, by the file's head-side path. A rename's base-side path is a
-    different string, so validating that file's `diff` attribute at the
-    base commit against the head-side path would check the wrong
-    `.gitattributes` pattern and miss a base-only `-diff` rule declared
-    for the old name.
-
-    Returns:
-        Each allowed head path mapped to its own section's base path, or
-        to itself when the section names no base path at all (an
-        addition) or the same path on both sides (no rename).
-    """
-    base_paths: dict[str, str] = {}
-    old_path: str | None = None
-    for line in patch.split("\n"):
-        if line.startswith("diff --git "):
-            old_path = None
-        elif line.startswith("--- "):
-            old_path = _header_path(line.removeprefix("--- "), "a/")
-        elif line.startswith("+++ "):
-            head_path = _header_path(line.removeprefix("+++ "), "b/") or old_path
-            if head_path is not None and head_path in allowed_paths:
-                base_paths[head_path] = old_path or head_path
-    return base_paths
+    @property
+    def in_hunk(self) -> bool:
+        """Report whether a hunk still expects body lines."""
+        return self.remaining_old is not None and self.remaining_new is not None
 
 
 def _physical_line_count(value: bytes) -> int:
-    """Count LF-delimited physical lines in one exact byte sequence.
+    """Count physical lines in exact bytes.
 
     Returns:
-        The number of physical lines in ``value``.
+        The number of LF-delimited lines, including a final unterminated line.
     """
     return value.count(b"\n") + int(bool(value and not value.endswith(b"\n")))
 
 
-def _diff_section_bytes(raw_lines: list[bytes], start: int, end: int) -> bytes:
-    """Return one section, retaining its separator before the next one.
+def _finish_hunk_if_complete(state: _SectionState) -> None:
+    """Clear hunk counters when both declared ranges are fully consumed."""
+    if state.remaining_old == 0 and state.remaining_new == 0:
+        state.remaining_old = None
+        state.remaining_new = None
+
+
+def _consume_hunk_body(line: str, state: _SectionState) -> bool:
+    """Consume one exact hunk body line.
 
     Returns:
-        The exact bytes belonging to the section.
+        Whether the line is a valid hunk body or no-newline marker.
     """
-    value = b"\n".join(raw_lines[start:end])
-    if end < len(raw_lines):
-        value += b"\n"
-    return value
+    if line == NO_NEWLINE_MARKER:
+        return True
+    marker = line[:1]
+    if marker not in BODY_MARKERS:
+        return False
+    if state.remaining_old is None or state.remaining_new is None:
+        return False
+
+    old_delta = int(marker in {" ", "-"})
+    new_delta = int(marker in {" ", "+"})
+    if state.remaining_old < old_delta or state.remaining_new < new_delta:
+        state.malformed = True
+        return True
+
+    if state.head_path is not None:
+        if marker == "-" and state.old_line > 0:
+            state.anchors.add((state.head_path, "LEFT", state.old_line))
+        elif marker in {" ", "+"} and state.new_line > 0:
+            state.anchors.add((state.head_path, "RIGHT", state.new_line))
+
+    state.old_line += old_delta
+    state.new_line += new_delta
+    state.remaining_old -= old_delta
+    state.remaining_new -= new_delta
+    _finish_hunk_if_complete(state)
+    return True
 
 
-def _advance_diff_section_state(
-    line: str,
-    old_path: str | None,
-    head_path: str | None,
-    in_hunk: bool,
-) -> tuple[str | None, str | None, bool]:
-    """Update one section's paths and hunk state from one diff line.
+def _record_index(line: str, state: _SectionState) -> None:
+    """Record one full-index header or mark the section malformed."""
+    match = INDEX_RE.match(line)
+    if match is None or state.old_sha is not None or state.new_sha is not None:
+        state.malformed = True
+        return
+    state.old_sha, state.new_sha = match.groups()
 
-    Returns:
-        The updated base path, head path, and hunk-state flag.
-    """
-    if in_hunk:
-        if line[:1] in BODY_MARKERS:
-            return old_path, head_path, True
-        in_hunk = False
+
+def _record_old_header(line: str, state: _SectionState) -> None:
+    """Record the base-side path header."""
+    if state.saw_old_header:
+        state.malformed = True
+    state.saw_old_header = True
+    value = line.removeprefix("--- ")
+    if _header_is_dev_null(value):
+        state.old_path = None
+        return
+    state.old_path = _header_path(value, "a/")
+    if state.old_path is None:
+        state.malformed = True
+
+
+def _record_new_header(line: str, state: _SectionState) -> None:
+    """Record the head-side path header and deletion fallback."""
+    if state.saw_new_header:
+        state.malformed = True
+    state.saw_new_header = True
+    value = line.removeprefix("+++ ")
+    if _header_is_dev_null(value):
+        state.head_path = state.old_path
+        if state.old_path is None:
+            state.malformed = True
+        return
+    state.head_path = _header_path(value, "b/")
+    if state.head_path is None:
+        state.malformed = True
+
+
+def _start_hunk(line: str, state: _SectionState) -> None:
+    """Start one declared hunk or fail the section closed."""
+    match = HUNK_RE.match(line)
+    if match is None or state.head_path is None:
+        state.malformed = True
+        return
+    state.old_line = int(match.group(1))
+    state.new_line = int(match.group(3))
+    state.remaining_old = int(match.group(2) or "1")
+    state.remaining_new = int(match.group(4) or "1")
+    _finish_hunk_if_complete(state)
+
+
+def _consume_section_line(line: str, state: _SectionState) -> None:
+    """Consume one structural line within the current diff section."""
+    if state.in_hunk:
+        if _consume_hunk_body(line, state):
+            return
+        state.malformed = True
+        state.remaining_old = None
+        state.remaining_new = None
+
+    if line == NO_NEWLINE_MARKER:
+        return
+    if line.startswith("index "):
+        _record_index(line, state)
+        return
     if line.startswith("--- "):
-        old_path = _header_path(line.removeprefix("--- "), "a/")
-    elif line.startswith("+++ "):
-        head_path = _header_path(line.removeprefix("+++ "), "b/") or old_path
-    elif HUNK_RE.match(line) is not None:
-        in_hunk = True
-    return old_path, head_path, in_hunk
+        _record_old_header(line, state)
+        return
+    if line.startswith("+++ "):
+        _record_new_header(line, state)
+        return
+    if line.startswith("@@ "):
+        _start_hunk(line, state)
+        return
+    if line[:1] in BODY_MARKERS or line.startswith("\\"):
+        state.malformed = True
 
 
-def _diff_sections(
-    patch: bytes,
-    text: str,
-) -> tuple[tuple[str | None, bytes], ...]:
-    """Return each canonical diff section with its head-side path and bytes.
-
-    The text and byte views are split on LF together so the section sizes are
-    measured from the exact bytes Git emitted, while the existing safe header
-    parser determines the same head-side path used by ``diff_anchors``.
-    """
-    raw_lines = patch.split(b"\n")
-    text_lines = text.split("\n")
-    if len(raw_lines) != len(text_lines):
-        return ()
-
-    sections: list[tuple[str | None, bytes]] = []
-    section_start: int | None = None
-    old_path: str | None = None
-    head_path: str | None = None
-    in_hunk = False
-    for index, line in enumerate(text_lines):
-        if line.startswith("diff --git "):
-            if section_start is not None:
-                sections.append((
-                    head_path,
-                    _diff_section_bytes(raw_lines, section_start, index),
-                ))
-            section_start = index
-            old_path = None
-            head_path = None
-            in_hunk = False
-            continue
-        if section_start is None:
-            continue
-        old_path, head_path, in_hunk = _advance_diff_section_state(
-            line,
-            old_path,
-            head_path,
-            in_hunk,
-        )
-
-    if section_start is not None:
-        sections.append((
-            head_path,
-            _diff_section_bytes(raw_lines, section_start, len(raw_lines)),
-        ))
-    return tuple(sections)
+def _discard_path_anchors(
+    anchors: set[tuple[str, str, int]],
+    path: str,
+) -> None:
+    """Remove every previously accepted anchor for one duplicate path."""
+    anchors.difference_update({anchor for anchor in anchors if anchor[0] == path})
 
 
-def _diff_size_safe_paths(
-    patch: bytes,
-    text: str,
+def _finalize_diff_section(
+    state: _SectionState | None,
     allowed_paths: frozenset[str],
-) -> frozenset[str]:
-    """Return changed paths whose local diff remains fully GitHub-visible.
-
-    GitHub can omit portions of a pull-request diff once the aggregate or a
-    single file reaches its byte or line limit. Inline comments for those
-    paths are therefore rejected before publication; the aggregate review
-    body remains responsible for their findings. Equality with any limit is
-    treated as unsafe because the server may truncate at that boundary.
-    """
-    if len(patch) >= MAX_GITHUB_DIFF_BYTES or _physical_line_count(patch) >= (
-        MAX_GITHUB_DIFF_LINES
+    files: dict[str, DiffFileAnalysis],
+    anchors: set[tuple[str, str, int]],
+    invalid_paths: set[str],
+) -> None:
+    """Validate one completed section and merge its structural facts."""
+    if state is None:
+        return
+    if state.in_hunk:
+        state.malformed = True
+    path = state.head_path
+    if path is None or path not in allowed_paths or path in invalid_paths:
+        return
+    if (
+        state.malformed
+        or not state.saw_old_header
+        or not state.saw_new_header
+        or state.old_sha is None
+        or state.new_sha is None
+        or not SHA_RE.fullmatch(state.old_sha)
+        or not SHA_RE.fullmatch(state.new_sha)
     ):
-        return frozenset()
+        return
+    if path in files:
+        files.pop(path, None)
+        invalid_paths.add(path)
+        _discard_path_anchors(anchors, path)
+        return
 
-    oversized_paths: set[str] = set()
-    for path, section in _diff_sections(patch, text):
-        if path in allowed_paths and (
-            len(section) >= MAX_GITHUB_FILE_DIFF_BYTES
-            or _physical_line_count(section) >= MAX_GITHUB_FILE_DIFF_LINES
-        ):
-            oversized_paths.add(path)
-    return frozenset(path for path in allowed_paths if path not in oversized_paths)
+    files[path] = DiffFileAnalysis(
+        base_path=state.old_path or path,
+        old_sha=state.old_sha,
+        new_sha=state.new_sha,
+        byte_size=state.byte_size,
+        line_count=state.line_count,
+    )
+    if (
+        state.byte_size < MAX_GITHUB_FILE_DIFF_BYTES
+        and state.line_count < MAX_GITHUB_FILE_DIFF_LINES
+    ):
+        anchors.update(state.anchors)
 
 
-def diff_blob_shas(
-    patch: str, allowed_paths: frozenset[str]
-) -> dict[str, tuple[str, str]]:
-    """Map each allowed head path to its base/head full blob object ids.
-
-    `--full-index` makes every file section's `index <old>..<new>` header
-    name the exact pre-image/post-image blob Git diffed, independently of
-    whatever attribute-driven text/binary decision produced the hunks that
-    follow it. A caller can read each id back directly by object id (see
-    `blob_is_binary`) to confirm that content, rather than trusting whatever
-    text/binary call the attribute-influenced hunk already made.
+def analyze_frozen_diff(
+    patch: bytes,
+    allowed_paths: frozenset[str],
+) -> FrozenDiffAnalysis:
+    """Derive all unified-diff structural facts in one primary pass.
 
     Returns:
-        Each allowed path's `(old_sha, new_sha)`, using `NULL_SHA` for a
-        side with no blob (an addition or deletion).
+        Exact inline anchors and per-file base-path, blob-SHA, and size facts.
+
+    Raises:
+        ReviewLoopError: The canonical patch is not valid UTF-8.
     """
-    shas: dict[str, tuple[str, str]] = {}
-    pending: tuple[str, str] | None = None
-    old_path: str | None = None
-    in_hunk = False
-    for line in patch.split("\n"):
-        marker = line[:1]
-        if in_hunk and marker in BODY_MARKERS:
-            continue
-        in_hunk = False
+    try:
+        text = patch.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:
+        raise ReviewLoopError(
+            EXIT_PRECONDITION,
+            "bundle",
+            "patch is not UTF-8",
+        ) from exc
+
+    files: dict[str, DiffFileAnalysis] = {}
+    anchors: set[tuple[str, str, int]] = set()
+    invalid_paths: set[str] = set()
+    state: _SectionState | None = None
+    lines = text.split("\n")
+
+    for index, line in enumerate(lines):
+        has_lf = index < len(lines) - 1
+        if not has_lf and not line:
+            break
+        byte_size = len(line.encode("utf-8")) + int(has_lf)
         if line.startswith("diff --git "):
-            pending, old_path = None, None
-        elif (match := INDEX_RE.match(line)) is not None:
-            pending = (match.group(1), match.group(2))
-        elif line.startswith("--- "):
-            old_path = _header_path(line.removeprefix("--- "), "a/")
-        elif line.startswith("+++ "):
-            path = _header_path(line.removeprefix("+++ "), "b/") or old_path
-            if path is not None and path in allowed_paths and pending is not None:
-                shas[path] = pending
-        elif HUNK_RE.match(line) is not None:
-            in_hunk = True
-    return shas
+            _finalize_diff_section(
+                state,
+                allowed_paths,
+                files,
+                anchors,
+                invalid_paths,
+            )
+            state = _SectionState(byte_size=byte_size, line_count=1)
+            continue
+        if state is None:
+            continue
+        state.byte_size += byte_size
+        state.line_count += 1
+        _consume_section_line(line, state)
+
+    _finalize_diff_section(
+        state,
+        allowed_paths,
+        files,
+        anchors,
+        invalid_paths,
+    )
+    if (
+        len(patch) >= MAX_GITHUB_DIFF_BYTES
+        or _physical_line_count(patch) >= MAX_GITHUB_DIFF_LINES
+    ):
+        anchors.clear()
+    return FrozenDiffAnalysis(frozenset(anchors), files)
 
 
 def parse_json_object(text: str, *, category: str) -> JsonObject:
-    """Decode exactly one JSON object without repairing malformed data.
+    """Decode exactly one JSON object without repair or coercion.
 
     Returns:
-        The decoded JSON object.
+        The decoded string-keyed JSON object.
 
     Raises:
-        LooprError: text is not exactly one JSON object.
+        ReviewLoopError: GitHub returned malformed or non-object JSON.
     """
     try:
         value: object = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_GITHUB,
             category,
             "GitHub returned malformed JSON",
         ) from exc
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
-        raise LooprError(
+        raise ReviewLoopError(
             EXIT_GITHUB,
             category,
             "GitHub returned a non-object JSON response",
@@ -624,31 +650,34 @@ def require_object(value: JsonValue | None, *, field: str) -> JsonObject:
     """Require a JSON object field.
 
     Returns:
-        value.
+        The validated object.
 
     Raises:
-        LooprError: value is not an object.
+        ReviewLoopError: The field is not an object.
     """
     if not isinstance(value, dict):
         message = f"GitHub field {field} must be an object"
-        raise LooprError(EXIT_GITHUB, "github_schema", message)
+        raise ReviewLoopError(EXIT_GITHUB, "github_schema", message)
     return value
 
 
 def require_string(
-    value: JsonValue | None, *, field: str, allow_empty: bool = False
+    value: JsonValue | None,
+    *,
+    field: str,
+    allow_empty: bool = False,
 ) -> str:
     """Require a JSON string field.
 
     Returns:
-        value.
+        The validated string.
 
     Raises:
-        LooprError: value is not a string, or is empty and allow_empty is false.
+        ReviewLoopError: The field is not a permitted string.
     """
     if not isinstance(value, str) or (not allow_empty and not value):
         message = f"GitHub field {field} must be a string"
-        raise LooprError(EXIT_GITHUB, "github_schema", message)
+        raise ReviewLoopError(EXIT_GITHUB, "github_schema", message)
     return value
 
 
@@ -656,42 +685,34 @@ def require_integer(value: JsonValue | None, *, field: str) -> int:
     """Require a non-Boolean JSON integer field.
 
     Returns:
-        value.
+        The validated integer.
 
     Raises:
-        LooprError: value is not a non-Boolean integer.
+        ReviewLoopError: The field is not an integer.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         message = f"GitHub field {field} must be an integer"
-        raise LooprError(EXIT_GITHUB, "github_schema", message)
+        raise ReviewLoopError(EXIT_GITHUB, "github_schema", message)
     return value
 
 
 def require_boolean(value: JsonValue | None, *, field: str) -> bool:
-    """Require a JSON Boolean field without coercing other falsey values.
+    """Require a JSON Boolean field without coercion.
 
     Returns:
-        value.
+        The validated Boolean.
 
     Raises:
-        LooprError: value is not a JSON Boolean.
+        ReviewLoopError: The field is not a Boolean.
     """
     if not isinstance(value, bool):
         message = f"GitHub field {field} must be a boolean"
-        raise LooprError(EXIT_GITHUB, "github_schema", message)
+        raise ReviewLoopError(EXIT_GITHUB, "github_schema", message)
     return value
 
 
 def _optional_author_login(value: JsonValue | None, *, field: str) -> str:
-    """Return one Issue/comment author's login, or "" for a deleted account.
-
-    GitHub's schema defines `Issue.author`/`IssueComment.author` as a
-    nullable `Actor`, and `gh` may surface a deleted account as either a
-    null author or an author object with a null/empty login.
-
-    Returns:
-        The author's login, or "" when GitHub reports no author.
-    """
+    """Return one author's login, or an empty string for a deleted account."""
     if value is None:
         return ""
     author = require_object(value, field=field)
@@ -705,7 +726,7 @@ class _ImmutableGitMixin:
     """Shared immutable Git object reads for identity-bound GitHub clients."""
 
     def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
-        """Initialize the shared immutable Git reader state."""
+        """Bind immutable Git operations to one command runner and checkout."""
         self.runner = runner
         self.repo_dir = repo_dir
 
@@ -716,14 +737,7 @@ class _ImmutableGitMixin:
         env: dict[str, str],
         max_output: int = 1024 * 1024,
     ) -> str:
-        """Run one bounded Git read.
-
-        Returns:
-            Strictly decoded stdout.
-
-        Raises:
-            LooprError: Git failed or returned invalid UTF-8.
-        """
+        """Run one Git text command with the supplied environment."""
         try:
             result = self.runner.run(
                 ["git", *args],
@@ -733,7 +747,11 @@ class _ImmutableGitMixin:
             )
             return result.stdout.decode("utf-8", "strict")
         except (CommandError, UnicodeError) as exc:
-            raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+            raise ReviewLoopError(
+                EXIT_PRECONDITION,
+                "git",
+                str(exc),
+            ) from exc
 
     def _text(
         self,
@@ -742,14 +760,7 @@ class _ImmutableGitMixin:
         input_text: str | None = None,
         max_output: int = 24 * 1024 * 1024,
     ) -> str:
-        """Run one bounded GitHub CLI read.
-
-        Returns:
-            Strictly decoded stdout.
-
-        Raises:
-            LooprError: GitHub failed or returned invalid UTF-8.
-        """
+        """Run one authenticated GitHub CLI command and decode UTF-8 output."""
         try:
             result = self.runner.run(
                 ["gh", *args],
@@ -760,7 +771,7 @@ class _ImmutableGitMixin:
             )
             return result.stdout.decode("utf-8", "strict")
         except (CommandError, UnicodeError) as exc:
-            raise LooprError(EXIT_GITHUB, "github", str(exc)) from exc
+            raise ReviewLoopError(EXIT_GITHUB, "github", str(exc)) from exc
 
     def _initialize_repository(
         self,
@@ -768,25 +779,21 @@ class _ImmutableGitMixin:
         hardened: bool,
         require_push_url: bool,
     ) -> str:
-        """Resolve the repository root and one unambiguous origin.
-
-        Returns:
-            Normalized fetch repository.
-
-        Raises:
-            LooprError: The checkout or origin is invalid or ambiguous.
-        """
+        """Resolve and validate the local repository origin."""
         env = self._git_env() if hardened else self.runner.base_env()
         try:
-            root = self._git_text(["rev-parse", "--show-toplevel"], env=env).strip()
-        except LooprError as exc:
-            raise LooprError(
+            root = self._git_text(
+                ["rev-parse", "--show-toplevel"],
+                env=env,
+            ).strip()
+        except ReviewLoopError as exc:
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "repository",
                 "cannot infer repository from local checkout",
             ) from exc
         if not root:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "repository",
                 "Git returned an empty repository root",
@@ -796,7 +803,7 @@ class _ImmutableGitMixin:
         if require_push_url:
             push_repo = self._origin_repo(env=env, push=True)
             if fetch_repo.casefold() != push_repo.casefold():
-                raise LooprError(
+                raise ReviewLoopError(
                     EXIT_PRECONDITION,
                     "repository",
                     "origin fetch and push URLs must identify the same repository",
@@ -804,14 +811,7 @@ class _ImmutableGitMixin:
         return fetch_repo
 
     def _origin_repo(self, *, env: dict[str, str], push: bool) -> str:
-        """Read exactly one normalized origin URL.
-
-        Returns:
-            Normalized repository identifier.
-
-        Raises:
-            LooprError: The origin is missing, ambiguous, or invalid.
-        """
+        """Read exactly one GitHub.com origin fetch or push URL."""
         kind = "push" if push else "fetch"
         try:
             urls = self._git_text(
@@ -824,24 +824,24 @@ class _ImmutableGitMixin:
                 ],
                 env=env,
             ).splitlines()
-        except LooprError as exc:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "repository",
+        except ReviewLoopError as exc:
+            message = (
                 "origin must have exactly one push URL"
                 if push
-                else "cannot infer repository from local checkout",
-            ) from exc
-        if len(urls) != 1 or not urls[0].strip():
-            raise LooprError(
+                else "cannot infer repository from local checkout"
+            )
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "repository",
-                f"origin must have exactly one {kind} URL",
-            )
+                message,
+            ) from exc
+        if len(urls) != 1 or not urls[0].strip():
+            message = f"origin must have exactly one {kind} URL"
+            raise ReviewLoopError(EXIT_PRECONDITION, "repository", message)
         return normalize_repo(urls[0])
 
     def _git_env(self) -> dict[str, str]:
-        """Return a Git environment that cannot redirect immutable object reads."""
+        """Return a Git environment that ignores host-controlled config."""
         env = self.runner.allowlisted_env()
         env.update({
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -857,13 +857,13 @@ class _ImmutableGitMixin:
         max_output: int,
         input_text: str | None = None,
     ) -> bytes:
-        """Read immutable Git data with a strict output bound.
+        """Run one hardened Git command and return exact bytes.
 
         Returns:
-            The command's raw stdout bytes.
+            Bounded command stdout.
 
         Raises:
-            LooprError: The command failed.
+            ReviewLoopError: Git execution failed.
         """
         try:
             return self.runner.run(
@@ -874,34 +874,31 @@ class _ImmutableGitMixin:
                 input_text=input_text,
             ).stdout
         except CommandError as exc:
-            raise LooprError(EXIT_PRECONDITION, "git", str(exc)) from exc
+            raise ReviewLoopError(EXIT_PRECONDITION, "git", str(exc)) from exc
 
     def git_text(self, args: list[str], *, max_output: int) -> str:
-        """Read one immutable Git response as UTF-8 text.
+        """Run one hardened Git command and decode strict UTF-8.
 
         Returns:
-            Strictly decoded stdout.
+            Decoded command stdout.
 
         Raises:
-            LooprError: Git failed or returned invalid UTF-8.
+            ReviewLoopError: Git fails or returns non-UTF-8 output.
         """
         try:
-            return self.git_bytes(args, max_output=max_output).decode(
-                "utf-8",
-                "strict",
-            )
+            return self.git_bytes(args, max_output=max_output).decode("utf-8", "strict")
         except UnicodeError as exc:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "git",
                 "Git returned non-UTF-8 output",
             ) from exc
 
     def ensure_commit_object(self, sha: str) -> None:
-        """Require sha to name a local commit object.
+        """Require sha to identify a locally available commit object.
 
         Raises:
-            LooprError: sha does not name a local commit object.
+            ReviewLoopError: sha is unavailable or is not a commit object.
         """
         object_type = self.git_bytes(
             ["cat-file", "-t", sha],
@@ -909,16 +906,16 @@ class _ImmutableGitMixin:
         ).decode("utf-8", "strict")
         if object_type.strip() != "commit":
             message = f"{sha} is not a commit object"
-            raise LooprError(EXIT_PRECONDITION, "git", message)
+            raise ReviewLoopError(EXIT_PRECONDITION, "git", message)
 
     def tracked_paths_at(self, sha: str) -> tuple[str, ...]:
-        """List every tracked UTF-8 path in the frozen tree at sha.
+        """List all safe UTF-8 tracked paths at one immutable commit.
 
         Returns:
-            The sorted, distinct tracked paths.
+            Sorted unique tracked paths.
 
         Raises:
-            LooprError: A tracked path is non-UTF-8, unsafe, or duplicated.
+            ReviewLoopError: The tree contains unsafe, invalid, or duplicate paths.
         """
         output = self.git_bytes(
             ["ls-tree", "-r", "-z", "--name-only", sha],
@@ -931,14 +928,14 @@ class _ImmutableGitMixin:
             try:
                 path = raw_path.decode("utf-8", "strict")
             except UnicodeDecodeError as exc:
-                raise LooprError(
+                raise ReviewLoopError(
                     EXIT_PRECONDITION,
                     "path",
                     "Git tree returned a non-UTF-8 tracked path",
                 ) from exc
             paths.append(validate_path(path))
         if len(paths) != len(set(paths)):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "path",
                 "Git tree returned duplicate tracked paths",
@@ -952,15 +949,13 @@ class _ImmutableGitMixin:
         *,
         max_output: int,
     ) -> bytes | None:
-        """Read one blob at sha, or return None for an explicit omission.
+        """Read one bounded immutable blob, or omit unsupported tree entries.
 
         Returns:
-            The blob's exact bytes, or None if it is absent, not a blob, or
-            exceeds max_output.
+            Exact blob bytes, or None for missing, non-blob, or oversized content.
 
         Raises:
-            LooprError: Git returned ambiguous, malformed, or mismatched
-                tree metadata.
+            ReviewLoopError: Git returns ambiguous or inconsistent metadata.
         """
         listing = self.git_bytes(
             [
@@ -979,7 +974,7 @@ class _ImmutableGitMixin:
         if not records:
             return None
         if len(records) != 1 or b"\t" not in records[0]:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "git",
                 "Git tree returned an ambiguous changed-file entry",
@@ -987,7 +982,7 @@ class _ImmutableGitMixin:
         metadata, raw_path = records[0].split(b"\t", 1)
         fields = metadata.split()
         if len(fields) != LS_TREE_FIELD_COUNT:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "git",
                 "Git tree returned malformed changed-file metadata",
@@ -997,13 +992,13 @@ class _ImmutableGitMixin:
             listed_path = raw_path.decode("utf-8", "strict")
             object_sha = raw_object_sha.decode("ascii", "strict")
         except UnicodeError as exc:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "git",
                 "Git tree returned non-UTF-8 changed-file metadata",
             ) from exc
         if listed_path != path or not SHA_RE.fullmatch(object_sha):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "git",
                 "Git tree changed-file identity mismatched",
@@ -1018,7 +1013,7 @@ class _ImmutableGitMixin:
             max_output=max_output,
         )
         if len(data) != size:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "git",
                 "Git blob size changed during immutable evidence read",
@@ -1026,58 +1021,50 @@ class _ImmutableGitMixin:
         return data
 
     def blob_is_binary(self, sha: str, *, max_output: int) -> bool:
-        """Return whether the blob at sha contains a NUL byte.
-
-        Reading an object by its content-addressed id resolves it straight
-        from the object store, with no attribute lookup of any kind, so no
-        local `diff` attribute override can make binary content read back as
-        text here. A blob Git cannot read, or one too large to sample within
-        max_output, is treated as binary so a caller never trusts anchors
-        tied to it without an actual content check. This deliberately scans
-        further (the whole blob, up to max_output) than Git's own default
-        heuristic (a fixed leading sample) and refuses instead of sampling a
-        prefix when a blob exceeds max_output: both only ever cost a
-        legitimate text file its inline anchors, never risk anchoring a
-        comment GitHub's create-review API would reject.
+        """Conservatively determine whether one immutable blob is binary.
 
         Returns:
-            Whether the blob is unreadable, oversized, or contains a NUL
-            byte.
+            True when the blob is binary or cannot be read within the bound.
         """
         try:
-            data = self.git_bytes(["cat-file", "blob", sha], max_output=max_output)
-        except LooprError:
+            data = self.git_bytes(
+                ["cat-file", "blob", sha],
+                max_output=max_output,
+            )
+        except ReviewLoopError:
             return True
         return b"\0" in data
 
     def _check_attr_diff_isolated(
-        self, sha: str, paths: frozenset[str], *, max_output: int
+        self,
+        sha: str,
+        paths: frozenset[str],
+        *,
+        max_output: int,
     ) -> bytes:
-        """Run `check-attr --source=sha diff` against an isolated Git directory.
-
-        The isolated directory is a throwaway bare repository whose
-        `objects/info/alternates` points at this clone's real object store
-        (resolved from `git rev-parse --git-common-dir`), so `--source` can
-        resolve sha's tree while no local `$GIT_DIR/info/attributes` --
-        this clone's own or a linked worktree's shared one -- exists to
-        contend with it.
-
-        Returns:
-            The command's raw `-z`-delimited stdout.
-        """
+        """Evaluate immutable `diff` attributes in an isolated bare repository."""
         common_dir = Path(
             self
-            .git_bytes(["rev-parse", "--git-common-dir"], max_output=4096)
+            .git_bytes(
+                ["rev-parse", "--git-common-dir"],
+                max_output=4096,
+            )
             .decode("utf-8", "strict")
             .strip()
         )
         if not common_dir.is_absolute():
             common_dir = self.repo_dir / common_dir
         objects_dir = common_dir.resolve(strict=True) / "objects"
-        with tempfile.TemporaryDirectory(prefix="looprattrs-") as tmp_dir:
+        with tempfile.TemporaryDirectory(prefix="pr-review-loop-attrs-") as tmp_dir:
             isolated_git_dir = Path(tmp_dir) / "attrs.git"
             self.git_bytes(
-                ["init", "--quiet", "--bare", "--template=", str(isolated_git_dir)],
+                [
+                    "init",
+                    "--quiet",
+                    "--bare",
+                    "--template=",
+                    str(isolated_git_dir),
+                ],
                 max_output=4096,
             )
             alternates = isolated_git_dir / "objects" / "info" / "alternates"
@@ -1101,62 +1088,36 @@ class _ImmutableGitMixin:
             )
 
     def paths_with_diff_unset(
-        self, sha: str, paths: frozenset[str], *, max_output: int
+        self,
+        sha: str,
+        paths: frozenset[str],
+        *,
+        max_output: int,
     ) -> frozenset[str]:
-        """Return every path whose `diff` attribute is `unset` in the tree at sha.
-
-        `--source=sha` resolves tracked `.gitattributes` blobs from the
-        frozen commit tree itself, not the ambient worktree, so a checkout
-        left on an unrelated ref (for example, still on the PR's base while
-        its head declares `<path> -diff`) cannot hide an attribute the
-        reviewed tree actually declares. `$GIT_DIR/info/attributes` outranks
-        every other attribute source, including a tree passed via
-        `--source`, so a local rule there (present only in this clone, never
-        visible to GitHub) could otherwise force `diff` back to `set` for a
-        path the reviewed tree itself marks `-diff` -- masking a real
-        non-diffable path rather than merely missing one, and letting an
-        anchor through that GitHub's create-review API would reject.
-        `check-attr` therefore never runs against this clone's own Git
-        directory: a throwaway bare repository, created fresh for this call
-        with an empty `info/` directory and an `objects/info/alternates`
-        pointing at this clone's own object store (resolved from `git
-        rev-parse --git-common-dir`, so a linked worktree's shared
-        `info/attributes` is bypassed too, not just this checkout's), gives
-        `--source` a tree to resolve with no local attribute file able to
-        contend with it. `-c core.attributesFile=/dev/null` closes the
-        remaining default-global-attributes gap, since the throwaway
-        directory's own freshly created config cannot be assumed to lack
-        one.
-
-        `--source` itself requires Git 2.40; an older `check-attr` rejects
-        it as an unknown option and the command fails before reporting
-        anything, and this skill's public contract requires only "Git",
-        with no minimum version. Treating every candidate path as `unset`
-        when the command -- or building its isolated Git directory --
-        fails is the same fail-closed answer `blob_is_binary` gives an
-        unreadable blob: it only ever drops anchors this call cannot
-        verify, instead of raising a precondition error that would abort
-        an otherwise publishable review.
+        """Return paths whose immutable `diff` attribute is explicitly unset.
 
         Returns:
-            The subset of paths whose `diff` attribute resolves to `unset`
-            at sha, or every path given when `check-attr` itself failed.
+            Attribute-forced binary paths. Inspection failures conservatively
+            return every candidate path.
 
         Raises:
-            LooprError: `check-attr` returned a malformed or non-UTF-8
-                `-z` record.
+            ReviewLoopError: Git emits malformed attribute records.
         """
         if not paths:
             return frozenset()
         try:
-            output = self._check_attr_diff_isolated(sha, paths, max_output=max_output)
-        except (LooprError, OSError, UnicodeDecodeError):
+            output = self._check_attr_diff_isolated(
+                sha,
+                paths,
+                max_output=max_output,
+            )
+        except (ReviewLoopError, OSError, UnicodeDecodeError):
             return frozenset(paths)
         fields = output.split(b"\0")
         if fields and fields[-1] == b"":
             fields = fields[:-1]
         if len(fields) % 3 != 0:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "git",
                 "git check-attr returned a malformed -z record",
@@ -1164,27 +1125,24 @@ class _ImmutableGitMixin:
         unset: set[str] = set()
         for index in range(0, len(fields), 3):
             path_bytes, _attribute, value = fields[index : index + 3]
-            if value == b"unset":
-                try:
-                    unset.add(path_bytes.decode("utf-8", "strict"))
-                except UnicodeDecodeError as exc:
-                    raise LooprError(
-                        EXIT_PRECONDITION,
-                        "git",
-                        "git check-attr returned a non-UTF-8 path",
-                    ) from exc
+            if value != b"unset":
+                continue
+            try:
+                unset.add(path_bytes.decode("utf-8", "strict"))
+            except UnicodeDecodeError as exc:
+                raise ReviewLoopError(
+                    EXIT_PRECONDITION,
+                    "git",
+                    "git check-attr returned a non-UTF-8 path",
+                ) from exc
         return frozenset(unset)
 
 
 class GitHubClient(_ImmutableGitMixin):
     """Read PR snapshots and post reviews through trusted CLI commands."""
 
-    def __init__(
-        self,
-        runner: CommandRunner,
-        repo_dir: Path,
-    ) -> None:
-        """Initialize an unresolved GitHub client."""
+    def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
+        """Initialize a client before target identity is resolved."""
         super().__init__(runner, repo_dir.resolve())
         self.repository = ""
         self.number = 0
@@ -1192,33 +1150,36 @@ class GitHubClient(_ImmutableGitMixin):
         self.authenticated_login = ""
 
     def initialize(self, pr_value: str) -> None:
-        """Resolve the local repository and target PR.
+        """Bind ordinary review operations to one exact pull request.
 
         Raises:
-            LooprError: The repository or PR could not be resolved or is
-                inconsistent.
+            ReviewLoopError: Repository or authenticated identity validation fails.
         """
         origin_repo = self._initialize_repository(
             hardened=True,
             require_push_url=False,
         )
         self._set_target(pr_value, origin_repo)
-        self.authenticated_login = self._text(
-            ["api", "--hostname", "github.com", "user", "--jq", ".login"],
-        ).strip()
+        self.authenticated_login = self._text([
+            "api",
+            "--hostname",
+            "github.com",
+            "user",
+            "--jq",
+            ".login",
+        ]).strip()
         if not self.authenticated_login:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_GITHUB,
                 "identity",
                 "authenticated GitHub login was empty",
             )
 
     def initialize_for_submit(self, pr_value: str) -> None:
-        """Resolve a submit target without performing reviewer identity lookup.
+        """Bind submit operations and require one matching origin push URL.
 
-        Submit uses ordinary Git credentials for repository identity and push
-        URL reads, while all PR schema and snapshot validation stays canonical
-        in this client.
+        Raises:
+            ReviewLoopError: Repository or target identity validation fails.
         """
         origin_repo = self._initialize_repository(
             hardened=False,
@@ -1227,83 +1188,72 @@ class GitHubClient(_ImmutableGitMixin):
         self._set_target(pr_value, origin_repo)
 
     def _set_target(self, pr_value: str, origin_repo: str) -> None:
-        """Resolve and bind one PR target to the local origin repository.
-
-        Raises:
-            LooprError: The target is invalid or does not match origin_repo.
-        """
+        """Resolve the target and bind it to the local origin."""
         self.repository, self.number, self.url = resolve_target(
             pr_value,
             origin_repo,
         )
         if origin_repo.casefold() != self.repository.casefold():
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "repository",
                 "local origin does not match pull request repository",
             )
 
     def snapshot(self, *, require_open: bool = True) -> PullRequest:
-        """Collect and validate one complete PR snapshot.
+        """Read and validate one complete immutable PR snapshot.
 
         Returns:
-            The validated pull-request snapshot. When require_open is false,
-                closed or draft state is permitted for post-push confirmation.
+            The exact validated pull-request snapshot.
 
         Raises:
-            LooprError: GitHub's response was malformed, inconsistent, or
-                failed identity validation.
+            ReviewLoopError: GitHub identity, state, or inventory is invalid.
         """
         data = self._pull_request_data(PR_FIELDS)
         identity = self._parse_identity(data, require_open=require_open)
         files_value = data.get("files")
         if not isinstance(files_value, list):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_GITHUB,
                 "github_schema",
                 "GitHub field files must be an array",
             )
-        paths: list[str] = []
-        for item in files_value:
-            if not isinstance(item, dict):
-                raise LooprError(
-                    EXIT_GITHUB,
-                    "github_schema",
-                    "GitHub changed-file entry must be an object",
-                )
-            paths.append(
-                validate_path(require_string(item.get("path"), field="files.path"))
-            )
+        paths = self._changed_paths(files_value)
         advertised_count = require_integer(
-            data.get("changedFiles"), field="changedFiles"
+            data.get("changedFiles"),
+            field="changedFiles",
         )
         if advertised_count < 0 or advertised_count != len(paths):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "inventory",
                 "GitHub changed-file inventory was truncated or inconsistent",
             )
         if len(paths) != len(set(paths)):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "path",
                 "duplicate changed paths",
             )
-
         author = require_object(data.get("author"), field="author")
-        author_login = require_string(author.get("login"), field="author.login")
-        if not author_login:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "identity",
-                "pull request author was empty",
-            )
-        pull_request = PullRequest(
+        author_login = require_string(
+            author.get("login"),
+            field="author.login",
+        )
+        return PullRequest(
             repository=identity.repository,
             number=identity.number,
             url=identity.url,
-            title=require_string(data.get("title"), field="title", allow_empty=True),
-            body=require_string(data.get("body"), field="body", allow_empty=True),
+            title=require_string(
+                data.get("title"),
+                field="title",
+                allow_empty=True,
+            ),
+            body=require_string(
+                data.get("body"),
+                field="body",
+                allow_empty=True,
+            ),
             author=author_login,
             state=identity.state,
             is_draft=identity.is_draft,
@@ -1313,42 +1263,46 @@ class GitHubClient(_ImmutableGitMixin):
             head_sha=identity.head_sha,
             head_repository=identity.head_repository,
             changed_paths=tuple(sorted(paths)),
-            raw=data,
         )
-        return pull_request
+
+    @staticmethod
+    def _changed_paths(files_value: list[JsonValue]) -> list[str]:
+        """Validate the complete GitHub changed-file inventory."""
+        paths: list[str] = []
+        for item in files_value:
+            if not isinstance(item, dict):
+                raise ReviewLoopError(
+                    EXIT_GITHUB,
+                    "github_schema",
+                    "GitHub changed-file entry must be an object",
+                )
+            path = require_string(item.get("path"), field="files.path")
+            paths.append(validate_path(path))
+        return paths
 
     def identity_snapshot(
         self,
         *,
         require_open: bool = True,
     ) -> PullRequestIdentity:
-        """Collect and validate PR identity, state, and ref fields only.
-
-        Submit uses this smaller snapshot because GitHub CLI caps the
-        `files` field at 100 entries, while review requires the complete
-        changed-file inventory.
+        """Read and validate only the PR identity and ref snapshot.
 
         Returns:
-            The validated pull-request identity and ref snapshot.
+            The validated immutable identity snapshot.
+
+        Raises:
+            ReviewLoopError: GitHub identity or state validation fails.
         """
-        return self._parse_identity(
-            self._pull_request_data(PR_IDENTITY_FIELDS),
-            require_open=require_open,
-        )
+        data = self._pull_request_data(PR_IDENTITY_FIELDS)
+        return self._parse_identity(data, require_open=require_open)
 
     def _pull_request_data(self, fields: str) -> JsonObject:
-        """Fetch one bounded GitHub pull-request response.
-
-        Returns:
-            The parsed GitHub pull-request response.
-        """
-        return parse_json_object(
-            self._text(
-                ["pr", "view", self.url, "--json", fields],
-                max_output=8 * 1024 * 1024,
-            ),
-            category="github_schema",
+        """Fetch one bounded PR JSON object from GitHub CLI."""
+        output = self._text(
+            ["pr", "view", self.url, "--json", fields],
+            max_output=8 * 1024 * 1024,
         )
+        return parse_json_object(output, category="github_schema")
 
     def _parse_identity(
         self,
@@ -1356,11 +1310,7 @@ class GitHubClient(_ImmutableGitMixin):
         *,
         require_open: bool,
     ) -> PullRequestIdentity:
-        """Parse and validate the shared PR identity fields.
-
-        Returns:
-            The validated pull-request identity and ref snapshot.
-        """
+        """Parse and validate the ref-bound identity fields from GitHub."""
         head_repository = require_object(
             data.get("headRepository"),
             field="headRepository",
@@ -1376,10 +1326,12 @@ class GitHubClient(_ImmutableGitMixin):
             )
         else:
             owner = require_string(
-                head_owner.get("login"), field="headRepositoryOwner.login"
+                head_owner.get("login"),
+                field="headRepositoryOwner.login",
             )
             name = require_string(
-                head_repository.get("name"), field="headRepository.name"
+                head_repository.get("name"),
+                field="headRepository.name",
             )
             head_repo = f"{owner}/{name}"
         identity = PullRequestIdentity(
@@ -1388,12 +1340,23 @@ class GitHubClient(_ImmutableGitMixin):
             url=require_string(data.get("url"), field="url"),
             state=require_string(data.get("state"), field="state"),
             is_draft=require_boolean(data.get("isDraft"), field="isDraft"),
-            base_ref=require_string(data.get("baseRefName"), field="baseRefName"),
-            base_sha=require_string(data.get("baseRefOid"), field="baseRefOid"),
-            head_ref=require_string(data.get("headRefName"), field="headRefName"),
-            head_sha=require_string(data.get("headRefOid"), field="headRefOid"),
+            base_ref=require_string(
+                data.get("baseRefName"),
+                field="baseRefName",
+            ),
+            base_sha=require_string(
+                data.get("baseRefOid"),
+                field="baseRefOid",
+            ),
+            head_ref=require_string(
+                data.get("headRefName"),
+                field="headRefName",
+            ),
+            head_sha=require_string(
+                data.get("headRefOid"),
+                field="headRefOid",
+            ),
             head_repository=head_repo,
-            raw=data,
         )
         self._validate_snapshot_identity(identity, require_open=require_open)
         return identity
@@ -1404,28 +1367,24 @@ class GitHubClient(_ImmutableGitMixin):
         *,
         require_open: bool,
     ) -> None:
-        """Validate state, repository identity, refs, and commit IDs.
-
-        Raises:
-            LooprError: pull_request fails any identity, state, or safety check.
-        """
+        """Enforce exact target, state, repository, SHA, and ref invariants."""
         if (
             pull_request.number != self.number
             or pull_request.url.rstrip("/").lower() != self.url.lower()
         ):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "identity",
                 "ambiguous pull request identity",
             )
         if require_open and (pull_request.state != "OPEN" or pull_request.is_draft):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "state",
                 "pull request must be open and non-draft",
             )
         if pull_request.head_repository.lower() != self.repository.lower():
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "repository",
                 "fork pull requests are not supported",
@@ -1433,7 +1392,7 @@ class GitHubClient(_ImmutableGitMixin):
         if not SHA_RE.fullmatch(pull_request.base_sha) or not SHA_RE.fullmatch(
             pull_request.head_sha
         ):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "sha",
                 "invalid base or head SHA",
@@ -1442,21 +1401,16 @@ class GitHubClient(_ImmutableGitMixin):
         validate_ref(pull_request.head_ref)
 
     def review_event(self, pull_request: PullRequest, verdict: str) -> str:
-        """Select the GitHub transport event for a validated Oracle verdict.
-
-        Formal review events remain available for PRs authored by someone
-        else. GitHub rejects formal self-reviews, so self-authored PRs use a
-        commit-anchored comment while the Oracle verdict stays canonical in
-        the command result.
+        """Map a canonical verdict to the GitHub review event.
 
         Returns:
-            `COMMENT` for a self-authored PR, otherwise the Oracle verdict.
+            COMMENT for self-review, otherwise the canonical formal verdict.
 
         Raises:
-            LooprError: The verdict is not an accepted Oracle verdict.
+            ReviewLoopError: verdict is not APPROVE or REQUEST_CHANGES.
         """
         if verdict not in {"APPROVE", "REQUEST_CHANGES"}:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "verdict",
                 "invalid review verdict",
@@ -1466,7 +1420,11 @@ class GitHubClient(_ImmutableGitMixin):
         return verdict
 
     def ensure_objects(self, pull_request: PullRequest) -> None:
-        """Require both frozen SHAs to name local commit objects."""
+        """Require the frozen base and head commits locally.
+
+        Raises:
+            ReviewLoopError: Either immutable commit object is unavailable.
+        """
         for sha in (pull_request.base_sha, pull_request.head_sha):
             self.ensure_commit_object(sha)
 
@@ -1477,11 +1435,10 @@ class GitHubClient(_ImmutableGitMixin):
         *,
         max_output: int,
     ) -> bytes | None:
-        """Read one changed blob, or return None for an explicit omission.
+        """Read one changed path from the frozen head tree.
 
         Returns:
-            The blob's exact bytes, or None if it is absent, not a blob, or
-            exceeds max_output.
+            Bounded blob bytes, or None when the path is not attachable.
         """
         return self.blob_bytes_at(
             pull_request.head_sha,
@@ -1490,43 +1447,10 @@ class GitHubClient(_ImmutableGitMixin):
         )
 
     def patch(self, pull_request: PullRequest, *, max_output: int) -> bytes:
-        """Read the exact base-to-head merge-base patch in canonical form.
-
-        Every format-affecting option is pinned explicitly to Git's own
-        defaults, so a repository-local `diff.*` setting (`GIT_CONFIG_GLOBAL`
-        and `GIT_CONFIG_NOSYSTEM` already exclude global/system config, but
-        not the repository's own `.git/config`) cannot change the headers or
-        hunk context `diff_anchors` reads, or silently diverge from the diff
-        GitHub's own review API validates comment anchors against.
-        `--indent-heuristic` pins Git's own default hunk-boundary shifting so
-        a local `diff.indentHeuristic=false` cannot move a hunk's boundary.
-        `-l0` pins rename detection to always run its exhaustive search, so a
-        local `diff.renameLimit` cannot silently fall back to reporting a
-        rename as an unrelated delete-and-add pair, which would replace a
-        small rename hunk's anchors with whole-file delete/add anchors.
-        `-c core.attributesFile=/dev/null` closes the global-attributes gap
-        `GIT_CONFIG_GLOBAL` leaves open: Git consults a default global
-        attributes file (`$XDG_CONFIG_HOME/git/attributes`, else
-        `$HOME/.config/git/attributes`) even with no global config present,
-        and a `diff` attribute there can make binary content read back as a
-        textual hunk. `$GIT_DIR/info/attributes` and any system attributes
-        file have no equivalent config override, so `diff_anchors`
-        additionally verifies every anchor's blob by content, independently
-        of any attribute.
-        `-c core.quotePath=false` pins Git's own default of emitting a raw
-        `a/`/`b/` header even for a non-ASCII path; a repository-local
-        `core.quotePath=true` would otherwise C-quote that header (wrapping
-        it in double quotes and octal-escaping each non-ASCII byte), which
-        `_header_path()` cannot parse as a prefixed path, and so drops every
-        anchor for that file to the aggregate body.
-        `-c diff.suppressBlankEmpty=false` pins Git's own default of a lone
-        space on an empty context line; a repository-local
-        `diff.suppressBlankEmpty=true` would otherwise emit that line with no
-        leading character at all, which `diff_anchors` cannot distinguish
-        from the end of the hunk and so drops every anchor that follows it.
+        """Read the exact base-to-head patch in pinned canonical Git form.
 
         Returns:
-            The patch's raw bytes.
+            The bounded raw unified diff.
         """
         return self.git_bytes(
             [
@@ -1554,112 +1478,105 @@ class GitHubClient(_ImmutableGitMixin):
             max_output=max_output,
         )
 
-    def diff_anchors(
-        self, pull_request: PullRequest
-    ) -> frozenset[tuple[str, str, int]]:
-        """Enumerate the comment anchors the frozen base-to-head diff supports.
-
-        A local `diff` attribute (from `$GIT_DIR/info/attributes`, global or
-        system attributes, or an uncommitted worktree `.gitattributes` edit)
-        can make `patch()` emit a textual hunk for content GitHub's own diff
-        still treats as binary, since GitHub never sees any attribute source
-        outside the repository's tracked, committed tree. Anchoring a
-        comment to such a hunk would make GitHub's create-review API reject
-        the whole atomic review with a 422, so every anchor's blob is read
-        back by its content-addressed object id — a lookup no attribute
-        source can influence — and dropped unless that content actually
-        lacks a NUL byte.
-
-        That content check alone is not enough: a tracked `.gitattributes`
-        edit committed at base or head, but not checked out in the ambient
-        worktree `patch()` ran against, can mark a path `-diff` in the
-        reviewed tree while leaving it looking like ordinary text both in
-        `patch()`'s hunk and in the blob's own bytes. GitHub resolves that
-        same tracked attribute from base and head directly, so it would
-        still refuse to anchor a comment there. Every candidate path is
-        therefore also checked against the base and head trees themselves,
-        independently of the worktree, and dropped whenever either tree
-        marks it `-diff`.
-
-        A rename's anchors are addressed by the file's head-side path (see
-        `diff_anchors`), but a `-diff` rule the base tree declares for that
-        file is keyed to its base-side path, which can differ from the
-        head-side path across the rename. The base tree is therefore
-        checked with each candidate's own base-side path from
-        `diff_base_paths`, not with the head-side path used to address the
-        anchor, so a base-only rule on the pre-rename name still drops the
-        anchor.
-
-        Returns:
-            The anchors, restricted to the snapshot's validated changed
-            paths, confirmed non-binary by content, and not marked `-diff`
-            in either the base or head tree.
-
-        Raises:
-            LooprError: The patch is not UTF-8.
-        """
-        patch = self.patch(pull_request, max_output=MAX_ANCHOR_PATCH_BYTES)
-        try:
-            text = patch.decode("utf-8", "strict")
-        except UnicodeDecodeError as exc:
-            raise LooprError(
-                EXIT_PRECONDITION,
-                "bundle",
-                "patch is not UTF-8",
-            ) from exc
-        allowed_paths = frozenset(pull_request.changed_paths)
-        size_safe_paths = _diff_size_safe_paths(patch, text, allowed_paths)
-        if not size_safe_paths:
-            return frozenset()
-        anchors = diff_anchors(text, size_safe_paths)
-        shas = diff_blob_shas(text, size_safe_paths)
-        binary_by_sha: dict[str, bool] = {}
-
-        def is_binary(sha: str) -> bool:
-            if sha == NULL_SHA:
-                return False
-            if sha not in binary_by_sha:
-                binary_by_sha[sha] = self.blob_is_binary(
-                    sha, max_output=MAX_ANCHOR_BLOB_BYTES
-                )
-            return binary_by_sha[sha]
-
-        candidate_paths = frozenset(path for path, _side, _line in anchors)
-        base_paths = diff_base_paths(text, candidate_paths)
-        head_paths_by_base_path: dict[str, list[str]] = {}
+    @staticmethod
+    def _base_paths_by_head(
+        analysis: FrozenDiffAnalysis,
+        candidate_paths: frozenset[str],
+    ) -> dict[str, list[str]]:
+        """Group candidate head paths by their parsed immutable base path."""
+        grouped: dict[str, list[str]] = {}
         for head_path in candidate_paths:
-            head_paths_by_base_path.setdefault(
-                base_paths.get(head_path, head_path), []
-            ).append(head_path)
+            file_analysis = analysis.files.get(head_path)
+            if file_analysis is None:
+                continue
+            grouped.setdefault(file_analysis.base_path, []).append(head_path)
+        return grouped
+
+    def _attribute_forced_paths(
+        self,
+        pull_request: PullRequest,
+        analysis: FrozenDiffAnalysis,
+        candidate_paths: frozenset[str],
+    ) -> frozenset[str]:
+        """Map immutable base/head `-diff` attributes to head paths."""
+        grouped = self._base_paths_by_head(analysis, candidate_paths)
+        mapped_count = sum(len(values) for values in grouped.values())
+        if mapped_count != len(candidate_paths):
+            return candidate_paths
         base_forced = self.paths_with_diff_unset(
             pull_request.base_sha,
-            frozenset(head_paths_by_base_path),
+            frozenset(grouped),
             max_output=MAX_ANCHOR_ATTR_BYTES,
         )
-        attribute_forced = frozenset(
-            head_path
-            for base_path in base_forced
-            for head_path in head_paths_by_base_path[base_path]
-        ) | self.paths_with_diff_unset(
-            pull_request.head_sha,
-            candidate_paths,
-            max_output=MAX_ANCHOR_ATTR_BYTES,
-        )
-
-        return frozenset(
-            (path, side, line)
-            for path, side, line in anchors
-            if path not in attribute_forced
-            and not is_binary(
-                shas.get(path, (NULL_SHA, NULL_SHA))[1 if side == "RIGHT" else 0]
+        forced = {
+            head_path for base_path in base_forced for head_path in grouped[base_path]
+        }
+        forced.update(
+            self.paths_with_diff_unset(
+                pull_request.head_sha,
+                candidate_paths,
+                max_output=MAX_ANCHOR_ATTR_BYTES,
             )
         )
+        return frozenset(forced)
 
-    def tracked_paths(self, pull_request: PullRequest) -> tuple[str, ...]:
-        """List every tracked UTF-8 path in the frozen head tree.
+    def _nonbinary_anchors(
+        self,
+        analysis: FrozenDiffAnalysis,
+        attribute_forced: frozenset[str],
+    ) -> frozenset[tuple[str, str, int]]:
+        """Filter parsed anchors through immutable blob binary checks."""
+        binary_by_sha: dict[str, bool] = {}
+        verified: set[tuple[str, str, int]] = set()
+        for path, side, line in analysis.anchors:
+            file_analysis = analysis.files.get(path)
+            if file_analysis is None or path in attribute_forced:
+                continue
+            sha = file_analysis.new_sha if side == "RIGHT" else file_analysis.old_sha
+            if sha == NULL_SHA:
+                is_binary = False
+            else:
+                if sha not in binary_by_sha:
+                    binary_by_sha[sha] = self.blob_is_binary(
+                        sha,
+                        max_output=MAX_ANCHOR_BLOB_BYTES,
+                    )
+                is_binary = binary_by_sha[sha]
+            if not is_binary:
+                verified.add((path, side, line))
+        return frozenset(verified)
+
+    def diff_anchors(
+        self,
+        pull_request: PullRequest,
+    ) -> frozenset[tuple[str, str, int]]:
+        """Validate exact frozen-diff anchors for GitHub inline review.
 
         Returns:
-            The sorted, distinct tracked paths.
+            Anchors proven by the canonical patch, attributes, and blob contents.
+        """
+        analysis = analyze_frozen_diff(
+            self.patch(
+                pull_request,
+                max_output=MAX_ANCHOR_PATCH_BYTES,
+            ),
+            frozenset(pull_request.changed_paths),
+        )
+        if not analysis.anchors:
+            return frozenset()
+        candidate_paths = frozenset(path for path, _side, _line in analysis.anchors)
+        forced = self._attribute_forced_paths(
+            pull_request,
+            analysis,
+            candidate_paths,
+        )
+        return self._nonbinary_anchors(analysis, forced)
+
+    def tracked_paths(self, pull_request: PullRequest) -> tuple[str, ...]:
+        """List all safe paths in the frozen head tree.
+
+        Returns:
+            Sorted unique tracked paths.
         """
         return self.tracked_paths_at(pull_request.head_sha)
 
@@ -1670,17 +1587,13 @@ class GitHubClient(_ImmutableGitMixin):
         body: str,
         comments: tuple[ReviewComment, ...] = (),
     ) -> tuple[int, JsonObject]:
-        """Post one review, with any inline comments, anchored to the frozen head.
-
-        The aggregate body and every inline comment are published by the same
-        create-review request, so publication stays a single atomic write that
-        GitHub either accepts whole or rejects whole.
+        """Atomically create one commit-bound GitHub review.
 
         Returns:
-            The posted review's ID and the raw GitHub response.
+            Created review ID and response object.
 
         Raises:
-            LooprError: GitHub did not anchor the review to the expected head.
+            ReviewLoopError: The request is oversized or GitHub anchors it wrongly.
         """
         payload: JsonObject = {
             "commit_id": pull_request.head_sha,
@@ -1691,7 +1604,7 @@ class GitHubClient(_ImmutableGitMixin):
             payload["comments"] = [comment.as_payload() for comment in comments]
         serialized = json.dumps(payload, ensure_ascii=False)
         if len(serialized.encode("utf-8")) > MAX_INPUT:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "input",
                 "serialized review request exceeds the command input bound",
@@ -1720,7 +1633,7 @@ class GitHubClient(_ImmutableGitMixin):
         if review_id <= 0 or commit_id != pull_request.head_sha:
             if review_id > 0 and event != "COMMENT":
                 self.dismiss(pull_request, review_id)
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_RACE,
                 "race",
                 "GitHub did not anchor the review to the expected head",
@@ -1728,9 +1641,13 @@ class GitHubClient(_ImmutableGitMixin):
         return review_id, data
 
     def dismiss(self, pull_request: PullRequest, review_id: int) -> None:
-        """Dismiss a posted review that became stale."""
+        """Dismiss one stale formal GitHub review.
+
+        Raises:
+            ReviewLoopError: GitHub rejects the dismissal.
+        """
         payload: JsonObject = {
-            "message": "Dismissed automatically: reviewed PR snapshot became stale."
+            "message": ("Dismissed automatically: reviewed PR snapshot became stale.")
         }
         self._text(
             [
@@ -1738,8 +1655,8 @@ class GitHubClient(_ImmutableGitMixin):
                 "--hostname",
                 "github.com",
                 (
-                    f"repos/{pull_request.repository}/pulls/{pull_request.number}/"
-                    f"reviews/{review_id}/dismissals"
+                    f"repos/{pull_request.repository}/pulls/"
+                    f"{pull_request.number}/reviews/{review_id}/dismissals"
                 ),
                 "--method",
                 "PUT",
@@ -1755,40 +1672,36 @@ class GitHubClient(_ImmutableGitMixin):
         review_id: int,
         body: str,
     ) -> JsonObject:
-        """Re-read and validate the posted review identity, commit, and body.
+        """Re-read and validate an exact published review.
 
         Returns:
-            The re-read, validated review response.
+            The validated GitHub review response.
 
         Raises:
-            LooprError: The re-read review's identity or commit does not match.
+            ReviewLoopError: The published identity, author, commit, or body differs.
         """
         data = parse_json_object(
-            self._text(
-                [
-                    "api",
-                    "--hostname",
-                    "github.com",
-                    (
-                        f"repos/{pull_request.repository}/pulls/{pull_request.number}/"
-                        f"reviews/{review_id}"
-                    ),
-                ],
-            ),
+            self._text([
+                "api",
+                "--hostname",
+                "github.com",
+                (
+                    f"repos/{pull_request.repository}/pulls/"
+                    f"{pull_request.number}/reviews/{review_id}"
+                ),
+            ]),
             category="github_schema",
         )
+        user = require_object(data.get("user"), field="user")
+        login = require_string(user.get("login"), field="user.login")
         if (
             require_integer(data.get("id"), field="id") != review_id
-            or require_string(
-                require_object(data.get("user"), field="user").get("login"),
-                field="user.login",
-            ).casefold()
-            != self.authenticated_login.casefold()
+            or login.casefold() != self.authenticated_login.casefold()
             or require_string(data.get("commit_id"), field="commit_id")
             != pull_request.head_sha
             or require_string(data.get("body"), field="body") != body
         ):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_GITHUB,
                 "github",
                 "posted review revalidation failed",
@@ -1797,41 +1710,45 @@ class GitHubClient(_ImmutableGitMixin):
 
     @staticmethod
     def same_snapshot(first: PullRequest, second: PullRequest) -> bool:
-        """Return whether two snapshots have identical base and head SHAs."""
+        """Compare only the frozen base/head identity.
+
+        Returns:
+            Whether both snapshots bind to the same base and head SHAs.
+        """
         return first.base_sha == second.base_sha and first.head_sha == second.head_sha
 
 
 def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
     """Validate, order, and bound one Issue's comment collection.
 
-    Comments are sorted by `createdAt` (GitHub does not contractually
-    guarantee response order), then only the most recent
-    `MAX_ISSUE_COMMENTS` are kept. The aggregate byte budget is then
-    allocated newest-first, so when it is exceeded the oldest retained
-    comments are the ones replaced with an omission marker; the emitted
-    collection is restored to chronological order afterward. Each kept
-    comment's body is replaced with an omission marker if it, or the
-    running total, exceeds its byte bound, so oversized text is dropped
-    outright rather than silently truncated.
-
     Returns:
-        The validated, ordered, bounded comment collection.
+        The newest bounded comments with oversized bodies explicitly omitted.
 
     Raises:
-        LooprError: value is not a well-formed comment array.
+        ReviewLoopError: A GitHub comment entry has an invalid shape.
     """
     parsed: list[tuple[str, str, str]] = []
     for item in value:
         if not isinstance(item, dict):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_GITHUB,
                 "github_schema",
                 "GitHub comment entry must be an object",
             )
         parsed.append((
-            _optional_author_login(item.get("author"), field="comments.author"),
-            require_string(item.get("body"), field="comments.body", allow_empty=True),
-            require_string(item.get("createdAt"), field="comments.createdAt"),
+            _optional_author_login(
+                item.get("author"),
+                field="comments.author",
+            ),
+            require_string(
+                item.get("body"),
+                field="comments.body",
+                allow_empty=True,
+            ),
+            require_string(
+                item.get("createdAt"),
+                field="comments.createdAt",
+            ),
         ))
     parsed.sort(key=operator.itemgetter(2))
     kept = parsed[-MAX_ISSUE_COMMENTS:] if len(parsed) > MAX_ISSUE_COMMENTS else parsed
@@ -1846,39 +1763,36 @@ def _bounded_comments(value: list[JsonValue]) -> tuple[JsonObject, ...]:
         omitted_flags[index] = omitted
         if not omitted:
             total += body_bytes
-    comments: list[JsonObject] = []
-    for (author, body, created_at), omitted in zip(kept, omitted_flags, strict=True):
-        comments.append({
+    return tuple(
+        {
             "author": author,
             "body": "" if omitted else body,
             "created_at": created_at,
             "omitted": omitted,
-        })
-    return tuple(comments)
+        }
+        for (author, body, created_at), omitted in zip(
+            kept,
+            omitted_flags,
+            strict=True,
+        )
+    )
 
 
 class IssueClient(_ImmutableGitMixin):
-    """Read Issue snapshots and repository base-branch identity for bootstrap."""
+    """Read Issue snapshots and repository base identity for bootstrap."""
 
     def __init__(self, runner: CommandRunner, repo_dir: Path) -> None:
-        """Initialize an unresolved Issue client."""
+        """Initialize an Issue client before target identity is resolved."""
         super().__init__(runner, repo_dir.resolve())
         self.repository = ""
         self.number = 0
         self.url = ""
 
     def initialize(self, issue_value: str) -> None:
-        """Resolve the local repository and target Issue.
-
-        Bootstrap always hands the returned base commit to the host for
-        implementation in this checkout, so, unlike PR review, an
-        unambiguous local `origin` is required for both numeric and URL
-        input; a canonical Issue URL never bypasses the matching-origin
-        check.
+        """Bind bootstrap operations to one exact same-repository Issue.
 
         Raises:
-            LooprError: The repository or Issue could not be resolved or is
-                inconsistent with the local checkout.
+            ReviewLoopError: Repository or Issue target validation fails.
         """
         origin_repo = self._initialize_repository(
             hardened=True,
@@ -1888,22 +1802,21 @@ class IssueClient(_ImmutableGitMixin):
             issue_value,
             origin_repo,
         )
-        if origin_repo.lower() != self.repository.lower():
-            raise LooprError(
+        if origin_repo.casefold() != self.repository.casefold():
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "repository",
                 "local origin does not match issue repository",
             )
 
     def snapshot(self) -> IssueSnapshot:
-        """Collect and validate one bounded Issue snapshot.
+        """Read and validate one bounded open Issue snapshot.
 
         Returns:
-            The validated Issue snapshot.
+            The exact Issue snapshot and bounded newest comments.
 
         Raises:
-            LooprError: GitHub's response was malformed, inconsistent, failed
-                identity validation, or contained a known credential.
+            ReviewLoopError: GitHub identity, state, schema, or safety checks fail.
         """
         owner, _, name = self.repository.partition("/")
         envelope = parse_json_object(
@@ -1934,19 +1847,24 @@ class IssueClient(_ImmutableGitMixin):
             field="data.repository",
         )
         data = require_object(
-            repository_data.get("issue"), field="data.repository.issue"
+            repository_data.get("issue"),
+            field="data.repository.issue",
         )
         comments_field = require_object(data.get("comments"), field="comments")
         comments_value = comments_field.get("nodes")
         if not isinstance(comments_value, list):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_GITHUB,
                 "github_schema",
                 "GitHub field comments.nodes must be an array",
             )
-        body = require_string(data.get("body"), field="body", allow_empty=True)
+        body = require_string(
+            data.get("body"),
+            field="body",
+            allow_empty=True,
+        )
         if len(body.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "bundle",
                 "issue body exceeds bound",
@@ -1955,82 +1873,94 @@ class IssueClient(_ImmutableGitMixin):
             repository=self.repository,
             number=require_integer(data.get("number"), field="number"),
             url=require_string(data.get("url"), field="url"),
-            title=require_string(data.get("title"), field="title", allow_empty=True),
+            title=require_string(
+                data.get("title"),
+                field="title",
+                allow_empty=True,
+            ),
             body=body,
             author=_optional_author_login(data.get("author"), field="author"),
             state=require_string(data.get("state"), field="state"),
-            updated_at=require_string(data.get("updatedAt"), field="updatedAt"),
+            updated_at=require_string(
+                data.get("updatedAt"),
+                field="updatedAt",
+            ),
             comments=_bounded_comments(comments_value),
-            raw=data,
         )
-        self._validate_snapshot_identity(issue)
+        self._validate_issue_identity(issue)
         self._validate_content_safety(issue)
         return issue
 
-    def _validate_snapshot_identity(self, issue: IssueSnapshot) -> None:
-        """Validate identity and state.
-
-        Raises:
-            LooprError: issue fails any identity or state check.
-        """
+    def _validate_issue_identity(self, issue: IssueSnapshot) -> None:
+        """Require the Issue response to match the exact requested target."""
         if (
             issue.number != self.number
             or issue.url.rstrip("/").lower() != self.url.lower()
         ):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "identity",
                 "ambiguous issue identity",
             )
         if issue.state != "OPEN":
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "state",
                 "issue must be open",
             )
 
     def _validate_content_safety(self, issue: IssueSnapshot) -> None:
-        """Reject Issue content that carries a known credential value.
-
-        Raises:
-            LooprError: issue title, body, or a comment body contains a
-                known credential value.
-        """
+        """Reject known credentials from untrusted Issue evidence."""
         texts = [issue.title, issue.body]
         for comment in issue.comments:
             body = comment.get("body")
             if isinstance(body, str):
                 texts.append(body)
         if any(self.runner.contains_secret(text) for text in texts):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "credentials",
                 "issue content contains a known credential",
             )
 
     def default_branch(self) -> str:
-        """Return the repository's current default branch name.
+        """Read the repository's current default branch.
 
         Returns:
-            The validated default branch name.
+            A validated safe branch name.
+
+        Raises:
+            ReviewLoopError: GitHub returns invalid default-branch metadata.
         """
         data = parse_json_object(
-            self._text(["repo", "view", self.repository, "--json", "defaultBranchRef"]),
+            self._text([
+                "repo",
+                "view",
+                self.repository,
+                "--json",
+                "defaultBranchRef",
+            ]),
             category="github_schema",
         )
-        ref = require_object(data.get("defaultBranchRef"), field="defaultBranchRef")
-        branch = require_string(ref.get("name"), field="defaultBranchRef.name")
+        ref = require_object(
+            data.get("defaultBranchRef"),
+            field="defaultBranchRef",
+        )
+        branch = require_string(
+            ref.get("name"),
+            field="defaultBranchRef.name",
+        )
         validate_ref(branch)
         return branch
 
     def branch_sha(self, branch: str) -> str:
-        """Return one branch's exact current commit SHA.
+        """Read one current GitHub branch SHA.
 
         Returns:
-            The validated 40-character commit SHA.
+            The validated full lowercase commit SHA.
 
         Raises:
-            LooprError: GitHub's response was malformed or the SHA is invalid.
+            ReviewLoopError: GitHub returns an invalid commit SHA.
         """
         encoded_branch = urllib.parse.quote(branch, safe="")
         data = parse_json_object(
@@ -2045,7 +1975,7 @@ class IssueClient(_ImmutableGitMixin):
         commit = require_object(data.get("commit"), field="commit")
         sha = require_string(commit.get("sha"), field="commit.sha")
         if not SHA_RE.fullmatch(sha):
-            raise LooprError(
+            raise ReviewLoopError(
                 EXIT_PRECONDITION,
                 "sha",
                 "invalid base SHA",

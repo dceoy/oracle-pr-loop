@@ -12,8 +12,9 @@ record cookies, tokens, or private account data in repository files or test
 artifacts.
 
 `pr-review-loop` does not manage ChatGPT OAuth/app installation and does not
-implement a separate Oracle transport. It invokes the local `oracle` CLI; where
-browser automation runs is Oracle configuration.
+implement a separate Oracle transport. It invokes the local `oracle` CLI only.
+Oracle remains responsible for its own browser automation and configuration
+grammar.
 
 For optional diagnostics against an authorized Oracle checkout,
 `scripts/browser-tools.ts` may inspect the active CDP endpoint. Pass the
@@ -29,8 +30,19 @@ oracle --engine browser --browser-manual-login --browser-keep-browser \
   --browser-input-timeout 120000 --prompt "Reply with ready"
 ```
 
-Set `ORACLE_BROWSER_PROFILE_DIR` when the profile should live outside Oracle's
-default location.
+The skill preserves `HOME`, so Oracle's normal persistent manual-login profile
+continues to work. Set `ORACLE_BROWSER_PROFILE_DIR` when that profile should
+live outside Oracle's default location.
+
+`pr-review-loop` deliberately does not load the account-level
+`~/.oracle/config.json` (or an inherited `ORACLE_HOME_DIR/config.json`) during
+its Oracle invocation. This is the security boundary that prevents an
+undiscoverable config-only remote token from outranking the environment values
+the skill can register for redaction. Consequently, account-level browser
+defaults such as a custom ChatGPT URL, Chrome path, timeout, or model strategy
+must be supplied through the corresponding supported Oracle environment/CLI
+interface when the skill needs them. The persistent manual-login profile itself
+remains HOME-based and is not moved by this isolation.
 
 ## Remote `oracle serve`
 
@@ -50,14 +62,29 @@ On the `pr-review-loop` host:
 ssh -N -L 9473:127.0.0.1:9473 user@browser-host &
 export ORACLE_REMOTE_HOST=127.0.0.1:9473
 export ORACLE_REMOTE_TOKEN='...'
-oracle --engine browser --prompt "Reply with ready"
+python3 skills/pr-review-loop/scripts/cli.py review --pr <PR>
 ```
 
-Oracle's own config-file equivalents are also supported. `pr-review-loop`
-forwards `ORACLE_HOME_DIR`, `ORACLE_REMOTE_HOST`, and `ORACLE_REMOTE_TOKEN` and
-uses the presence of Oracle's configured remote host only to avoid forcing
-local manual-login behavior. Effective host/token precedence remains Oracle's
-responsibility.
+For `pr-review-loop`, remote host and token discovery is intentionally limited
+to `ORACLE_REMOTE_HOST` and `ORACLE_REMOTE_TOKEN`. Config-only
+`browser.remoteHost` / `browser.remoteToken` are not supported by the skill.
+This boundary avoids reimplementing Oracle's JSON5 grammar or configuration
+precedence and guarantees that every effective remote token is known to the
+skill before Oracle runs, so it is registered for redaction and checked against
+temporary attachments and structured output. The token is passed only through
+the Oracle process environment, never through argv.
+
+Each Oracle invocation receives a private, command-scoped `ORACLE_HOME_DIR`.
+That prevents account-level Oracle config from silently supplying a
+higher-priority remote host/token that the skill could not safely discover.
+`HOME` and the optional `ORACLE_BROWSER_PROFILE_DIR` remain available,
+preserving local authenticated-browser operation. Safe project configuration,
+where Oracle allows it, is still discovered and parsed by Oracle itself; the
+skill does not parse or emulate Oracle configuration files.
+
+Direct Oracle invocations outside `pr-review-loop` may support additional
+Oracle-native configuration sources. Those sources are outside this skill's
+credential-redaction and transport contract.
 
 ## Direct `@GitHub` review smoke test
 
