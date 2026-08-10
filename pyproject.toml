@@ -147,7 +147,7 @@ pythonpath = ["skills/pr-review-loop"]
 testpaths = ["skills/pr-review-loop/tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
-python_functions = ["test_*.py", "*_test.py"]
+python_functions = ["test_*"]
 minversion = "9.0"
 
 [tool.coverage.run]
