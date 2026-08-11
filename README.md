@@ -1,15 +1,15 @@
-# pr-review-loop
+# oracle-pr-loop
 
-`pr-review-loop` is a self-contained agent-skill workflow for taking GitHub
+`oracle-pr-loop` is a self-contained agent-skill workflow for taking GitHub
 work through independent Oracle/ChatGPT review, starting from an open Issue
 or an existing pull request. It is composed from four small, single-purpose
 local skills instead of a custom Python review/submit engine.
 
-[![CI/CD](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml)
+[![CI/CD](https://github.com/dceoy/oracle-pr-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/dceoy/oracle-pr-loop/actions/workflows/ci.yml)
 
 ## Skills
 
-- [`pr-review-loop`](skills/pr-review-loop/SKILL.md) — orchestrates the other
+- [`oracle-pr-loop`](skills/oracle-pr-loop/SKILL.md) — orchestrates the other
   three skills and the main agent's own implementation, QA, and Git/GitHub
   actions. This is the entry point.
 - [`oracle-issue-plan`](skills/oracle-issue-plan/SKILL.md) — turns one GitHub
@@ -23,7 +23,7 @@ local skills instead of a custom Python review/submit engine.
 
 These three vendored skills were imported from
 [`dceoy/ai-coding-agent-skills`](https://github.com/dceoy/ai-coding-agent-skills)
-and are now maintained locally in this repository. `pr-review-loop` has no
+and are now maintained locally in this repository. `oracle-pr-loop` has no
 runtime, installation, submodule, subtree, or network dependency on
 `ai-coding-agent-skills`; the copies under `skills/` are authoritative.
 
@@ -71,5 +71,5 @@ Both discovery roots are local symlinks to the canonical directories under
 
 Ask a compatible host to implement an open Issue and carry its pull request
 through review, or to review and improve an existing pull request. See
-[`skills/pr-review-loop/SKILL.md`](skills/pr-review-loop/SKILL.md) for the
+[`skills/oracle-pr-loop/SKILL.md`](skills/oracle-pr-loop/SKILL.md) for the
 normative sequencing and stop conditions.

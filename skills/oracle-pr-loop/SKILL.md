@@ -1,9 +1,9 @@
 ---
-name: pr-review-loop
-description: Use this skill when an open GitHub pull request should be independently reviewed and improved until no actionable feedback remains, or when an open GitHub Issue should be implemented and then carried through that PR review loop. Trigger it for requests to review, fix, resolve, improve, or finalize a PR even when the user does not explicitly mention pr-review-loop. It sequences the local oracle-issue-plan, oracle-pr-review, and pr-feedback-triage skills around the main agent's own implementation, QA, and Git/GitHub actions.
+name: oracle-pr-loop
+description: Use this skill when an open GitHub pull request should be independently reviewed and improved until no actionable feedback remains, or when an open GitHub Issue should be implemented and then carried through that PR review loop. Trigger it for requests to review, fix, resolve, improve, or finalize a PR even when the user does not explicitly mention oracle-pr-loop. It sequences the local oracle-issue-plan, oracle-pr-review, and pr-feedback-triage skills around the main agent's own implementation, QA, and Git/GitHub actions.
 ---
 
-# pr-review-loop
+# oracle-pr-loop
 
 This is the orchestration skill for taking GitHub work through independent
 Oracle/ChatGPT review, starting from an open Issue or an existing pull
