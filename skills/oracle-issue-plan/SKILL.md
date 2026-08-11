@@ -1,7 +1,7 @@
 ---
 name: oracle-issue-plan
 description: Generate a decision-complete pull request implementation plan for one or more GitHub issues from the same repository through Oracle browser mode and ChatGPT's connected GitHub app.
-allowed-tools: Bash(oracle:*), Bash(which:*)
+allowed-tools: Bash(oracle:*), Bash(which:*), Bash(sleep:*)
 ---
 
 # Oracle Issue Plan
@@ -96,11 +96,53 @@ oracle \
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.
 
+## Remote busy retry policy
+
+Retry the Oracle invocation only when every condition below is true:
+
+- the invocation exited unsuccessfully;
+- Oracle output contains its effective remote-routing diagnostic beginning
+  exactly with `Routing browser automation to remote host ` and followed by a
+  nonblank host name;
+- the last nonblank line of either independently captured stdout or stderr is
+  exactly `ERROR: busy`; and
+- there is no evidence that the browser run was accepted. If acceptance is
+  uncertain, fail fast rather than replaying the invocation.
+
+This is the narrow rendering of the remote service's pre-acceptance HTTP 409
+busy response. Do not retry generic busy text, local-browser failures,
+ambiguous transport, or unrelated errors.
+
+Validate and canonicalize the complete Issue target set once before the first
+attempt. Every retry must replay the identical validated target list, Oracle
+command, prompt, model, browser thinking time, working context, and effective
+routing environment. Do not rerun validation, rediscover targets, alter the
+prompt, add flags, or switch transport or model.
+
+The initial invocation is attempt 1. Allow six retry opportunities, for seven
+total invocations. For retries 1 through 6, use nominal delays of 1, 2, 4, 8,
+16, and 30 seconds. Independently choose a jitter multiplier in the inclusive
+range `[0.75, 1.0]` for each retry and sleep for `min(30, nominal ×
+multiplier)` seconds. Emit one concise, credential-free diagnostic before each
+sleep, such as `Oracle remote busy on attempt 1; retrying attempt 2 in
+0.87s`.
+
+After the seventh matching failure, do not sleep or invoke Oracle again.
+Report that remote busy persisted for seven attempts and that the six-retry
+budget was exhausted. A successful invocation ends this retry sequence; a
+later invocation starts with a fresh budget.
+
+Authentication or authorization failures, GitHub-app routing or access
+failures, invalid configuration, malformed targets or prompts, local-browser
+failures, unrelated 4xx/5xx errors, timeouts, disconnects, ambiguous
+transport, and any post-acceptance or otherwise uncertain failure remain
+fail-fast. Do not use this policy to replay a run that may have been accepted.
+
 ## Failure and output
 
 Fail closed: do not substitute Oracle API mode, another model, another issue, local/GitHub-API context, or the current
-agent's own analysis. Do not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target
-repository.
+agent's own analysis. Do not retry a failure unless it satisfies every condition in the remote busy retry policy. Do not
+retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
 
 If Oracle exits non-zero or its response shows that the GitHub app was not invoked or lacked repository access, report
 the failure. Otherwise return Oracle's implementation plan without rewriting it.

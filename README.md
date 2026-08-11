@@ -60,6 +60,15 @@ hits another explicit blocker.
 Both discovery roots are local symlinks to the canonical directories under
 `skills/`; no discovery path points outside this repository.
 
+## Oracle remote contention
+
+The three Oracle leaf skills retry only a confirmed remote pre-acceptance
+`ERROR: busy` response, using a bounded six-retry backoff. Permanent routing,
+access, authentication, configuration, local-browser, or ambiguous failures
+fail immediately. If remote busy persists through all retries, the leaf skill
+stops and reports exhaustion. Successful local and uncontended remote Oracle
+runs are unaffected.
+
 ## Requirements
 
 - Git and, where the host/triage flow needs it, an authenticated GitHub CLI
