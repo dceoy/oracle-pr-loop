@@ -74,6 +74,15 @@ scope before acting. Do not translate Oracle's review or
 do not manufacture an approval or suppress an unresolved
 clarification/defer/blocker state to keep the loop running.
 
+When the caller has stated an execution constraint equivalent to the
+retired triage skill's `dry_run`, `no_push`, or `no_reply` modes — for
+example, "review only," "do not push," or "do not post replies" — the main
+agent, not `oracle-pr-feedback-triage`, honors it for the rest of this loop.
+Perform only the actions that constraint allows; do not treat code-dependent
+feedback as resolved when the constraint disables the fix's publication or
+its reply/resolution, and leave the affected thread open rather than
+fabricating that action or the loop's completion.
+
 ## Canonical workflow
 
 ```mermaid
@@ -88,7 +97,7 @@ flowchart TD
   HeadMoved -->|no| Triage[oracle-pr-feedback-triage advises]
   Triage --> TriageHeadMoved{Head changed during triage?}
   TriageHeadMoved -->|yes| Head
-  TriageHeadMoved -->|no| Act[main agent validates advice, fixes+QA+publish, verifies publication, then replies/resolves]
+  TriageHeadMoved -->|no| Act[main agent validates advice within caller constraints, fixes+QA+publish, verifies publication, then replies/resolves]
   Act --> HeadAfter{Head changed after fixes?}
   HeadAfter -->|yes, fix published| Head
   HeadAfter -->|no, nothing actionable left| Done[done]
@@ -134,15 +143,17 @@ with the requested or current-branch PR.
    running, discard that triage result without acting on it — no fix, reply,
    or thread action — and restart at step 2 on the new head.
 7. Otherwise, validate that advisory triage against the current PR head,
-   repository, and feedback scope. For each accepted fix, implement the
-   change and run repository QA, then commit and push it. Before replying
-   to or resolving a code-dependent thread, re-fetch the PR head and
-   confirm the pushed fix commit is present as, or is an ancestor of, the
-   current head; if that confirmation fails, leave the thread open and
-   treat it as a blocker rather than resolving it. Handle `answer`,
-   `clarify`, `defer`, and `won't-fix` dispositions — including posting the
-   applicable reply and thread action — independently of this publication
-   gate, since they do not depend on a pushed fix.
+   repository, feedback scope, and any caller execution constraint. For each
+   accepted fix, implement the change and run repository QA, then commit and
+   push it. Before replying to or resolving a code-dependent thread, re-fetch
+   the PR head and confirm the pushed fix commit is present as, or is an
+   ancestor of, the current head; if that confirmation fails, leave the
+   thread open and treat it as a blocker rather than resolving it. Handle
+   `answer`, `already addressed`, `outdated`, `clarify`, `defer`, and
+   `won't-fix` dispositions independently of this publication gate, since
+   they do not depend on a pushed fix: validate each against the current
+   head and thread context, then post the applicable reply and thread
+   action.
 8. Re-read the head after acting on the triage.
 9. If the head changed — a fix was published — start a new review round at
    step 2 on the new head.
