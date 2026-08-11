@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7  # zizmor: ignore[unpinned-uses]
+        with:
+          persist-credentials: false
       - name: Verify canonical skills and discovery links
         run: |
           exit_status=0
@@ -66,6 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7  # zizmor: ignore[unpinned-uses]
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7  # zizmor: ignore[unpinned-uses]
         with:
           node-version: latest
