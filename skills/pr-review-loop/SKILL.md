@@ -36,8 +36,7 @@ when no PR review workflow is intended.
 ## Responsibilities and trust boundaries
 
 - The main agent owns implementation, repository QA, branch creation,
-  commit, push, opening the initial pull request for Issue-started work, and
-  publishing `oracle-pr-review`'s returned review to GitHub before triage,
+  commit, push, and opening the initial pull request for Issue-started work,
   using normal repository/runtime tooling (`git`, `gh`, or equivalent).
 - `oracle-issue-plan` owns Issue/repository context and returns one advisory
   implementation plan; it does not implement anything itself.
@@ -73,8 +72,7 @@ flowchart TD
   Head --> Review[oracle-pr-review on that head]
   Review --> HeadMoved{Head changed during review?}
   HeadMoved -->|yes| Head
-  HeadMoved -->|no| Publish[main agent publishes returned review to GitHub]
-  Publish --> Triage[pr-feedback-triage, normal mode]
+  HeadMoved -->|no| Triage[pr-feedback-triage, normal mode]
   Triage --> HeadAfter{Head changed after triage?}
   HeadAfter -->|yes, fix published| Head
   HeadAfter -->|no, nothing actionable left| Done[done]
@@ -107,23 +105,19 @@ with the requested or current-branch PR.
    gh pr view <NUMBER> --repo <OWNER/REPO> --json headRefOid --jq .headRefOid
    ```
 
-3. Run `oracle-pr-review` for that exact PR.
+3. Run `oracle-pr-review` for that exact PR. It reviews through ChatGPT's
+   connected GitHub app, which publishes the review to GitHub directly; do
+   not re-publish or paraphrase its returned review.
 4. Re-read the head. If it changed while the review was running, discard that
    review round without triaging it and restart at step 2 on the new head.
-5. If Oracle reported any actionable finding, publish that returned review to
-   GitHub as a PR review (for example `gh pr review <NUMBER> --repo
-   <OWNER/REPO> --request-changes --body <review text>`) before triage;
-   preserve Oracle's findings as returned instead of paraphrasing,
-   summarizing, or handing them to `pr-feedback-triage` directly. Skip
-   publication only when Oracle reported no actionable finding.
-6. Run `pr-feedback-triage` in normal mode against that review's GitHub
-   feedback.
-7. Re-read the head after triage.
-8. If the head changed — a fix was published — start a new review round at
+5. Otherwise, run `pr-feedback-triage` in normal mode against that review's
+   GitHub feedback.
+6. Re-read the head after triage.
+7. If the head changed — a fix was published — start a new review round at
    step 2 on the new head.
-9. If the head is unchanged and triage reports no remaining actionable
+8. If the head is unchanged and triage reports no remaining actionable
    feedback, finish.
-10. Never re-review an unchanged head.
+9. Never re-review an unchanged head.
 
 ## Stop conditions
 

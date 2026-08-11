@@ -7,8 +7,8 @@ allowed-tools: Bash(gh:*), Bash(oracle:*), Bash(which:*)
 # Oracle PR Review
 
 Review exactly one GitHub pull request through Oracle browser mode. Oracle owns browser/session and remote-host
-routing; ChatGPT's connected GitHub app owns repository access and review context. Do not duplicate either
-responsibility in the current agent.
+routing; ChatGPT's connected GitHub app owns repository access, review context, and publication of the review to
+GitHub. Do not duplicate either responsibility in the current agent.
 
 ## Prerequisites
 
