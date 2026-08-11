@@ -88,7 +88,7 @@ flowchart TD
   HeadMoved -->|no| Triage[oracle-pr-feedback-triage advises]
   Triage --> TriageHeadMoved{Head changed during triage?}
   TriageHeadMoved -->|yes| Head
-  TriageHeadMoved -->|no| Act[main agent validates advice, applies fixes and required replies/thread actions]
+  TriageHeadMoved -->|no| Act[main agent validates advice, fixes+QA+publish, verifies publication, then replies/resolves]
   Act --> HeadAfter{Head changed after fixes?}
   HeadAfter -->|yes, fix published| Head
   HeadAfter -->|no, nothing actionable left| Done[done]
@@ -134,11 +134,15 @@ with the requested or current-branch PR.
    running, discard that triage result without acting on it — no fix, reply,
    or thread action — and restart at step 2 on the new head.
 7. Otherwise, validate that advisory triage against the current PR head,
-   repository, and feedback scope, then act on it: implement accepted
-   fixes, run repository QA, publish, and handle applicable replies and
-   review-thread resolution — including posting the applicable reply or
-   thread action for `clarify`, `defer`, and `won't-fix` dispositions —
-   using normal Git/GitHub tooling.
+   repository, and feedback scope. For each accepted fix, implement the
+   change and run repository QA, then commit and push it. Before replying
+   to or resolving a code-dependent thread, re-fetch the PR head and
+   confirm the pushed fix commit is present as, or is an ancestor of, the
+   current head; if that confirmation fails, leave the thread open and
+   treat it as a blocker rather than resolving it. Handle `answer`,
+   `clarify`, `defer`, and `won't-fix` dispositions — including posting the
+   applicable reply and thread action — independently of this publication
+   gate, since they do not depend on a pushed fix.
 8. Re-read the head after acting on the triage.
 9. If the head changed — a fix was published — start a new review round at
    step 2 on the new head.
