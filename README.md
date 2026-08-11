@@ -1,47 +1,75 @@
 # pr-review-loop
 
-`pr-review-loop` is an agent skill for taking GitHub work through
-independent Oracle/ChatGPT review, starting from an open Issue or existing PR.
+`pr-review-loop` is a self-contained agent-skill workflow for taking GitHub
+work through independent Oracle/ChatGPT review, starting from an open Issue
+or an existing pull request. It is composed from four small, single-purpose
+local skills instead of a custom Python review/submit engine.
 
 [![CI/CD](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/dceoy/pr-review-loop/actions/workflows/ci.yml)
 
-## Responsibilities
+## Skills
 
-- **Host agent:** planning, implementation, repository QA, triage, iteration,
-  and opening the initial pull request for Issue-started work.
-- **Oracle/ChatGPT:** independent review of the exact pull-request head.
-- **Deterministic commands:** bounded Issue/Git/GitHub inspection, review
-  publication, validation, commit creation, and lease-protected submission.
+- [`pr-review-loop`](skills/pr-review-loop/SKILL.md) — orchestrates the other
+  three skills and the main agent's own implementation, QA, and Git/GitHub
+  actions. This is the entry point.
+- [`oracle-issue-plan`](skills/oracle-issue-plan/SKILL.md) — turns one GitHub
+  Issue into an advisory implementation plan via Oracle browser mode and
+  ChatGPT's connected GitHub app.
+- [`oracle-pr-review`](skills/oracle-pr-review/SKILL.md) — reviews one exact
+  pull-request head the same way, prioritizing inline review comments.
+- [`pr-feedback-triage`](skills/pr-feedback-triage/SKILL.md) — collects,
+  deduplicates, classifies, fixes, publishes, and resolves that review's
+  GitHub feedback.
 
-The [canonical skill workflow](skills/pr-review-loop/SKILL.md) owns host
-sequencing and trust boundaries. The
-[command contract](skills/pr-review-loop/references/command-contracts.md) owns
-CLI syntax, schemas, preconditions, and side effects. The
-[operations reference](skills/pr-review-loop/references/operations.md) owns
-Oracle/ChatGPT setup and smoke tests.
+These three vendored skills were imported from
+[`dceoy/ai-coding-agent-skills`](https://github.com/dceoy/ai-coding-agent-skills)
+and are now maintained locally in this repository. `pr-review-loop` has no
+runtime, installation, submodule, subtree, or network dependency on
+`ai-coding-agent-skills`; the copies under `skills/` are authoritative.
+
+## Workflow
+
+**Issue-started:**
+
+1. `oracle-issue-plan` produces an advisory implementation plan for the Issue.
+2. The main agent validates that plan against the Issue's scope, implements
+   the change, runs repository QA, and opens the pull request.
+3. Enter the PR workflow below on the resulting PR.
+
+**Existing PR** — enter directly at:
+
+1. `oracle-pr-review` reviews the exact current PR head.
+2. `pr-feedback-triage` triages that review's GitHub feedback: it fixes what's
+   applicable, publishes the fix, and replies to/resolves review threads.
+3. If a fix was published, the PR head changed — run `oracle-pr-review` again
+   on the new head and repeat.
+4. Finish when a review/triage cycle leaves no actionable feedback with the
+   head unchanged. An unchanged head is never re-reviewed.
+
+Stop and report — rather than continuing or fabricating progress — when
+triage needs clarification, records a deliberate defer/won't-fix, has an
+unpublished or unverified fix, hits an authentication/permission failure, or
+hits another explicit blocker.
 
 ## Discovery
 
-- Codex CLI and Cursor CLI discover `.agents/skills/pr-review-loop`.
-- Claude Code discovers `.claude/skills/pr-review-loop`.
+- Codex CLI and Cursor CLI discover the skills under `.agents/skills/`.
+- Claude Code discovers the skills under `.claude/skills/`.
 
-Both discovery paths resolve to the canonical skill. Compatible hosts select it
-from user intent; users normally do not invoke the Python CLI directly.
+Both discovery roots are local symlinks to the canonical directories under
+`skills/`; no discovery path points outside this repository.
 
 ## Requirements
 
-- macOS or Linux;
-- Python 3.12 or newer;
-- Git and an authenticated GitHub CLI session;
-- Oracle CLI configured with either a local authenticated Chrome/Chromium
-  profile or a remote `oracle serve` instance;
-- push access and Git commit identity when submitting changes.
-
-Issue and pull-request workflows require matching same-repository GitHub.com
-targets. GitHub Enterprise and fork targets are unsupported.
+- Git and, where the host/triage flow needs it, an authenticated GitHub CLI
+  (`gh`) session or equivalent GitHub access;
+- the `oracle` CLI, with an authenticated ChatGPT browser session and the
+  ChatGPT GitHub app authorized for the target repository;
+- `GPT-5.6 Sol` available to Oracle browser mode.
 
 ## Usage
 
 Ask a compatible host to implement an open Issue and carry its pull request
-through review, or to review and improve an existing pull request. See the
-canonical workflow and command contract above for the normative behavior.
+through review, or to review and improve an existing pull request. See
+[`skills/pr-review-loop/SKILL.md`](skills/pr-review-loop/SKILL.md) for the
+normative sequencing and stop conditions.

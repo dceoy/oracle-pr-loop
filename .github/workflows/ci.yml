@@ -19,33 +19,69 @@ defaults:
     shell: bash -euo pipefail {0}
     working-directory: .
 jobs:
-  python-lint-and-scan:
+  skill-structure:
     permissions:
       contents: read
-    uses: dceoy/gha-for-devops/.github/workflows/python-package-lint-and-scan.yml@main  # zizmor: ignore[unpinned-uses]
-    with:
-      package-path: .
-  python-test:
-    permissions:
-      contents: read
-    uses: dceoy/gha-for-devops/.github/workflows/python-package-test.yml@main  # zizmor: ignore[unpinned-uses]
-    with:
-      package-path: .
-  github-codeql-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7  # zizmor: ignore[unpinned-uses]
+        with:
+          persist-credentials: false
+      - name: Verify canonical skills and discovery links
+        run: |
+          exit_status=0
+          for name in pr-review-loop oracle-issue-plan oracle-pr-review pr-feedback-triage; do
+            skill_file="skills/${name}/SKILL.md"
+            if [ ! -f "${skill_file}" ]; then
+              echo "::error::missing ${skill_file}"
+              exit_status=1
+              continue
+            fi
+            if ! grep -qx "name: ${name}" "${skill_file}"; then
+              echo "::error::${skill_file} does not declare 'name: ${name}'"
+              exit_status=1
+            fi
+            for discovery_root in .agents/skills .claude/skills; do
+              link="${discovery_root}/${name}"
+              if [ ! -L "${link}" ]; then
+                echo "::error::${link} is not a symlink"
+                exit_status=1
+                continue
+              fi
+              target="$(readlink "${link}")"
+              if [ "${target}" != "../../skills/${name}" ]; then
+                echo "::error::${link} -> ${target}, expected ../../skills/${name}"
+                exit_status=1
+              fi
+            done
+          done
+          exit "${exit_status}"
+  github-actions-lint-and-scan:
     permissions:
       contents: read
       security-events: write
       actions: read
-    uses: dceoy/gha-for-devops/.github/workflows/github-codeql-analysis.yml@main  # zizmor: ignore[unpinned-uses]
-    with:
-      language: >
-        ["python"]
+    uses: dceoy/gha-for-devops/.github/workflows/github-actions-lint-and-scan.yml@main  # zizmor: ignore[unpinned-uses]
+  markdown-format-check:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7  # zizmor: ignore[unpinned-uses]
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7  # zizmor: ignore[unpinned-uses]
+        with:
+          node-version: latest
+      - name: Check Markdown formatting
+        run: npx -y prettier --check './**/*.md'
   dependabot-auto-merge:
     if: >
       github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
     needs:
-      - python-lint-and-scan
-      - python-test
+      - skill-structure
+      - github-actions-lint-and-scan
+      - markdown-format-check
     uses: dceoy/gha-for-devops/.github/workflows/dependabot-auto-merge.yml@main  # zizmor: ignore[unpinned-uses]
     permissions:
       contents: write
