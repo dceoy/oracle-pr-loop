@@ -22,12 +22,6 @@ local skills instead of a custom Python review/submit engine.
   advisory dispositions and decision-complete fix plans; it makes no
   repository or GitHub mutation.
 
-These three vendored skills were imported from
-[`dceoy/ai-coding-agent-skills`](https://github.com/dceoy/ai-coding-agent-skills)
-and are now maintained locally in this repository. `oracle-pr-loop` has no
-runtime, installation, submodule, subtree, or network dependency on
-`ai-coding-agent-skills`; the copies under `skills/` are authoritative.
-
 ## Workflow
 
 **Issue-started:**
