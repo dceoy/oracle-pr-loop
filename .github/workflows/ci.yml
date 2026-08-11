@@ -24,7 +24,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5  # zizmor: ignore[unpinned-uses]
+      - uses: actions/checkout@v7  # zizmor: ignore[unpinned-uses]
       - name: Verify canonical skills and discovery links
         run: |
           exit_status=0
