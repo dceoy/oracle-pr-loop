@@ -17,7 +17,7 @@ local skills instead of a custom Python review/submit engine.
   Oracle browser mode and ChatGPT's connected GitHub app.
 - [`oracle-pr-review`](skills/oracle-pr-review/SKILL.md) — reviews one exact
   pull-request head the same way, prioritizing inline review comments.
-- [`oracle-pr-feedback-triage`](skills/oracle-pr-feedback-triage/SKILL.md) —
+- [`oracle-pr-feedback-plan`](skills/oracle-pr-feedback-plan/SKILL.md) —
   reads that review's existing GitHub feedback the same way and returns
   advisory dispositions and decision-complete fix plans; it makes no
   repository or GitHub mutation.
@@ -43,7 +43,7 @@ runtime, installation, submodule, subtree, or network dependency on
 **Existing PR** — enter directly at:
 
 1. `oracle-pr-review` reviews the exact current PR head.
-2. `oracle-pr-feedback-triage` triages that review's existing GitHub feedback
+2. `oracle-pr-feedback-plan` triages that review's existing GitHub feedback
    and returns advisory dispositions and decision-complete fix plans; it
    makes no repository or GitHub mutation itself.
 3. The main agent validates that advice, implements accepted fixes, runs QA,

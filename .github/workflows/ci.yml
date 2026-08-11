@@ -30,7 +30,7 @@ jobs:
       - name: Verify canonical skills and discovery links
         run: |
           exit_status=0
-          for name in oracle-pr-loop oracle-issue-plan oracle-pr-review oracle-pr-feedback-triage; do
+          for name in oracle-pr-loop oracle-issue-plan oracle-pr-review oracle-pr-feedback-plan; do
             skill_file="skills/${name}/SKILL.md"
             if [ ! -f "${skill_file}" ]; then
               echo "::error::missing ${skill_file}"

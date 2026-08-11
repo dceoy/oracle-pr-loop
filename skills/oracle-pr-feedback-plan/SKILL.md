@@ -1,5 +1,5 @@
 ---
-name: oracle-pr-feedback-triage
+name: oracle-pr-feedback-plan
 description: Triage the existing review feedback on one GitHub pull request through Oracle browser mode and ChatGPT's connected GitHub app, returning advisory dispositions and decision-complete fix plans without modifying the pull request.
 allowed-tools: Bash(gh:*), Bash(oracle:*), Bash(which:*)
 ---
