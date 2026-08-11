@@ -1,7 +1,7 @@
 ---
 name: oracle-pr-review
 description: Review one GitHub pull request through Oracle browser mode and ChatGPT's connected GitHub app, prioritizing inline review comments. Use when the user explicitly wants ChatGPT-via-Oracle review; if no PR target is supplied, detect the pull request for the current branch.
-allowed-tools: Bash(gh:*), Bash(oracle:*), Bash(which:*), Bash(sleep:*)
+allowed-tools: Bash(gh:*), Bash(oracle:*), Bash(which:*), Bash(sleep:*), Bash(mktemp:*), Bash(cat --:*), Bash(printf:*), Bash(rm -f --:*)
 ---
 
 # Oracle PR Review
@@ -77,40 +77,65 @@ Do not interpolate an unvalidated shell variable, use `eval`, or append reposito
 
 ## Remote busy retry policy
 
-Retry the Oracle invocation only when every condition below is true:
+Resolve and validate the PR target once before the first attempt. If the
+target is omitted, run `gh pr view --json url --jq .url` at most once. Create
+two private temporary files outside the repository with `mktemp`, one for
+stdout and one for stderr. If either allocation fails, remove any allocated
+file with `rm -f --` and fail before invoking Oracle. Reuse those exact paths
+for every attempt; the redirections truncate both files before each
+invocation. Remove only those exact files on every exit path, and never retry
+because cleanup failed.
 
-- the invocation exited unsuccessfully;
-- Oracle output contains its effective remote-routing diagnostic beginning
-  exactly with `Routing browser automation to remote host ` and followed by a
-  nonblank host name;
-- the last nonblank line of either independently captured stdout or stderr is
-  exactly `ERROR: busy`; and
-- there is no evidence that the browser run was accepted. If acceptance is
+For each attempt, run the exact Oracle command shown in the Run section with
+only these shell redirections appended: `>"$stdout_file" 2>"$stderr_file"`.
+Do not use `2>&1`, merge the streams, alter Oracle arguments, or change the
+prompt. Record the exit status immediately, then inspect the two files
+independently. On success or terminal failure, use `cat -- "$stdout_file"`
+and `cat -- "$stderr_file" >&2` to surface the corresponding captured
+streams without rewriting them. Suppress the captured output of an
+intermediate retryable-busy attempt except for its concise retry diagnostic.
+
+Classify a failure as retryable only when every condition below is true:
+
+- the Oracle invocation exited unsuccessfully;
+- captured stdout contains a line beginning exactly with
+  `Routing browser automation to remote host ` followed by a nonblank host;
+- the last nonblank, whitespace-trimmed line of captured stdout or captured
+  stderr is exactly `ERROR: busy`; and
+- neither stream contains evidence that the browser run was accepted. If
+  capture is incomplete, the streams are ambiguous, or acceptance is
   uncertain, fail fast rather than replaying the invocation.
 
-This is the narrow rendering of the remote service's pre-acceptance HTTP 409
-busy response. Do not retry generic busy text, local-browser failures,
-ambiguous transport, or unrelated errors.
-
-Resolve and validate the PR target once before the first attempt. If the
-target is omitted, run `gh pr view --json url --jq .url` at most once. Every
-retry must replay the identical validated target, Oracle command, prompt,
-model, browser thinking time, working context, and effective routing
-environment. Do not rerun target discovery, alter the prompt, add flags, or
-switch transport or model.
+Use Bash built-ins to inspect each file separately: trim leading and trailing
+whitespace while reading each stream line by line, retain the last nonblank
+line for each stream, and scan stdout for the exact remote-routing prefix and
+nonblank host suffix. Never classify merged output, generic busy text,
+local-browser failures, ambiguous transport, or unrelated errors as
+retryable.
 
 The initial invocation is attempt 1. Allow six retry opportunities, for seven
-total invocations. For retries 1 through 6, use nominal delays of 1, 2, 4, 8,
-16, and 30 seconds. Independently choose a jitter multiplier in the inclusive
-range `[0.75, 1.0]` for each retry and sleep for `min(30, nominal ×
-multiplier)` seconds. Emit one concise, credential-free diagnostic before each
-sleep, such as `Oracle remote busy on attempt 1; retrying attempt 2 in
-0.87s`.
+total invocations. For retry number 1 through 6, use nominal delays of 1, 2,
+4, 8, 16, and 30 seconds. Immediately before each retry, sample Bash
+`$RANDOM` once:
 
-After the seventh matching failure, do not sleep or invoke Oracle again.
-Report that remote busy persisted for seven attempts and that the six-retry
-budget was exhausted. A successful invocation ends this retry sequence; a
-later invocation starts with a fresh budget.
+```bash
+random_value=$RANDOM
+jitter_milliseconds=$((750 + random_value % 251))
+delay_milliseconds=$((nominal_seconds * jitter_milliseconds))
+printf -v delay_seconds '%d.%03d' \
+  "$((delay_milliseconds / 1000))" "$((delay_milliseconds % 1000))"
+printf 'Oracle remote busy on attempt %d; retrying attempt %d in %ss\n' \
+  "$attempt" "$((attempt + 1))" "$delay_seconds" >&2
+sleep "$delay_seconds"
+```
+
+This yields an independent multiplier from 0.750 through 1.000 and a delay
+from 75% through 100% of nominal, never above 30 seconds. Do not reuse a
+sample, choose jitter through model text, or modify the effective routing
+environment. After the seventh matching failure, surface its captured streams,
+remove the temporary files, and report that remote busy persisted for seven
+attempts and the six-retry budget was exhausted. A successful invocation ends
+this retry sequence; a later invocation starts with a fresh budget.
 
 Authentication or authorization failures, GitHub-app routing or access
 failures, invalid configuration, malformed targets or prompts, local-browser
