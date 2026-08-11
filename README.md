@@ -17,9 +17,10 @@ local skills instead of a custom Python review/submit engine.
   Oracle browser mode and ChatGPT's connected GitHub app.
 - [`oracle-pr-review`](skills/oracle-pr-review/SKILL.md) — reviews one exact
   pull-request head the same way, prioritizing inline review comments.
-- [`pr-feedback-triage`](skills/pr-feedback-triage/SKILL.md) — collects,
-  deduplicates, classifies, fixes, publishes, and resolves that review's
-  GitHub feedback.
+- [`oracle-pr-feedback-triage`](skills/oracle-pr-feedback-triage/SKILL.md) —
+  reads that review's existing GitHub feedback the same way and returns
+  advisory dispositions and decision-complete fix plans; it makes no
+  repository or GitHub mutation.
 
 These three vendored skills were imported from
 [`dceoy/ai-coding-agent-skills`](https://github.com/dceoy/ai-coding-agent-skills)
@@ -42,11 +43,14 @@ runtime, installation, submodule, subtree, or network dependency on
 **Existing PR** — enter directly at:
 
 1. `oracle-pr-review` reviews the exact current PR head.
-2. `pr-feedback-triage` triages that review's GitHub feedback: it fixes what's
-   applicable, publishes the fix, and replies to/resolves review threads.
-3. If a fix was published, the PR head changed — run `oracle-pr-review` again
+2. `oracle-pr-feedback-triage` triages that review's existing GitHub feedback
+   and returns advisory dispositions and decision-complete fix plans; it
+   makes no repository or GitHub mutation itself.
+3. The main agent validates that advice, implements accepted fixes, runs QA,
+   publishes the fix, and replies to/resolves review threads.
+4. If a fix was published, the PR head changed — run `oracle-pr-review` again
    on the new head and repeat.
-4. Finish when a review/triage cycle leaves no actionable feedback with the
+5. Finish when a review/triage cycle leaves no actionable feedback with the
    head unchanged. An unchanged head is never re-reviewed.
 
 Stop and report — rather than continuing or fabricating progress — when
