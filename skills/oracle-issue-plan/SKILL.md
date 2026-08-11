@@ -48,9 +48,11 @@ Before invoking Oracle, validate the whole target set as a unit:
 
 - Reject the entire set if any single target is malformed, ambiguous, a non-Issue URL, or carries embedded whitespace,
   newlines, or extra prose — never plan with only the valid remainder.
-- Require every target to share the same `OWNER/REPO`; reject a set spanning more than one repository rather than
+- Require every target to share the same `OWNER/REPO`, comparing owner and repo case-insensitively (GitHub treats
+  them as the same repository regardless of case); reject a set spanning more than one repository rather than
   letting Oracle decide.
-- Deduplicate identical canonical targets, keeping first-seen order; do not sort.
+- Deduplicate targets by `OWNER/REPO#NUMBER` compared case-insensitively on `OWNER/REPO`, keeping first-seen order
+  and each target's first-seen spelling; do not sort.
 - Join the validated, canonical targets with a fixed `, ` separator that the skill generates; never copy the
   caller's own separators (newlines, list markers, extra whitespace) into the Oracle prompt.
 
