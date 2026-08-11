@@ -1,14 +1,15 @@
 ---
 name: oracle-issue-plan
-description: Generate a decision-complete pull request implementation plan for one GitHub issue through Oracle browser mode and ChatGPT's connected GitHub app.
+description: Generate a decision-complete pull request implementation plan for one or more GitHub issues from the same repository through Oracle browser mode and ChatGPT's connected GitHub app.
 allowed-tools: Bash(oracle:*), Bash(which:*)
 ---
 
 # Oracle Issue Plan
 
-Generate a decision-complete implementation plan for exactly one GitHub issue through Oracle browser mode. Oracle
-owns browser/session and remote-host routing; ChatGPT's connected GitHub app owns issue and repository context. Do
-not duplicate either responsibility in the current agent.
+Generate a decision-complete implementation plan for one or more GitHub issues from the same repository, intended to
+resolve the full set in one pull request, through Oracle browser mode. Oracle owns browser/session and remote-host
+routing; ChatGPT's connected GitHub app owns issue and repository context. Do not duplicate either responsibility in
+the current agent.
 
 ## Prerequisites
 
@@ -28,12 +29,13 @@ Stop if a required prerequisite is unavailable.
 
 ## Target
 
-Accept exactly one of:
+Accept one or more independent targets, each one of:
 
 1. `OWNER/REPO#NUMBER`.
-2. `https://github.com/OWNER/REPO/issues/NUMBER`, normalized to the canonical form above.
+2. `https://github.com/OWNER/REPO/issues/NUMBER` with no query string, fragment, or extra path segments, normalized
+   to the canonical form above.
 
-Normalize the result and require:
+Normalize each target on its own and require every one to match:
 
 ```regex
 ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$
@@ -41,6 +43,16 @@ Normalize the result and require:
 
 Reject missing, ambiguous, or non-matching input. Never put raw user text, query strings, whitespace, newlines, shell
 metacharacters, or extra instructions into the Oracle prompt.
+
+Before invoking Oracle, validate the whole target set as a unit:
+
+- Reject the entire set if any single target is malformed, ambiguous, a non-Issue URL, or carries embedded whitespace,
+  newlines, or extra prose — never plan with only the valid remainder.
+- Require every target to share the same `OWNER/REPO`; reject a set spanning more than one repository rather than
+  letting Oracle decide.
+- Deduplicate identical canonical targets, keeping first-seen order; do not sort.
+- Join the validated, canonical targets with a fixed `, ` separator that the skill generates; never copy the
+  caller's own separators (newlines, list markers, extra whitespace) into the Oracle prompt.
 
 Do not use `gh`, GitHub APIs, the local checkout, or attachments to gather issue or repository context; the ChatGPT
 GitHub app is the sole context source.
@@ -56,7 +68,7 @@ Treat Oracle routing or authentication failures as failures rather than switchin
 
 ## Run
 
-Substitute the validated canonical target into the `OWNER/REPO#NUMBER` occurrence and run exactly:
+For a single validated canonical target, substitute it into the `OWNER/REPO#NUMBER` occurrence and run exactly:
 
 ```bash
 oracle \
@@ -65,6 +77,19 @@ oracle \
   --browser-thinking-time high \
   -p '# Issue: OWNER/REPO#NUMBER
 @GitHub Analyze this issue, then produce a decision-complete implementation plan for a coding agent to resolve it in one pull request.'
+```
+
+For two or more validated, deduplicated, same-repository canonical targets, join every one of them with a fixed `, `
+separator — in first-seen order, with no trailing separator and nothing else — and substitute that list into the
+`OWNER/REPO#NUMBER, OWNER/REPO#NUMBER` occurrence, then run exactly:
+
+```bash
+oracle \
+  --engine browser \
+  --model gpt-5.6-sol \
+  --browser-thinking-time high \
+  -p '# Issues: OWNER/REPO#NUMBER, OWNER/REPO#NUMBER
+@GitHub Analyze these issues, then produce a single decision-complete implementation plan for a coding agent to resolve them in one pull request.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.

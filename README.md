@@ -12,9 +12,9 @@ local skills instead of a custom Python review/submit engine.
 - [`oracle-pr-loop`](skills/oracle-pr-loop/SKILL.md) — orchestrates the other
   three skills and the main agent's own implementation, QA, and Git/GitHub
   actions. This is the entry point.
-- [`oracle-issue-plan`](skills/oracle-issue-plan/SKILL.md) — turns one GitHub
-  Issue into an advisory implementation plan via Oracle browser mode and
-  ChatGPT's connected GitHub app.
+- [`oracle-issue-plan`](skills/oracle-issue-plan/SKILL.md) — turns one or more
+  same-repository GitHub Issues into one advisory implementation plan via
+  Oracle browser mode and ChatGPT's connected GitHub app.
 - [`oracle-pr-review`](skills/oracle-pr-review/SKILL.md) — reviews one exact
   pull-request head the same way, prioritizing inline review comments.
 - [`pr-feedback-triage`](skills/pr-feedback-triage/SKILL.md) — collects,
@@ -31,9 +31,12 @@ runtime, installation, submodule, subtree, or network dependency on
 
 **Issue-started:**
 
-1. `oracle-issue-plan` produces an advisory implementation plan for the Issue.
-2. The main agent validates that plan against the Issue's scope, implements
-   the change, runs repository QA, and opens the pull request.
+1. `oracle-issue-plan` produces an advisory implementation plan for one or
+   more same-repository Issues, intended to resolve them in one pull
+   request.
+2. The main agent validates that plan against the Issue set's combined
+   scope, implements the change, runs repository QA, and opens the pull
+   request.
 3. Enter the PR workflow below on the resulting PR.
 
 **Existing PR** — enter directly at:
