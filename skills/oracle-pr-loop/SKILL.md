@@ -86,7 +86,9 @@ flowchart TD
   Review --> HeadMoved{Head changed during review?}
   HeadMoved -->|yes| Head
   HeadMoved -->|no| Triage[oracle-pr-feedback-triage advises]
-  Triage --> Act[main agent validates advice, fixes, publishes, replies, resolves]
+  Triage --> TriageHeadMoved{Head changed during triage?}
+  TriageHeadMoved -->|yes| Head
+  TriageHeadMoved -->|no| Act[main agent validates advice, applies fixes and required replies/thread actions]
   Act --> HeadAfter{Head changed after fixes?}
   HeadAfter -->|yes, fix published| Head
   HeadAfter -->|no, nothing actionable left| Done[done]
@@ -128,16 +130,21 @@ with the requested or current-branch PR.
 5. Otherwise, run `oracle-pr-feedback-triage` against that review's existing
    GitHub feedback. It returns advisory dispositions and decision-complete
    fix plans only; it makes no repository or GitHub mutation.
-6. Validate that advisory triage against the current PR head, repository,
-   and feedback scope, then act on it: implement accepted fixes, run
-   repository QA, publish, and handle applicable replies and review-thread
-   resolution using normal Git/GitHub tooling.
-7. Re-read the head after acting on the triage.
-8. If the head changed — a fix was published — start a new review round at
+6. Re-read the head immediately after triage. If it changed while triage was
+   running, discard that triage result without acting on it — no fix, reply,
+   or thread action — and restart at step 2 on the new head.
+7. Otherwise, validate that advisory triage against the current PR head,
+   repository, and feedback scope, then act on it: implement accepted
+   fixes, run repository QA, publish, and handle applicable replies and
+   review-thread resolution — including posting the applicable reply or
+   thread action for `clarify`, `defer`, and `won't-fix` dispositions —
+   using normal Git/GitHub tooling.
+8. Re-read the head after acting on the triage.
+9. If the head changed — a fix was published — start a new review round at
    step 2 on the new head.
-9. If the head is unchanged and no remaining actionable feedback needs a fix,
-   reply, or resolution, finish.
-10. Never re-review an unchanged head.
+10. If the head is unchanged and no remaining actionable feedback needs a
+    fix, reply, or resolution, finish.
+11. Never re-review an unchanged head.
 
 ## Stop conditions
 
@@ -146,7 +153,10 @@ progress, on any of:
 
 - the chosen iteration limit;
 - `oracle-pr-feedback-triage` advising clarification needed, a deliberate
-  defer/won't-fix, or another explicit blocker;
+  defer/won't-fix, or another explicit blocker, once the main agent has
+  attempted the applicable reply or thread action for that disposition
+  (leaving a clarification thread open when reviewer input is still
+  required, rather than stopping before that action is attempted);
 - the main agent hitting an unpublished or unverified fix, an authentication
   or permission failure, a failed publication/reply/resolution, or another
   explicit blocker while acting on that advice;
