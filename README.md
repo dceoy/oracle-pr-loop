@@ -62,17 +62,24 @@ Both discovery roots are local symlinks to the canonical directories under
 
 ## Oracle remote contention
 
-The three Oracle leaf skills retry only a failed Oracle invocation whose
-stderr contains the exact standalone line
-`ORACLE_REMOTE_BUSY_PRE_ACCEPTANCE` from a compatible Oracle CLI, using a
-bounded six-retry backoff. Oracle emits that marker only for HTTP 409
-`{"error":"busy"}` before `/runs` acceptance; the nonzero exit status is
-required as well.
-generic `busy` text and old CLI versions are never retried. Permanent routing,
-access, authentication, configuration, local-browser, or ambiguous failures
-fail immediately. If remote busy persists through all retries, the leaf skill
-stops and reports exhaustion. Successful local and uncontended remote Oracle
-runs are unaffected.
+The three Oracle leaf skills use a bounded six-retry backoff only when a
+failed Oracle invocation's captured stderr ends with the exact standalone
+line `✖ busy`. This matches the current Oracle CLI rendering of
+`Error("busy")` under the required stderr redirection. Oracle's remote server
+returns HTTP 409 `{"error":"busy"}` before `/runs` acceptance when its
+single-flight guard is occupied, but the current remote client collapses that
+status to the error message before the CLI renders it.
+
+This is therefore a pragmatic best-effort classifier rather than a
+protocol-level proof of pre-acceptance. Generic or embedded `busy` text is
+never retried, and any capture containing evidence that browser execution was
+accepted fails immediately. A post-acceptance error whose final message is
+exactly `busy` is theoretically indistinguishable with the current CLI; the
+bounded policy deliberately accepts that narrow residual risk so transient
+remote contention can recover. Permanent routing, access, authentication,
+configuration, local-browser, and unrelated failures still fail immediately.
+If Oracle later exposes a stable pre-acceptance discriminator, prefer that
+contract over the CLI-text classifier.
 
 ## Requirements
 

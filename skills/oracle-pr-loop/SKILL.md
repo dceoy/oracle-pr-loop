@@ -52,9 +52,11 @@ when no PR review workflow is intended.
   feedback through Oracle/ChatGPT and deciding each item's disposition and,
   where a fix is needed, its implementation plan; it performs no repository
   or GitHub mutation of its own.
-- The three leaf skills own their bounded retry policy for the one narrowly
-  classified remote pre-acceptance `ORACLE_REMOTE_BUSY_PRE_ACCEPTANCE` failure. The orchestrator
-  does not sleep, classify Oracle output, or add a second retry loop.
+- The three leaf skills own their bounded retry policy for the narrowly
+  classified exact `✖ busy` Oracle CLI failure. This is a best-effort
+  compatibility classifier for the current CLI, which does not preserve the
+  remote HTTP 409 discriminator; the orchestrator does not sleep, classify
+  Oracle output, or add a second retry loop.
 - Production behavior here and in the composed skills must not launch,
   select, or detect Codex CLI, Claude Code, Cursor CLI, or another
   implementation agent. The top-level main agent remains the implementation
@@ -185,11 +187,14 @@ progress, on any of:
   failure reported by `oracle-issue-plan`, `oracle-pr-review`, or
   `oracle-pr-feedback-plan`.
 
-Transient remote pre-acceptance busy is handled entirely inside the invoked
+An exact `✖ busy` contention candidate is handled entirely inside the invoked
 leaf skill. Retry exhaustion is terminal; the orchestrator must not replay the
-leaf invocation or multiply its retry budget. Any failure for which
-pre-acceptance cannot be established remains terminal so that an accepted run
-is never duplicated.
+leaf invocation or multiply its retry budget. Any nonmatching busy output or
+capture containing evidence that browser execution was accepted remains
+terminal. Because the current Oracle CLI erases the remote HTTP status, an
+accepted run that later fails with the exact message `busy` is theoretically
+indistinguishable; the leaf policy deliberately accepts that narrow residual
+collision risk until Oracle exposes a stable pre-acceptance discriminator.
 
 Finish successfully only when a review/triage cycle completes with the PR
 head unchanged and no actionable feedback — no fix disposition and no thread
