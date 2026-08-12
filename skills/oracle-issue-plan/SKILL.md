@@ -53,7 +53,7 @@ Before invoking Oracle, validate the whole target set as a unit:
   letting Oracle decide.
 - Deduplicate targets by `OWNER/REPO#NUMBER` compared case-insensitively on `OWNER/REPO`, keeping first-seen order
   and each target's first-seen spelling; do not sort.
-- Join the validated, canonical targets with a fixed `, ` separator that the skill generates; never copy the
+- Join the validated, canonical targets with a fixed `,` separator that the skill generates; never copy the
   caller's own separators (newlines, list markers, extra whitespace) into the Oracle prompt.
 
 Do not use `gh`, GitHub APIs, the local checkout, or attachments to gather issue or repository context; the ChatGPT
@@ -81,7 +81,7 @@ oracle \
 @GitHub Analyze this issue, then produce a decision-complete implementation plan for a coding agent to resolve it in one pull request.'
 ```
 
-For two or more validated, deduplicated, same-repository canonical targets, join every one of them with a fixed `, `
+For two or more validated, deduplicated, same-repository canonical targets, join every one of them with a fixed `,`
 separator — in first-seen order, with no trailing separator and nothing else — and substitute that list into the
 `OWNER/REPO#NUMBER, OWNER/REPO#NUMBER` occurrence, then run exactly:
 
