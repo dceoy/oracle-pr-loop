@@ -62,8 +62,13 @@ Both discovery roots are local symlinks to the canonical directories under
 
 ## Oracle remote contention
 
-The three Oracle leaf skills retry only a confirmed remote pre-acceptance
-`ERROR: busy` response, using a bounded six-retry backoff. Permanent routing,
+The three Oracle leaf skills retry only a failed Oracle invocation whose
+stderr contains the exact standalone line
+`ORACLE_REMOTE_BUSY_PRE_ACCEPTANCE` from a compatible Oracle CLI, using a
+bounded six-retry backoff. Oracle emits that marker only for HTTP 409
+`{"error":"busy"}` before `/runs` acceptance; the nonzero exit status is
+required as well.
+generic `busy` text and old CLI versions are never retried. Permanent routing,
 access, authentication, configuration, local-browser, or ambiguous failures
 fail immediately. If remote busy persists through all retries, the leaf skill
 stops and reports exhaustion. Successful local and uncontended remote Oracle

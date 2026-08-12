@@ -53,7 +53,7 @@ when no PR review workflow is intended.
   where a fix is needed, its implementation plan; it performs no repository
   or GitHub mutation of its own.
 - The three leaf skills own their bounded retry policy for the one narrowly
-  classified remote pre-acceptance `ERROR: busy` failure. The orchestrator
+  classified remote pre-acceptance `ORACLE_REMOTE_BUSY_PRE_ACCEPTANCE` failure. The orchestrator
   does not sleep, classify Oracle output, or add a second retry loop.
 - Production behavior here and in the composed skills must not launch,
   select, or detect Codex CLI, Claude Code, Cursor CLI, or another

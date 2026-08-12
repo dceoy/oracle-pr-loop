@@ -104,20 +104,20 @@ intermediate retryable-busy attempt except for its concise retry diagnostic.
 Classify a failure as retryable only when every condition below is true:
 
 - the Oracle invocation exited unsuccessfully;
-- captured stdout contains a line beginning exactly with
-  `Routing browser automation to remote host ` followed by a nonblank host;
-- the last nonblank, whitespace-trimmed line of captured stdout or captured
-  stderr is exactly `ERROR: busy`; and
-- neither stream contains evidence that the browser run was accepted. If
-  capture is incomplete, the streams are ambiguous, or acceptance is
-  uncertain, fail fast rather than replaying the invocation.
+- captured stderr contains a line exactly equal to
+  `ORACLE_REMOTE_BUSY_PRE_ACCEPTANCE`, excluding only its terminating newline;
+- the marker is not inferred from stdout, generic `busy` text, `ERROR: busy`,
+  HTTP status text, or any other prose; and
+- capture is complete and does not contain evidence that the browser run was
+  accepted. If capture is incomplete, the streams are ambiguous, or
+  acceptance is uncertain, fail fast rather than replaying the invocation.
 
-Use Bash built-ins to inspect each file separately: trim leading and trailing
-whitespace while reading each stream line by line, retain the last nonblank
-line for each stream, and scan stdout for the exact remote-routing prefix and
-nonblank host suffix. Never classify merged output, generic busy text,
-local-browser failures, ambiguous transport, or unrelated errors as
-retryable.
+Use Bash built-ins to inspect each file separately and scan stderr line by line
+for the exact marker without trimming whitespace. Never classify merged
+output, stdout-only markers, generic busy text, local-browser failures,
+ambiguous transport, or unrelated errors as retryable. This contract requires
+an Oracle CLI version that emits the marker; do not add a heuristic fallback
+for older versions.
 
 The initial invocation is attempt 1. Allow six retry opportunities, for seven
 total invocations. For retry number 1 through 6, use nominal delays of 1, 2,
