@@ -52,6 +52,9 @@ when no PR review workflow is intended.
   feedback through Oracle/ChatGPT and deciding each item's disposition and,
   where a fix is needed, its implementation plan; it performs no repository
   or GitHub mutation of its own.
+- The three leaf skills own their bounded retry policy for the one narrowly
+  classified remote pre-acceptance `ORACLE_REMOTE_BUSY_PRE_ACCEPTANCE` failure. The orchestrator
+  does not sleep, classify Oracle output, or add a second retry loop.
 - Production behavior here and in the composed skills must not launch,
   select, or detect Codex CLI, Claude Code, Cursor CLI, or another
   implementation agent. The top-level main agent remains the implementation
@@ -167,6 +170,8 @@ Choose an iteration limit before starting. Stop, without fabricating
 progress, on any of:
 
 - the chosen iteration limit;
+- a leaf skill exhausting its six remote-busy retries after seven total
+  Oracle attempts;
 - `oracle-pr-feedback-plan` advising clarification needed, a deliberate
   defer/won't-fix, or another explicit blocker, once the main agent has
   attempted the applicable reply or thread action for that disposition
@@ -175,8 +180,16 @@ progress, on any of:
 - the main agent hitting an unpublished or unverified fix, an authentication
   or permission failure, a failed publication/reply/resolution, or another
   explicit blocker while acting on that advice;
-- an Oracle/ChatGPT GitHub-app routing or access failure reported by
-  `oracle-issue-plan`, `oracle-pr-review`, or `oracle-pr-feedback-plan`.
+- an Oracle/ChatGPT GitHub-app routing, access, authentication, configuration,
+  ambiguous-transport, local-browser, timeout, disconnect, or other permanent
+  failure reported by `oracle-issue-plan`, `oracle-pr-review`, or
+  `oracle-pr-feedback-plan`.
+
+Transient remote pre-acceptance busy is handled entirely inside the invoked
+leaf skill. Retry exhaustion is terminal; the orchestrator must not replay the
+leaf invocation or multiply its retry budget. Any failure for which
+pre-acceptance cannot be established remains terminal so that an accepted run
+is never duplicated.
 
 Finish successfully only when a review/triage cycle completes with the PR
 head unchanged and no actionable feedback — no fix disposition and no thread
