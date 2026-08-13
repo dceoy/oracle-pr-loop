@@ -74,8 +74,10 @@ oracle \
   -p '# PR: OWNER/REPO#NUMBER
 @GitHub Triage the existing review feedback on this pull request. Decide how each feedback item should be handled
 using dispositions equivalent to fix, already addressed, outdated, answer, clarify, defer, or will not fix. For
-every item that should be fixed, produce a decision-complete implementation plan and verification guidance. Suggest
-a concise reply and whether to resolve or leave the thread open when useful. Do not modify the pull request.'
+every item that should be fixed, produce a decision-complete implementation plan and verification guidance. For
+fixes, prefer the smallest coherent change, reuse existing code and abstractions where practical, and avoid
+unrelated refactoring or speculative abstractions. Suggest a concise reply and whether to resolve or leave the
+thread open when useful. Do not modify the pull request.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append caller prose, mode flags, copied comments, or
