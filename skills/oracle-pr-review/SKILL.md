@@ -70,7 +70,9 @@ oracle \
   --model gpt-5.6-sol \
   --browser-thinking-time high \
   -p '# PR: OWNER/REPO#NUMBER
-@GitHub Assess this pull request, emphasizing actionable inline feedback. Apply KISS and DRY: flag concrete duplication or unnecessary complexity, prefer existing code and the smallest coherent solution, and avoid style-only simplification suggestions.'
+@GitHub Assess this pull request, emphasizing actionable inline feedback. Apply KISS and DRY: flag concrete
+ duplication or unnecessary complexity, prefer existing code and the smallest coherent solution, and avoid
+ style-only simplification suggestions.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.
