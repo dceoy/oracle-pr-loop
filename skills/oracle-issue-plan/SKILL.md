@@ -126,20 +126,30 @@ intermediate retryable-busy attempt except for its concise retry diagnostic.
 Classify a failure as retryable only when every condition below is true:
 
 - the Oracle invocation exited unsuccessfully;
-- captured stderr contains a line exactly equal to
-  `ORACLE_REMOTE_BUSY_PRE_ACCEPTANCE`, excluding only its terminating newline;
-- the marker is not inferred from stdout, generic `busy` text, `ERROR: busy`,
-  HTTP status text, or any other prose; and
-- capture is complete and does not contain evidence that the browser run was
-  accepted. If capture is incomplete, the streams are ambiguous, or
-  acceptance is uncertain, fail fast rather than replaying the invocation.
+- the last nonblank line of captured stderr is exactly `✖ busy`, excluding
+  only its terminating newline and without trimming any other whitespace;
+- the match is not inferred from stdout, a substring, generic `busy` prose,
+  `ERROR: busy`, HTTP status text, or any differently formatted message; and
+- capture is complete and contains no evidence that browser execution was
+  accepted or started. If acceptance evidence is present, fail fast rather
+  than replaying the invocation.
 
-Use Bash built-ins to inspect each file separately and scan stderr line by line
-for the exact marker without trimming whitespace. Never classify merged
-output, stdout-only markers, generic busy text, local-browser failures,
-ambiguous transport, or unrelated errors as retryable. This contract requires
-an Oracle CLI version that emits the marker; do not add a heuristic fallback
-for older versions.
+Use Bash built-ins to inspect each file separately and determine stderr's last
+nonblank line without normalizing it. Never classify merged output,
+stdout-only text, substring matches, local-browser failures, ambiguous
+transport, or unrelated errors as retryable. Under the required stderr
+redirection, the current Oracle CLI renders an uncaught `Error("busy")` as the
+standalone line `✖ busy`.
+
+Oracle's remote server returns HTTP 409 `{"error":"busy"}` before `/runs`
+acceptance when its single-flight guard is occupied, but the current remote
+client collapses every non-200 response to `Error(message)` before that status
+reaches the CLI. This exact CLI-text classifier is therefore a pragmatic
+compatibility rule, not a protocol-level proof of pre-acceptance. A remote run
+accepted earlier that later fails with the exact message `busy` can render
+identically; accept that narrow residual collision risk unless capture shows
+acceptance evidence. If Oracle exposes a stable pre-acceptance discriminator
+in the future, prefer that contract over this text classifier.
 
 The initial invocation is attempt 1. Allow six retry opportunities, for seven
 total invocations. For retry number 1 through 6, use nominal delays of 1, 2,
@@ -168,8 +178,10 @@ this retry sequence; a later invocation starts with a fresh budget.
 Authentication or authorization failures, GitHub-app routing or access
 failures, invalid configuration, malformed targets or prompts, local-browser
 failures, unrelated 4xx/5xx errors, timeouts, disconnects, ambiguous
-transport, and any post-acceptance or otherwise uncertain failure remain
-fail-fast. Do not use this policy to replay a run that may have been accepted.
+transport, acceptance-evidenced failures, and every non-exact busy message
+remain fail-fast. Because the current CLI erases the HTTP status, exact
+`✖ busy` cannot prove pre-acceptance; the bounded retry deliberately accepts
+only the residual collision risk described above.
 
 ## Failure and output
 
