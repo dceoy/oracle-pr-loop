@@ -70,9 +70,9 @@ oracle \
   --model gpt-5.6-sol \
   --browser-thinking-time high \
   -p '# PR: OWNER/REPO#NUMBER
-@GitHub Review this pull request, prioritizing inline review comments. Apply KISS and DRY when evaluating
-maintainability: flag concrete duplication or unnecessary complexity, prefer existing code and the smallest coherent
-solution, and avoid style-only simplification suggestions.'
+@GitHub Review this pull request, prioritizing inline review comments. Apply KISS, DRY, and YAGNI when evaluating
+maintainability: flag concrete duplication, unnecessary complexity, or functionality and flexibility without a current
+requirement; prefer existing code and the smallest coherent solution, and avoid style-only simplification suggestions.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.
