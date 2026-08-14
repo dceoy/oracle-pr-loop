@@ -168,10 +168,10 @@ with the requested or current-branch PR.
 
 ## Stop conditions
 
-Choose an iteration limit before starting. Stop, without fabricating
-progress, on any of:
+Honor an iteration limit only when the caller explicitly provides one;
+otherwise do not impose one. Stop, without fabricating progress, on any of:
 
-- the chosen iteration limit;
+- a caller-specified iteration limit, when present;
 - a leaf skill exhausting its six remote-busy retries after seven total
   Oracle attempts;
 - `oracle-pr-feedback-plan` advising clarification needed, a deliberate
