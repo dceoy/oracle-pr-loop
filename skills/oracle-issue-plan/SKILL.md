@@ -79,10 +79,10 @@ oracle \
   --browser-thinking-time high \
   -p '# Issue: OWNER/REPO#NUMBER
 @GitHub Analyze this issue, then produce a decision-complete implementation plan for a coding agent to resolve it
-in one pull request. Apply KISS and DRY: prefer the smallest coherent change, reuse existing code and abstractions,
-consolidate duplication when it materially simplifies the implementation, and avoid speculative abstractions,
-compatibility layers, or new infrastructure unless required by the issue or existing repository compatibility
-constraints.'
+in one pull request. Apply KISS, DRY, and YAGNI: prefer the smallest coherent change, reuse existing code and
+abstractions, consolidate duplication when it materially simplifies the implementation, and avoid speculative
+functionality, flexibility, abstractions, compatibility layers, extension points, or new infrastructure unless
+required by the issue or existing repository compatibility constraints.'
 ```
 
 For two or more validated, deduplicated, same-repository canonical targets, join every one of them with a fixed `,`
@@ -96,10 +96,10 @@ oracle \
   --browser-thinking-time high \
   -p '# Issues: OWNER/REPO#NUMBER, OWNER/REPO#NUMBER
 @GitHub Analyze these issues, then produce a single decision-complete implementation plan for a coding agent to
-resolve them in one pull request. Apply KISS and DRY: prefer the smallest coherent change, reuse existing code and
-abstractions, consolidate duplication when it materially simplifies the implementation, and avoid speculative
-abstractions, compatibility layers, or new infrastructure unless required by the issues or existing repository
-compatibility constraints.'
+resolve them in one pull request. Apply KISS, DRY, and YAGNI: prefer the smallest coherent change, reuse existing code
+and abstractions, consolidate duplication when it materially simplifies the implementation, and avoid speculative
+functionality, flexibility, abstractions, compatibility layers, extension points, or new infrastructure unless
+required by the issues or existing repository compatibility constraints.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.
