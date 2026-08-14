@@ -170,6 +170,7 @@ Fail closed: do not substitute Oracle API mode, another model, another PR, local
 or the current agent's own review. Do not retry a failure unless it satisfies every condition in the remote busy retry
 policy. Do not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
 
-If Oracle exits non-zero or its response shows that the GitHub app was not invoked, lacked repository access, or did
-not successfully publish a GitHub pull-request review, report the failure. Otherwise return Oracle's ChatGPT review
-without rewriting its findings.
+Accept the result only when Oracle exits zero and its response explicitly confirms that a GitHub pull-request review
+was posted to GitHub. If that affirmative publication confirmation is absent, or the response shows that the GitHub
+app was not invoked, lacked repository access, or failed to publish the review, report the failure. Otherwise return
+Oracle's ChatGPT review without rewriting its findings.
