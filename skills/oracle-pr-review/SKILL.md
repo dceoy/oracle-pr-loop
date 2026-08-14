@@ -72,14 +72,14 @@ oracle \
   -p '# PR: OWNER/REPO#NUMBER
 @GitHub Review this pull request and publish the review to GitHub. You must use the connected GitHub app to submit
 a GitHub pull-request review before answering; the task is not complete until that submission succeeds. Prioritize
-inline review comments for line-specific findings, and always submit a top-level review body so a review is posted
-even when there are no inline findings. If there are no actionable findings, still submit a COMMENT review stating
-that no actionable issues were found; do not return only a chat summary. If publication cannot be completed, report
-the publication failure instead of presenting an unposted review as success. After successful submission, explicitly
-state that the review was posted to GitHub. Apply KISS, DRY, and YAGNI when evaluating maintainability: flag concrete
-duplication, unnecessary complexity, or speculative functionality, flexibility, abstractions, compatibility layers,
-extension points, or infrastructure without a current requirement; prefer existing code and the smallest coherent
-solution, and avoid style-only simplification suggestions.'
+inline review comments for line-specific findings, and always use COMMENT as the review action and include a top-level
+review body so a review is posted even when there are no inline findings. If there are no actionable findings, state
+that no actionable issues were found in that COMMENT review; do not return only a chat summary. If publication cannot
+be completed, report the publication failure instead of presenting an unposted review as success. After successful
+submission, explicitly state that the review was posted to GitHub. Apply KISS, DRY, and YAGNI when evaluating
+maintainability: flag concrete duplication, unnecessary complexity, or speculative functionality, flexibility,
+abstractions, compatibility layers, extension points, or infrastructure without a current requirement; prefer
+existing code and the smallest coherent solution, and avoid style-only simplification suggestions.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.
@@ -170,5 +170,6 @@ Fail closed: do not substitute Oracle API mode, another model, another PR, local
 or the current agent's own review. Do not retry a failure unless it satisfies every condition in the remote busy retry
 policy. Do not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
 
-If Oracle exits non-zero or its response shows that the GitHub app was not invoked or lacked repository
-access, report the failure. Otherwise return Oracle's ChatGPT review without rewriting its findings.
+If Oracle exits non-zero or its response shows that the GitHub app was not invoked, lacked repository access, or did
+not successfully publish a GitHub pull-request review, report the failure. Otherwise return Oracle's ChatGPT review
+without rewriting its findings.
