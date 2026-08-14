@@ -71,8 +71,9 @@ oracle \
   --browser-thinking-time high \
   -p '# PR: OWNER/REPO#NUMBER
 @GitHub Review this pull request, prioritizing inline review comments. Apply KISS, DRY, and YAGNI when evaluating
-maintainability: flag concrete duplication, unnecessary complexity, or functionality and flexibility without a current
-requirement; prefer existing code and the smallest coherent solution, and avoid style-only simplification suggestions.'
+maintainability: flag concrete duplication, unnecessary complexity, or speculative functionality, flexibility,
+abstractions, compatibility layers, extension points, or infrastructure without a current requirement; prefer
+existing code and the smallest coherent solution, and avoid style-only simplification suggestions.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.
@@ -107,7 +108,6 @@ Classify a failure as retryable only when every condition below is true:
 - capture is complete and contains no evidence that browser execution was
   accepted or started. If acceptance evidence is present, fail fast rather
   than replaying the invocation.
-
 Use Bash built-ins to inspect each file separately and determine stderr's last
 nonblank line without normalizing it. Never classify merged output,
 stdout-only text, substring matches, local-browser failures, ambiguous
