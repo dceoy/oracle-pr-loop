@@ -108,6 +108,7 @@ Classify a failure as retryable only when every condition below is true:
 - capture is complete and contains no evidence that browser execution was
   accepted or started. If acceptance evidence is present, fail fast rather
   than replaying the invocation.
+
 Use Bash built-ins to inspect each file separately and determine stderr's last
 nonblank line without normalizing it. Never classify merged output,
 stdout-only text, substring matches, local-browser failures, ambiguous
