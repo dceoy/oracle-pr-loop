@@ -41,9 +41,9 @@ when no PR review workflow is intended.
 - The main agent owns implementation, repository QA, branch creation,
   commit, push, opening the initial pull request for Issue-started work, and
   — for the pull-request workflow — validating triage advice, implementing
-  accepted fixes, verification, publication, replies, and review-thread
-  resolution, using normal repository/runtime tooling (`git`, `gh`, or
-  equivalent).
+  accepted fixes, verification, publication, feedback-snapshot capture and
+  reconciliation, replies, and review-thread resolution, using normal
+  repository/runtime tooling (`git`, `gh`, or equivalent).
 - `oracle-issue-plan` owns Issue/repository context and returns one advisory
   implementation plan; it does not implement anything itself.
 - `oracle-pr-review` owns Oracle browser routing and ChatGPT GitHub-app review
@@ -79,6 +79,12 @@ scope before acting. Do not translate Oracle's review or
 do not manufacture an approval or suppress an unresolved
 clarification/defer/blocker state to keep the loop running.
 
+The main agent may read GitHub feedback with normal GitHub tooling only to
+establish and reconcile concurrency snapshots around Oracle triage. That is a
+freshness guard, not a competing triage path: do not independently assign
+feedback dispositions, rewrite Oracle's advice, or replace
+`oracle-pr-feedback-plan` with a local parser or review engine.
+
 When the caller has stated an execution constraint equivalent to the
 retired triage skill's `dry_run`, `no_push`, or `no_reply` modes — for
 example, "review only," "do not push," or "do not post replies" — the main
@@ -88,6 +94,66 @@ feedback as resolved when the constraint disables the fix's publication or
 its reply/resolution, and leave the affected thread open rather than
 fabricating that action or the loop's completion.
 
+## Feedback freshness and reconciliation
+
+For every unchanged PR head, maintain a GitHub-backed feedback baseline for
+the exact snapshot that `oracle-pr-feedback-plan` analyzed. The snapshot must
+be sufficient to detect disposition-relevant external changes without
+interpreting the feedback itself. Include, where available:
+
+- inline review-thread identities and resolved/unresolved state, plus the
+  comment identities in each thread and a body-content fingerprint such as a
+  digest or `updated_at` for each comment;
+- PR-level comment identities and body-content fingerprints; and
+- review-submission identities, persisted state (`CHANGES_REQUESTED`,
+  `COMMENTED`, `APPROVED`, dismissal/supersession state where available), and
+  a review-body content fingerprint.
+
+Call the snapshot most recently analyzed on the current head
+`analyzed_feedback_baseline`. Maintain a separate
+`own_mutations_since_baseline` ledger containing the snapshot-visible effects
+attributable to successful GitHub feedback mutations performed by this loop
+after that baseline was captured. Record the created reply comment, a thread
+resolution state change, or a GitHub-generated `COMMENTED` review submission
+implicitly associated with an inline reply when that effect can be identified
+as part of the mutation. Record enough identity, persisted-state, and content
+fingerprint data to subtract only those known effects from a later snapshot;
+leave unexplained new or changed comments, threads, or reviews as external
+deltas. These names describe orchestration state; they do not require a new
+machine-readable schema for Oracle's advisory output.
+
+Head movement always takes precedence over feedback reconciliation. If the
+head changes, discard the head-scoped baseline and restart review on the new
+head. If the head is unchanged but the fresh GitHub snapshot differs from the
+analyzed baseline after accounting for `own_mutations_since_baseline`, do not
+act on stale triage. Re-run `oracle-pr-feedback-plan` on the same unchanged
+head using GitHub as the durable handoff, promote the fresh snapshot to the
+new baseline only if the head is still unchanged when triage returns, reset
+the own-mutation ledger, and reconcile again. Do not re-run
+`oracle-pr-review` merely because feedback changed while the code head did
+not. If a fix was pushed and the fresh snapshot is being checked against its
+exact verified post-fix head, discard the old head-scoped state and restart
+review on that new head before taking any feedback action; do not use a
+same-head triage refresh for a post-fix head.
+
+Perform this reconciliation at five boundaries:
+
+1. immediately after triage, before validating or implementing any
+   disposition;
+2. immediately before creating a local commit for an accepted fix;
+3. immediately before pushing that local commit, because implementation,
+   commit hooks, or commit creation can leave a window for new reviewer input;
+4. immediately before any reply, resolution, or other GitHub feedback
+   mutation derived from that triage; and
+5. immediately before declaring the unchanged head complete.
+
+Track `review_round_count` across the whole workflow and reset only the
+separate `same_head_feedback_refresh_count` when the PR head changes. A
+caller-specified iteration limit bounds both the total number of
+`oracle-pr-review` rounds across all heads and the same-head triage refreshes
+for any one unchanged head. If no iteration limit is supplied, do not invent
+one; both counters are telemetry only.
+
 ## Canonical workflow
 
 ```mermaid
@@ -96,16 +162,35 @@ flowchart TD
   Issue -->|yes| Plan[oracle-issue-plan] --> Implement[main agent implements, runs QA, opens PR]
   Issue -->|no| Head[record PR head]
   Implement --> Head
-  Head --> Review[oracle-pr-review on that head]
+  Head --> Review[oracle-pr-review; increment workflow-wide review_round_count]
   Review --> HeadMoved{Head changed during review?}
   HeadMoved -->|yes| Head
-  HeadMoved -->|no| Triage[oracle-pr-feedback-plan advises]
-  Triage --> TriageHeadMoved{Head changed during triage?}
-  TriageHeadMoved -->|yes| Head
-  TriageHeadMoved -->|no| Act[main agent validates advice within caller constraints, fixes+QA+publish, verifies publication, then replies/resolves]
-  Act --> HeadAfter{Head changed after fixes?}
-  HeadAfter -->|yes, fix published| Head
-  HeadAfter -->|no, nothing actionable left| Done[done]
+  HeadMoved -->|no| Snapshot[capture GitHub feedback baseline]
+  Snapshot --> Triage[oracle-pr-feedback-plan advises]
+  Triage --> Reconcile{Head and feedback still match analyzed baseline?}
+  Reconcile -->|head changed| Head
+  Reconcile -->|feedback changed only| Snapshot
+  Reconcile -->|yes| Act[main agent validates advice, fixes and runs QA]
+  Act -->|accepted fix to publish| PreCommitGate{Fresh before commit?}
+  Act -->|no fix to publish| MutationGate{Fresh before reply/resolve?}
+  PreCommitGate -->|head changed; discard edits| Head
+  PreCommitGate -->|feedback changed only; discard edits| Snapshot
+  PreCommitGate -->|fresh| Commit[create local commit]
+  Commit --> PrePushGate{Fresh before push?}
+  PrePushGate -->|head changed; discard commit| Head
+  PrePushGate -->|feedback changed only; discard commit| Snapshot
+  PrePushGate -->|fresh| Publish[push; verify exact post-fix head]
+  Publish --> Head
+  MutationGate -->|unexpected head change| Head
+  MutationGate -->|feedback changed only| Snapshot
+  MutationGate -->|yes| Mutate[perform one reply or resolution; record own mutation]
+  Mutate --> MoreMutations{More feedback mutations?}
+  MoreMutations -->|yes| MutationGate
+  MoreMutations -->|no| HeadAfter{Head changed after actions?}
+  HeadAfter -->|yes| Head
+  HeadAfter -->|no| CompletionGate{Fresh feedback snapshot reconciled?}
+  CompletionGate -->|no| Snapshot
+  CompletionGate -->|yes, nothing actionable left| Done[done]
   Act --> Blocker{Blocker reported?}
   Blocker -->|yes| Stop[stop and report]
 ```
@@ -129,49 +214,136 @@ For an existing-PR request, skip Issue planning and enter directly at step 1
 with the requested or current-branch PR.
 
 1. Determine the exact PR (`OWNER/REPO#NUMBER`); resolve an omitted target
-   from the current branch the same way `oracle-pr-review` does.
+   from the current branch the same way `oracle-pr-review` does. Initialize
+   the workflow-wide `review_round_count` and the current head's
+   `same_head_feedback_refresh_count`.
 2. Record the PR head before the review round:
 
    ```bash
    gh pr view <NUMBER> --repo <OWNER/REPO> --json headRefOid --jq .headRefOid
    ```
 
-3. Run `oracle-pr-review` for that exact PR. It reviews through ChatGPT's
-   connected GitHub app, which publishes the review to GitHub directly; do
-   not re-publish or paraphrase its returned review.
+3. Run `oracle-pr-review` for that exact PR, incrementing
+   `review_round_count` before each invocation. If a caller-specified
+   iteration limit is already reached, stop without invoking the review. The
+   counter is workflow-wide and includes a round later discarded because the
+   head moved; it is not reset when a new head is selected. The review runs
+   through ChatGPT's connected GitHub app, which publishes the review to
+   GitHub directly; do not re-publish or paraphrase its returned review.
 4. Re-read the head. If it changed while the review was running, discard that
-   review round without triaging it and restart at step 2 on the new head.
-5. Otherwise, run `oracle-pr-feedback-plan` against that review's existing
-   GitHub feedback. It returns advisory dispositions and decision-complete
-   fix plans only; it makes no repository or GitHub mutation.
-6. Re-read the head immediately after triage. If it changed while triage was
-   running, discard that triage result without acting on it — no fix, reply,
-   or thread action — and restart at step 2 on the new head.
-7. Otherwise, validate that advisory triage against the current PR head,
-   repository, feedback scope, and any caller execution constraint. For each
-   accepted fix, implement the change and run repository QA, then commit and
-   push it. Before replying to or resolving a code-dependent thread, re-fetch
-   the PR head and confirm the pushed fix commit is present as, or is an
-   ancestor of, the current head; if that confirmation fails, leave the
-   thread open and treat it as a blocker rather than resolving it. Handle
-   `answer`, `already addressed`, `outdated`, `clarify`, `defer`, and
-   `won't-fix` dispositions independently of this publication gate, since
-   they do not depend on a pushed fix: validate each against the current
-   head and thread context, then post the applicable reply and thread
-   action.
-8. Re-read the head after acting on the triage.
-9. If the head changed — a fix was published — start a new review round at
+   review round and any head-scoped feedback state, reset only the
+   `same_head_feedback_refresh_count` for the new head, and restart at step 2.
+5. Otherwise, capture the complete GitHub-backed feedback snapshot described
+   in **Feedback freshness and reconciliation**. Store it as
+   `analyzed_feedback_baseline` and initialize an empty
+   `own_mutations_since_baseline` ledger.
+6. Run `oracle-pr-feedback-plan` against that review's existing GitHub
+   feedback. It returns advisory dispositions and decision-complete fix plans
+   only; it makes no repository or GitHub mutation.
+7. Re-read the head immediately after triage. If it changed while triage was
+   running, discard that triage result and the head-scoped feedback state
+   without acting on it — no fix, reply, or thread action — and restart at
    step 2 on the new head.
-10. If the head is unchanged and no remaining actionable feedback needs a
-    fix, reply, or resolution, finish.
-11. Never re-review an unchanged head.
+8. With the head still unchanged, re-fetch the complete GitHub-backed
+   feedback snapshot. Compare it with `analyzed_feedback_baseline` plus
+   `own_mutations_since_baseline`. If an external delta exists, do not act on
+   the stale triage. If a caller-specified iteration limit is present and the
+   `same_head_feedback_refresh_count` has reached that limit, stop and report
+   the unreconciled feedback delta as a blocker. Otherwise increment that
+   counter, promote the fresh snapshot to `analyzed_feedback_baseline`, reset
+   `own_mutations_since_baseline`, re-run `oracle-pr-feedback-plan` on this
+   same unchanged head, and repeat steps 7–8. Do not re-run
+   `oracle-pr-review` or reset `review_round_count` for this same-head
+   feedback-only change.
+9. Once the head and feedback snapshot are stable, validate the advisory
+   triage against the current PR head, repository, feedback scope, and any
+   caller execution constraint. Implement all accepted code fixes that can
+   coherently be applied to this analyzed head and run repository QA over the
+   combined change. If there is an accepted fix to publish, immediately
+   before creating its local commit, re-fetch the PR head and full feedback
+   snapshot and reconcile them against the analyzed baseline plus
+   `own_mutations_since_baseline`. Require the head to equal the exact head
+   recorded in step 2. If this pre-commit gate fails, do not create or push a
+   commit; discard the triage and loop-owned uncommitted edits derived from
+   it, then restart at step 2 on a changed head or follow step 8 for an
+   external feedback delta. If those edits cannot be safely separated from
+   unrelated work, stop as a blocker. If the gate is fresh, create one local
+   commit containing the accepted fix. Immediately before pushing that local
+   commit, re-fetch the PR head and full feedback snapshot and reconcile them
+   against the same baseline plus `own_mutations_since_baseline`. Require the
+   head to still equal the exact head recorded in step 2. If the pre-push
+   head check fails, do not push; discard or safely reconstruct the
+   loop-owned local commit and restart at step 2 on the new head. If the
+   pre-push snapshot has an external delta, do not push; discard or safely
+   reconstruct the loop-owned local commit and follow step 8's same-head
+   refresh path. If the local commit cannot be safely separated from
+   unrelated work, stop as a blocker. Only a fresh pre-push gate permits the
+   push. After a successful push, re-fetch and record the exact new PR head as
+   the expected post-fix head. If publication is required but the pushed fix
+   cannot be verified on the PR head, leave code-dependent threads open and
+   stop as a blocker. If no fix is accepted, continue without a publication
+   step.
+10. Immediately before any reply, resolution, or other GitHub feedback
+    mutation derived from this triage, re-fetch the PR head and full feedback
+    snapshot again. If a fix was pushed, require the current head to equal the
+    exact verified post-fix head; an ancestor relationship alone is not
+    sufficient because a later commit can revert or alter the fix. If no fix
+    was pushed, require the current head to equal the head analyzed in step 2.
+    If the head fails the applicable check, perform no feedback mutation and
+    restart at step 2. If the head passes but the feedback snapshot has an
+    external delta beyond `own_mutations_since_baseline`, perform no mutation
+    from the stale triage. When a fix was pushed and the current head is the
+    exact verified post-fix head, discard the old head-scoped feedback state,
+    reset only `same_head_feedback_refresh_count` for that head, and restart
+    review at step 2; do not reset `review_round_count`. If an external delta
+    exists and no fix was pushed, return to the same-head refresh path in step 8. If the head and feedback snapshot are fresh and no fix was pushed,
+    continue to step 11.
+11. When the mutation gate is fresh, handle `answer`, `already addressed`,
+    `outdated`, `clarify`, `defer`, `won't-fix`, and accepted `fix`
+    dispositions according to the validated triage and caller constraints,
+    one feedback mutation at a time. Immediately before each individual
+    reply, resolution, or other mutation, repeat step 10's head and full
+    feedback-snapshot gate. If it is fresh, perform only that one mutation,
+    then record only the snapshot-visible effects attributable to that
+    successful mutation in `own_mutations_since_baseline`, including any
+    GitHub-generated `COMMENTED` review submission associated with an inline
+    reply. Do not classify an otherwise unexplained snapshot delta as own
+    merely because it appeared near the mutation. If more mutations remain,
+    return to step 10; if the gate detects a head or external feedback change,
+    perform no further mutation and follow the applicable restart or refresh
+    path.
+12. Re-read the head after acting on the triage. If the head changed from the
+    head reviewed in step 2 — including the expected change from a published
+    fix — discard the old head-scoped feedback state, reset only
+    `same_head_feedback_refresh_count` for the new head, and start a new
+    review round at step 2. The workflow-wide `review_round_count` continues
+    across this head change.
+13. If the head is unchanged, perform a final complete feedback-snapshot
+    reconciliation against `analyzed_feedback_baseline` plus
+    `own_mutations_since_baseline`. If an external delta exists, do not
+    finish. If a caller-specified iteration limit is present and
+    `same_head_feedback_refresh_count` has reached it, stop and report the
+    unreconciled delta as a blocker. Otherwise increment that counter, promote
+    the fresh snapshot, reset the own-mutation ledger, re-run
+    `oracle-pr-feedback-plan` without re-running review, and continue from
+    step 7.
+14. Finish only when the head is unchanged, the final feedback snapshot is
+    reconciled, and no remaining actionable feedback needs a fix, reply,
+    reviewer input, publication, or resolution.
+15. Never re-review an unchanged head solely because feedback changed; refresh
+    triage instead.
 
 ## Stop conditions
 
 Honor an iteration limit only when the caller explicitly provides one;
-otherwise do not impose one. Stop, without fabricating progress, on any of:
+otherwise do not impose one. When provided, it bounds the workflow-wide
+`review_round_count` and, separately, the current head's
+`same_head_feedback_refresh_count`; the former does not reset across head
+changes, while the latter does. Stop, without fabricating progress, on any
+of:
 
-- a caller-specified iteration limit, when present;
+- a caller-specified iteration limit, when present, including an unreconciled
+  same-head feedback delta when the refresh budget is exhausted;
 - a leaf skill exhausting its six remote-busy retries after seven total
   Oracle attempts;
 - `oracle-pr-feedback-plan` advising clarification needed, a deliberate
@@ -182,6 +354,8 @@ otherwise do not impose one. Stop, without fabricating progress, on any of:
 - the main agent hitting an unpublished or unverified fix, an authentication
   or permission failure, a failed publication/reply/resolution, or another
   explicit blocker while acting on that advice;
+- inability to capture or reconcile the GitHub feedback snapshot needed to
+  prove that triage is still fresh before mutation or completion; or
 - an Oracle/ChatGPT GitHub-app routing, access, authentication, configuration,
   ambiguous-transport, local-browser, timeout, disconnect, or other permanent
   failure reported by `oracle-issue-plan`, `oracle-pr-review`, or
@@ -197,5 +371,7 @@ indistinguishable; the leaf policy deliberately accepts that narrow residual
 collision risk until Oracle exposes a stable pre-acceptance discriminator.
 
 Finish successfully only when a review/triage cycle completes with the PR
-head unchanged and no actionable feedback — no fix disposition and no thread
-still requiring reviewer input, publication, or resolution — remains.
+head unchanged, the final GitHub feedback snapshot reconciled against the
+latest analyzed baseline plus this loop's recorded mutations, and no
+actionable feedback — no fix disposition and no thread still requiring
+reviewer input, publication, or resolution — remains.
