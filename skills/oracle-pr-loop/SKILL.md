@@ -126,7 +126,10 @@ head using GitHub as the durable handoff, promote the fresh snapshot to the
 new baseline only if the head is still unchanged when triage returns, reset
 the own-mutation ledger, and reconcile again. Do not re-run
 `oracle-pr-review` merely because feedback changed while the code head did
-not.
+not. If a fix was pushed and the fresh snapshot is being checked against its
+exact verified post-fix head, discard the old head-scoped state and restart
+review on that new head before taking any feedback action; do not use a
+same-head triage refresh for a post-fix head.
 
 Perform this reconciliation at three boundaries:
 
@@ -159,10 +162,14 @@ flowchart TD
   Reconcile -->|feedback changed only| Snapshot
   Reconcile -->|yes| Act[main agent validates advice, fixes and runs QA]
   Act --> MutationGate{Fresh before reply/resolve?}
-  MutationGate -->|head changed| Head
-  MutationGate -->|feedback changed only| Snapshot
-  MutationGate -->|yes| Mutate[reply/resolve and record own mutations]
-  Mutate --> HeadAfter{Head changed after fixes?}
+  MutationGate -->|unexpected head change| Head
+  MutationGate -->|feedback changed only| PostFixDelta{Verified fix head?}
+  PostFixDelta -->|yes| Head
+  PostFixDelta -->|no| Snapshot
+  MutationGate -->|yes| Mutate[perform one reply or resolution; record own mutation]
+  Mutate --> MoreMutations{More feedback mutations?}
+  MoreMutations -->|yes| MutationGate
+  MoreMutations -->|no| HeadAfter{Head changed after fixes?}
   HeadAfter -->|yes, fix published| Head
   HeadAfter -->|no| CompletionGate{Fresh feedback snapshot reconciled?}
   CompletionGate -->|no| Snapshot
@@ -239,17 +246,23 @@ with the requested or current-branch PR.
     exact verified post-fix head; an ancestor relationship alone is not
     sufficient because a later commit can revert or alter the fix. If no fix
     was pushed, require the current head to equal the head analyzed in step 2.
-    If the head differs, perform no feedback mutation and restart at step 2.
-    If the head is unchanged but the feedback snapshot has an external delta
-    beyond `own_mutations_since_baseline`, perform no mutation from the stale
-    triage; return to the same-head refresh path in step 8.
+    If the head fails the applicable check, perform no feedback mutation and
+    restart at step 2. If the head passes but the feedback snapshot has an
+    external delta beyond `own_mutations_since_baseline`, perform no mutation
+    from the stale triage. When a fix was pushed and the current head is the
+    exact verified post-fix head, discard the old head-scoped feedback state,
+    reset the refresh count for that head, and restart review at step 2.
+    Otherwise, return to the same-head refresh path in step 8.
 11. When the mutation gate is fresh, handle `answer`, `already addressed`,
     `outdated`, `clarify`, `defer`, `won't-fix`, and accepted `fix`
-    dispositions according to the validated triage and caller constraints.
-    Post the applicable reply and resolve or leave open the applicable review
-    thread. Append each successful reply or resolution to
-    `own_mutations_since_baseline` so the loop can distinguish its own
-    GitHub changes from external reviewer changes.
+    dispositions according to the validated triage and caller constraints,
+    one feedback mutation at a time. Immediately before each individual
+    reply, resolution, or other mutation, repeat step 10's head and full
+    feedback-snapshot gate. If it is fresh, perform only that one mutation,
+    then append the successful reply or resolution to
+    `own_mutations_since_baseline`. If more mutations remain, return to step
+    10; if the gate detects a head or external feedback change, perform no
+    further mutation and follow the applicable restart or refresh path.
 12. Re-read the head after acting on the triage. If the head changed from the
     head reviewed in step 2 — including the expected change from a published
     fix — discard the old head-scoped feedback state, reset the refresh count
