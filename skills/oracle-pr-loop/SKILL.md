@@ -111,11 +111,16 @@ interpreting the feedback itself. Include, where available:
 
 Call the snapshot most recently analyzed on the current head
 `analyzed_feedback_baseline`. Maintain a separate
-`own_mutations_since_baseline` ledger containing only GitHub feedback
-mutations performed by this loop after that baseline was captured, such as
-replies and thread resolutions. These names describe orchestration state;
-they do not require a new machine-readable schema for Oracle's advisory
-output.
+`own_mutations_since_baseline` ledger containing the snapshot-visible effects
+attributable to successful GitHub feedback mutations performed by this loop
+after that baseline was captured. Record the created reply comment, a thread
+resolution state change, or a GitHub-generated `COMMENTED` review submission
+implicitly associated with an inline reply when that effect can be identified
+as part of the mutation. Record enough identity, persisted-state, and content
+fingerprint data to subtract only those known effects from a later snapshot;
+leave unexplained new or changed comments, threads, or reviews as external
+deltas. These names describe orchestration state; they do not require a new
+machine-readable schema for Oracle's advisory output.
 
 Head movement always takes precedence over feedback reconciliation. If the
 head changes, discard the head-scoped baseline and restart review on the new
@@ -286,10 +291,14 @@ with the requested or current-branch PR.
     one feedback mutation at a time. Immediately before each individual
     reply, resolution, or other mutation, repeat step 10's head and full
     feedback-snapshot gate. If it is fresh, perform only that one mutation,
-    then append the successful reply or resolution to
-    `own_mutations_since_baseline`. If more mutations remain, return to step
-    10; if the gate detects a head or external feedback change, perform no
-    further mutation and follow the applicable restart or refresh path.
+    then record only the snapshot-visible effects attributable to that
+    successful mutation in `own_mutations_since_baseline`, including any
+    GitHub-generated `COMMENTED` review submission associated with an inline
+    reply. Do not classify an otherwise unexplained snapshot delta as own
+    merely because it appeared near the mutation. If more mutations remain,
+    return to step 10; if the gate detects a head or external feedback change,
+    perform no further mutation and follow the applicable restart or refresh
+    path.
 12. Re-read the head after acting on the triage. If the head changed from the
     head reviewed in step 2 — including the expected change from a published
     fix — discard the old head-scoped feedback state, reset only
