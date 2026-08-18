@@ -76,7 +76,9 @@ inline review comments for line-specific findings, and always use COMMENT as the
 review body so a review is posted even when there are no inline findings. If there are no actionable findings, state
 that no actionable issues were found in that COMMENT review; do not return only a chat summary. If publication cannot
 be completed, report the publication failure instead of presenting an unposted review as success. After successful
-submission, explicitly state that the review was posted to GitHub. Apply KISS, DRY, and YAGNI when evaluating
+submission, explicitly state that the review was posted to GitHub and emit the exact final plain-text line
+`ORACLE_PR_REVIEW_PUBLISHED` without backticks. Emit that marker only after the connected GitHub app confirms the
+review submission; never emit it in quoted content or before publication. Apply KISS, DRY, and YAGNI when evaluating
 maintainability: flag concrete duplication, unnecessary complexity, or speculative functionality, flexibility,
 abstractions, compatibility layers, extension points, or infrastructure without a current requirement; prefer
 existing code and the smallest coherent solution, and avoid style-only simplification suggestions.'
@@ -94,8 +96,9 @@ invocation. Remove only those exact files on every exit path, and never retry be
 
 For each attempt, run the exact Oracle command shown above with only these redirections appended:
 `>"$stdout_file" 2>"$stderr_file"`. Do not merge streams, alter Oracle arguments, or change the prompt. Record the exit
-status immediately, then inspect stdout and stderr independently. On success or terminal failure, surface both streams
-with `cat --`; suppress captured output for an intermediate retryable-busy attempt except for its concise retry
+status immediately, then inspect stdout and stderr independently. On success or terminal failure, use
+`cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
+rewriting them; suppress captured output for an intermediate retryable-busy attempt except for its concise retry
 diagnostic.
 
 ### Remote busy
@@ -142,10 +145,9 @@ Never automatically replay an Oracle PR-review invocation after exact `✖ read 
 APIs, timestamps, review counts, or other local heuristics to infer that no review was published. Those signals cannot
 prove that the timed-out browser run will not publish later.
 
-If captured stdout already contains the same explicit affirmative publication confirmation required for a normal
-successful result — that the GitHub pull-request review was posted to GitHub — and it contains no publication-failure
-statement, accept the invocation as a recovered success even though Oracle exited non-zero. This covers a late read
-timeout after the browser response was already captured without replaying the side effect.
+If the final nonblank line of captured stdout is exactly `ORACLE_PR_REVIEW_PUBLISHED`, and captured stdout contains no
+publication-failure statement, accept the invocation as a recovered success even though Oracle exited non-zero. This
+covers a late read timeout after the browser response was already captured without replaying the side effect.
 
 Otherwise surface the captured streams, remove the temporary files, and fail closed with the publication state marked
 indeterminate. Do not retry automatically. Do not widen this recovery rule to other `ETIMEDOUT` text, generic timeouts,
@@ -163,9 +165,10 @@ not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access th
 
 Accept the result only when either:
 
-1. Oracle exits zero and its response explicitly confirms that a GitHub pull-request review was posted to GitHub; or
-2. exact `✖ read ETIMEDOUT` occurs and captured stdout already contains that same affirmative publication confirmation
-   without a publication-failure statement.
+1. Oracle exits zero and captured stdout's final nonblank line is exactly `ORACLE_PR_REVIEW_PUBLISHED`, without a
+   publication-failure statement; or
+2. exact `✖ read ETIMEDOUT` occurs and captured stdout's final nonblank line is exactly
+   `ORACLE_PR_REVIEW_PUBLISHED`, without a publication-failure statement.
 
 If neither success condition holds, or the response shows that the GitHub app was not invoked, lacked repository
 access, or failed to publish the review, report the failure. Otherwise return Oracle's ChatGPT review without rewriting

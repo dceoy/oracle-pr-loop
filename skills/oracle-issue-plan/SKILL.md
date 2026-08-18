@@ -111,17 +111,19 @@ retry because cleanup failed.
 
 For each attempt, run the exact Oracle command shown above with only these redirections appended:
 `>"$stdout_file" 2>"$stderr_file"`. Do not merge streams, alter Oracle arguments, or change the prompt. Record the exit
-status immediately, then inspect stdout and stderr independently. On success or terminal failure, surface both streams
-with `cat --`; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
+status immediately, then inspect stdout and stderr independently. On success or terminal failure, use
+`cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
+rewriting them; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
 
 A failed invocation is retryable only when the last nonblank line of stderr is exactly one of:
 
 - `✖ busy`; or
 - `✖ read ETIMEDOUT`.
 
-For `✖ busy`, also require capture to contain no evidence that browser execution was accepted or started. This is the
-existing narrow compatibility rule for Oracle's remote HTTP 409 busy response; do not infer busy from stdout,
-substrings, HTTP status prose, or differently formatted messages.
+For `✖ busy`, require capture to be complete and to contain no evidence that browser execution was accepted or
+started. If capture is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail
+fast rather than replaying. This is the existing narrow compatibility rule for Oracle's remote HTTP 409 busy response;
+do not infer busy from stdout, substrings, HTTP status prose, or differently formatted messages.
 
 For exact `✖ read ETIMEDOUT`, replay is permitted even when transport acceptance is ambiguous because this skill is
 read-only: it does not mutate the repository, GitHub Issues, pull requests, reviews, comments, or threads. Do not widen

@@ -52,11 +52,15 @@ when no PR review workflow is intended.
   feedback through Oracle/ChatGPT and deciding each item's disposition and,
   where a fix is needed, its implementation plan; it performs no repository
   or GitHub mutation of its own.
-- The three leaf skills own their bounded retry policy for the narrowly
-  classified exact `✖ busy` Oracle CLI failure. This is a best-effort
-  compatibility classifier for the current CLI, which does not preserve the
-  remote HTTP 409 discriminator; the orchestrator does not sleep, classify
-  Oracle output, or add a second retry loop.
+- `oracle-issue-plan` and `oracle-pr-feedback-plan` own their bounded retry
+  policy for exact `✖ busy` and exact `✖ read ETIMEDOUT` failures. The
+  read-timeout replay is safe only because both skills are read-only; every
+  terminal nonzero exit remains fail-closed.
+- `oracle-pr-review` owns its bounded exact-`✖ busy` retry policy and its
+  terminal exact-`✖ read ETIMEDOUT` publication recovery. It never replays a
+  review after that timeout and accepts recovery only with the exact final
+  `ORACLE_PR_REVIEW_PUBLISHED` marker. The orchestrator does not sleep,
+  classify Oracle output, or add a second retry loop.
 - Production behavior here and in the composed skills must not launch,
   select, or detect Codex CLI, Claude Code, Cursor CLI, or another
   implementation agent. The top-level main agent remains the implementation
@@ -344,8 +348,9 @@ of:
 
 - a caller-specified iteration limit, when present, including an unreconciled
   same-head feedback delta when the refresh budget is exhausted;
-- a leaf skill exhausting its six remote-busy retries after seven total
-  Oracle attempts;
+- a leaf skill exhausting its six retry opportunities after seven total
+  Oracle attempts (for exact `✖ busy` in every applicable leaf and exact
+  `✖ read ETIMEDOUT` only in the two read-only planning/triage leaves);
 - `oracle-pr-feedback-plan` advising clarification needed, a deliberate
   defer/won't-fix, or another explicit blocker, once the main agent has
   attempted the applicable reply or thread action for that disposition
@@ -357,18 +362,23 @@ of:
 - inability to capture or reconcile the GitHub feedback snapshot needed to
   prove that triage is still fresh before mutation or completion; or
 - an Oracle/ChatGPT GitHub-app routing, access, authentication, configuration,
-  ambiguous-transport, local-browser, timeout, disconnect, or other permanent
+  ambiguous-transport, terminal timeout, disconnect, or other permanent
   failure reported by `oracle-issue-plan`, `oracle-pr-review`, or
   `oracle-pr-feedback-plan`.
 
 An exact `✖ busy` contention candidate is handled entirely inside the invoked
 leaf skill. Retry exhaustion is terminal; the orchestrator must not replay the
-leaf invocation or multiply its retry budget. Any nonmatching busy output or
-capture containing evidence that browser execution was accepted remains
-terminal. Because the current Oracle CLI erases the remote HTTP status, an
-accepted run that later fails with the exact message `busy` is theoretically
-indistinguishable; the leaf policy deliberately accepts that narrow residual
-collision risk until Oracle exposes a stable pre-acceptance discriminator.
+leaf invocation or multiply its retry budget. The two read-only planning and
+triage leaves also handle exact `✖ read ETIMEDOUT` inside that same bounded
+retry policy. `oracle-pr-review` never replays exact
+`✖ read ETIMEDOUT`; it can recover only when the captured output ends with
+the exact `ORACLE_PR_REVIEW_PUBLISHED` marker. Any nonmatching busy output,
+incomplete capture, or capture containing evidence that browser execution was
+accepted remains terminal. Because the current Oracle CLI erases the remote
+HTTP status, an accepted run that later fails with the exact message `busy`
+is theoretically indistinguishable; the leaf policy deliberately accepts that
+narrow residual collision risk until Oracle exposes a stable pre-acceptance
+discriminator.
 
 Finish successfully only when a review/triage cycle completes with the PR
 head unchanged, the final GitHub feedback snapshot reconciled against the

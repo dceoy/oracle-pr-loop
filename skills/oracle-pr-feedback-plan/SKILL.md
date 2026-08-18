@@ -49,9 +49,9 @@ Normalize the result and require:
 Reject ambiguous or non-matching input. Never put raw user text, raw `gh` output, query strings, whitespace,
 newlines, shell metacharacters, or extra instructions into the Oracle prompt.
 
-Use `gh` only for PR identity when the target is omitted. Do not use `gh`, GitHub APIs, the local checkout, or
-attachments to gather review feedback or repository context; the ChatGPT GitHub app is the sole feedback/context
-source.
+Use `gh` only for PR identity when the target is omitted. Do not use `gh`, GitHub APIs, GitHub MCP tools, the local
+checkout, or attachments to gather review feedback or repository context; the ChatGPT GitHub app is the sole
+feedback/context source.
 
 ## Oracle routing
 
@@ -95,17 +95,20 @@ invocation. Remove only those exact files on every exit path, and never retry be
 
 For each attempt, run the exact Oracle command shown above with only these redirections appended:
 `>"$stdout_file" 2>"$stderr_file"`. Do not merge streams, alter Oracle arguments, or change the prompt. Record the exit
-status immediately, then inspect stdout and stderr independently. On success or terminal failure, surface both streams
-with `cat --`; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
+status immediately, then inspect stdout and stderr independently. On success or terminal failure, use
+`cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
+rewriting them; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
 
 A failed invocation is retryable only when the last nonblank line of stderr is exactly one of:
 
 - `✖ busy`; or
 - `✖ read ETIMEDOUT`.
 
-For `✖ busy`, also require capture to contain no evidence that browser execution was accepted or started. Do not
-infer busy from stdout, substrings, generic prose, HTTP status text, or differently formatted messages. The exact
-`✖ busy` classifier remains a narrow compatibility rule for Oracle's current remote-client rendering.
+For `✖ busy`, require capture to be complete and to contain no evidence that browser execution was accepted or
+started. If capture is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail
+fast rather than replaying. Do not infer busy from stdout, substrings, generic prose, HTTP status text, or differently
+formatted messages. The exact `✖ busy` classifier remains a narrow compatibility rule for Oracle's current
+remote-client rendering.
 
 For exact `✖ read ETIMEDOUT`, replay is permitted even when transport acceptance is ambiguous because this skill is
 read-only and advisory: it performs no repository or GitHub mutation. Do not widen this rule to other `ETIMEDOUT`
