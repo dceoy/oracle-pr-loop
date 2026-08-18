@@ -152,5 +152,7 @@ Fail closed: do not substitute Oracle API mode, another model, another PR, local
 current agent's own triage. Do not retry a failure unless it satisfies every condition in the Oracle retry policy. Do
 not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
 
-If Oracle exits non-zero after the retry policy is exhausted or its response shows that the GitHub app was not invoked
-or lacked repository access, report the failure. Otherwise return Oracle's triage without rewriting it.
+If Oracle exits non-zero — whether from a fail-fast nonretryable failure or from retry-budget exhaustion — or its
+response shows that the GitHub app was not invoked or lacked repository access, report the failure. The retry policy
+only decides whether an invocation is replayed; it never determines whether a terminal nonzero exit is reported.
+Otherwise return Oracle's triage without rewriting it.
