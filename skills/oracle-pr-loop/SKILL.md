@@ -136,15 +136,16 @@ exact verified post-fix head, discard the old head-scoped state and restart
 review on that new head before taking any feedback action; do not use a
 same-head triage refresh for a post-fix head.
 
-Perform this reconciliation at four boundaries:
+Perform this reconciliation at five boundaries:
 
 1. immediately after triage, before validating or implementing any
    disposition;
-2. immediately before committing or pushing an accepted fix, because
-   implementation and QA can leave a window for new reviewer input;
-3. immediately before any reply, resolution, or other GitHub feedback
+2. immediately before creating a local commit for an accepted fix;
+3. immediately before pushing that local commit, because implementation,
+   commit hooks, or commit creation can leave a window for new reviewer input;
+4. immediately before any reply, resolution, or other GitHub feedback
    mutation derived from that triage; and
-4. immediately before declaring the unchanged head complete.
+5. immediately before declaring the unchanged head complete.
 
 Track `review_round_count` across the whole workflow and reset only the
 separate `same_head_feedback_refresh_count` when the PR head changes. A
@@ -170,11 +171,15 @@ flowchart TD
   Reconcile -->|head changed| Head
   Reconcile -->|feedback changed only| Snapshot
   Reconcile -->|yes| Act[main agent validates advice, fixes and runs QA]
-  Act -->|accepted fix to publish| PublicationGate{Fresh before commit/push?}
+  Act -->|accepted fix to publish| PreCommitGate{Fresh before commit?}
   Act -->|no fix to publish| MutationGate
-  PublicationGate -->|head changed; discard edits| Head
-  PublicationGate -->|feedback changed only; discard edits| Snapshot
-  PublicationGate -->|fresh| Publish[commit and push; verify exact post-fix head]
+  PreCommitGate -->|head changed; discard edits| Head
+  PreCommitGate -->|feedback changed only; discard edits| Snapshot
+  PreCommitGate -->|fresh| Commit[create local commit]
+  Commit --> PrePushGate{Fresh before push?}
+  PrePushGate -->|head changed; discard commit| Head
+  PrePushGate -->|feedback changed only; discard commit| Snapshot
+  PrePushGate -->|fresh| Publish[push; verify exact post-fix head]
   Publish --> MutationGate{Fresh before reply/resolve?}
   MutationGate -->|unexpected head change| Head
   MutationGate -->|feedback changed only| PostFixDelta{Verified fix head?}
@@ -257,20 +262,29 @@ with the requested or current-branch PR.
    caller execution constraint. Implement all accepted code fixes that can
    coherently be applied to this analyzed head and run repository QA over the
    combined change. If there is an accepted fix to publish, immediately
-   before creating its commit or pushing it, re-fetch the PR head and full
-   feedback snapshot and reconcile them against the analyzed baseline plus
+   before creating its local commit, re-fetch the PR head and full feedback
+   snapshot and reconcile them against the analyzed baseline plus
    `own_mutations_since_baseline`. Require the head to equal the exact head
-   recorded in step 2. If the head changed, do not commit or push; discard the
-   triage and loop-owned uncommitted edits derived from it, then restart at
-   step 2 on the new head. If those edits cannot be safely separated from
-   unrelated work, stop as a blocker. If the head is unchanged but an
-   external feedback delta exists, do not commit or push the stale fix;
-   discard its loop-owned uncommitted edits and follow step 8's same-head
-   refresh path. Only a fresh gate permits the commit and push. After a
-   successful push, re-fetch and record the exact new PR head as the expected
-   post-fix head. If publication is required but the pushed fix cannot be
-   verified on the PR head, leave code-dependent threads open and stop as a
-   blocker. If no fix is accepted, continue without a publication step.
+   recorded in step 2. If this pre-commit gate fails, do not create or push a
+   commit; discard the triage and loop-owned uncommitted edits derived from
+   it, then restart at step 2 on a changed head or follow step 8 for an
+   external feedback delta. If those edits cannot be safely separated from
+   unrelated work, stop as a blocker. If the gate is fresh, create one local
+   commit containing the accepted fix. Immediately before pushing that local
+   commit, re-fetch the PR head and full feedback snapshot and reconcile them
+   against the same baseline plus `own_mutations_since_baseline`. Require the
+   head to still equal the exact head recorded in step 2. If the pre-push
+   head check fails, do not push; discard or safely reconstruct the
+   loop-owned local commit and restart at step 2 on the new head. If the
+   pre-push snapshot has an external delta, do not push; discard or safely
+   reconstruct the loop-owned local commit and follow step 8's same-head
+   refresh path. If the local commit cannot be safely separated from
+   unrelated work, stop as a blocker. Only a fresh pre-push gate permits the
+   push. After a successful push, re-fetch and record the exact new PR head as
+   the expected post-fix head. If publication is required but the pushed fix
+   cannot be verified on the PR head, leave code-dependent threads open and
+   stop as a blocker. If no fix is accepted, continue without a publication
+   step.
 10. Immediately before any reply, resolution, or other GitHub feedback
     mutation derived from this triage, re-fetch the PR head and full feedback
     snapshot again. If a fix was pushed, require the current head to equal the
