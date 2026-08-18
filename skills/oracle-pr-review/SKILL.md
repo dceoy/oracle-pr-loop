@@ -145,13 +145,11 @@ Never automatically replay an Oracle PR-review invocation after exact `✖ read 
 APIs, timestamps, review counts, or other local heuristics to infer that no review was published. Those signals cannot
 prove that the timed-out browser run will not publish later.
 
-If the final nonblank line of captured stdout is exactly `ORACLE_PR_REVIEW_PUBLISHED`, and captured stdout contains no
-publication-failure statement, accept the invocation as a recovered success even though Oracle exited non-zero. This
-covers a late read timeout after the browser response was already captured without replaying the side effect.
-
-Otherwise surface the captured streams, remove the temporary files, and fail closed with the publication state marked
-indeterminate. Do not retry automatically. Do not widen this recovery rule to other `ETIMEDOUT` text, generic timeouts,
-disconnects, TLS errors, or ambiguous transport failures.
+Always surface the captured streams, remove the temporary files, and fail closed with the publication state marked
+indeterminate. Do not retry automatically. Do not accept any captured-stdout marker as proof of publication for this
+condition: a browser-mode transcript is not a trusted GitHub receipt, and the read-only leaves' no-replay-needed
+reasoning does not extend to a run with a write side effect. Do not widen this terminal condition to other
+`ETIMEDOUT` text, generic timeouts, disconnects, TLS errors, or ambiguous transport failures.
 
 Authentication or authorization failures, GitHub-app routing or access failures, invalid configuration, malformed
 targets or prompts, local-browser failures, unrelated 4xx/5xx errors, all non-exact timeouts or disconnects, acceptance-
@@ -163,13 +161,9 @@ Fail closed: do not substitute Oracle API mode, another model, another PR, local
 current agent's own review. Do not retry a failure unless it satisfies every condition in the remote-busy policy. Do
 not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
 
-Accept the result only when either:
+Accept the result only when Oracle exits zero and captured stdout's final nonblank line is exactly
+`ORACLE_PR_REVIEW_PUBLISHED`.
 
-1. Oracle exits zero and captured stdout's final nonblank line is exactly `ORACLE_PR_REVIEW_PUBLISHED`, without a
-   publication-failure statement; or
-2. exact `✖ read ETIMEDOUT` occurs and captured stdout's final nonblank line is exactly
-   `ORACLE_PR_REVIEW_PUBLISHED`, without a publication-failure statement.
-
-If neither success condition holds, or the response shows that the GitHub app was not invoked, lacked repository
-access, or failed to publish the review, report the failure. Otherwise return Oracle's ChatGPT review without rewriting
-its findings.
+If that condition does not hold, or the response shows that the GitHub app was not invoked, lacked repository access,
+or failed to publish the review, report the failure. Otherwise return Oracle's ChatGPT review without rewriting its
+findings.

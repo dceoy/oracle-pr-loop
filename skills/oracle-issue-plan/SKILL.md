@@ -115,10 +115,10 @@ status immediately, then inspect stdout and stderr independently. On success or 
 `cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
 rewriting them; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
 
-A failed invocation is retryable only when the last nonblank line of stderr is exactly one of:
+An invocation is retryable only when both of these hold:
 
-- `✖ busy`; or
-- `✖ read ETIMEDOUT`.
+- the Oracle invocation exited unsuccessfully; and
+- the last nonblank line of stderr is exactly one of `✖ busy` or `✖ read ETIMEDOUT`.
 
 For `✖ busy`, require capture to be complete and to contain no evidence that browser execution was accepted or
 started. If capture is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail

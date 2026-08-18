@@ -64,22 +64,23 @@ Both discovery roots are local symlinks to the canonical directories under
 
 The two read-only leaf skills, `oracle-issue-plan` and
 `oracle-pr-feedback-plan`, allow six retry opportunities (seven total
-invocations) for failed invocations whose captured stderr ends with the exact
-standalone line `✖ busy` or `✖ read ETIMEDOUT`. Both require complete,
-independent captures; exact `✖ busy` additionally requires no evidence that
-browser execution was accepted or started. The read-timeout retry is limited
-to these skills because they perform no repository or GitHub mutation. Every
-terminal nonzero exit is reported; the retry policy only decides whether a
-failed invocation is replayed. Other failures, including non-exact timeout
-text, fail fast.
+invocations) for invocations that exited unsuccessfully with captured stderr
+ending in the exact standalone line `✖ busy` or `✖ read ETIMEDOUT`. Every
+attempt uses an independent capture; only exact `✖ busy` additionally
+requires that capture to be complete and to contain no evidence that browser
+execution was accepted or started — a guard specific to `✖ busy`, because
+exact `✖ read ETIMEDOUT` is retried precisely when transport acceptance is
+ambiguous. The read-timeout retry is limited to these skills because they
+perform no repository or GitHub mutation. Every terminal nonzero exit is
+reported; the retry policy only decides whether a failed invocation is
+replayed. Other failures, including non-exact timeout text, fail fast.
 
 `oracle-pr-review` allows the same six-retry backoff only for exact
 `✖ busy`, with the same complete-capture and no-acceptance guard. Exact
-`✖ read ETIMEDOUT` is terminal and is never replayed: it can be recovered
-only when captured stdout's final nonblank line is the exact plain-text marker
-`ORACLE_PR_REVIEW_PUBLISHED`, emitted only after GitHub review publication
-succeeds. Otherwise publication state is indeterminate and the failure is
-reported. The orchestrator never adds another retry loop.
+`✖ read ETIMEDOUT` is terminal and is never replayed, because a review run
+has a GitHub write side effect: no captured-stdout marker is a trusted
+publication receipt, so the failure is always reported with publication
+state indeterminate. The orchestrator never adds another retry loop.
 
 For exact `✖ busy`, the current Oracle remote server returns HTTP 409
 `{"error":"busy"}` before `/runs` acceptance when its single-flight guard is
