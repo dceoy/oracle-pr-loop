@@ -172,7 +172,7 @@ flowchart TD
   Reconcile -->|feedback changed only| Snapshot
   Reconcile -->|yes| Act[main agent validates advice, fixes and runs QA]
   Act -->|accepted fix to publish| PreCommitGate{Fresh before commit?}
-  Act -->|no fix to publish| MutationGate
+  Act -->|no fix to publish| MutationGate{Fresh before reply/resolve?}
   PreCommitGate -->|head changed; discard edits| Head
   PreCommitGate -->|feedback changed only; discard edits| Snapshot
   PreCommitGate -->|fresh| Commit[create local commit]
@@ -180,16 +180,14 @@ flowchart TD
   PrePushGate -->|head changed; discard commit| Head
   PrePushGate -->|feedback changed only; discard commit| Snapshot
   PrePushGate -->|fresh| Publish[push; verify exact post-fix head]
-  Publish --> MutationGate{Fresh before reply/resolve?}
+  Publish --> Head
   MutationGate -->|unexpected head change| Head
-  MutationGate -->|feedback changed only| PostFixDelta{Verified fix head?}
-  PostFixDelta -->|yes| Head
-  PostFixDelta -->|no| Snapshot
+  MutationGate -->|feedback changed only| Snapshot
   MutationGate -->|yes| Mutate[perform one reply or resolution; record own mutation]
   Mutate --> MoreMutations{More feedback mutations?}
   MoreMutations -->|yes| MutationGate
-  MoreMutations -->|no| HeadAfter{Head changed after fixes?}
-  HeadAfter -->|yes, fix published| Head
+  MoreMutations -->|no| HeadAfter{Head changed after actions?}
+  HeadAfter -->|yes| Head
   HeadAfter -->|no| CompletionGate{Fresh feedback snapshot reconciled?}
   CompletionGate -->|no| Snapshot
   CompletionGate -->|yes, nothing actionable left| Done[done]
