@@ -283,8 +283,9 @@ with the requested or current-branch PR.
     from the stale triage. When a fix was pushed and the current head is the
     exact verified post-fix head, discard the old head-scoped feedback state,
     reset only `same_head_feedback_refresh_count` for that head, and restart
-    review at step 2; do not reset `review_round_count`. Otherwise, return to
-    the same-head refresh path in step 8.
+    review at step 2; do not reset `review_round_count`. If an external delta
+    exists and no fix was pushed, return to the same-head refresh path in step 8. If the head and feedback snapshot are fresh and no fix was pushed,
+    continue to step 11.
 11. When the mutation gate is fresh, handle `answer`, `already addressed`,
     `outdated`, `clarify`, `defer`, `won't-fix`, and accepted `fix`
     dispositions according to the validated triage and caller constraints,
