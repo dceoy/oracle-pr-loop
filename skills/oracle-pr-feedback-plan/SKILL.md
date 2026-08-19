@@ -79,7 +79,7 @@ fixes, apply KISS, DRY, and YAGNI: prefer the smallest coherent change, reuse ex
 practical, consolidate duplication when it materially simplifies the fix, and avoid unrelated refactoring,
 speculative functionality, flexibility, abstractions, compatibility layers, extension points, or infrastructure
 without a current requirement. Suggest a concise reply and whether to resolve or leave the thread open when useful.
-Do not modify the pull request.'
+Do not modify the repository, issues, pull requests, reviews, comments, or threads.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append caller prose, mode flags, copied comments, or
