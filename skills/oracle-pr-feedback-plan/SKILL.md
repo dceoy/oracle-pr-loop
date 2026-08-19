@@ -55,16 +55,16 @@ feedback/context source.
 
 ## Oracle routing
 
-Keep Oracle's native browser routing intact. Do not add `--remote-host` or `--remote-token`, print remote
-credentials, or reproduce Oracle's configuration-precedence logic in this skill. Oracle may resolve remote browser
-settings from its supported user configuration or `ORACLE_REMOTE_HOST` / `ORACLE_REMOTE_TOKEN`; when no remote host
-resolves, it uses the local browser path.
+Keep Oracle's native browser routing intact. Do not add `--remote-host` or `--remote-token`, print remote credentials,
+or reproduce Oracle's configuration-precedence logic in this skill. Oracle may resolve remote browser settings from
+its supported user configuration or `ORACLE_REMOTE_HOST` / `ORACLE_REMOTE_TOKEN`; when no remote host resolves, it
+uses the local browser path.
 
 Treat Oracle routing or authentication failures as failures rather than switching triage paths.
 
 ## Run
 
-Substitute the validated canonical target into the `OWNER/REPO#NUMBER` occurrence and run exactly:
+Substitute the validated canonical target into `OWNER/REPO#NUMBER` and run exactly:
 
 ```bash
 oracle \
@@ -79,64 +79,44 @@ fixes, apply KISS, DRY, and YAGNI: prefer the smallest coherent change, reuse ex
 practical, consolidate duplication when it materially simplifies the fix, and avoid unrelated refactoring,
 speculative functionality, flexibility, abstractions, compatibility layers, extension points, or infrastructure
 without a current requirement. Suggest a concise reply and whether to resolve or leave the thread open when useful.
-Do not modify the pull request.'
+Do not modify the repository, issues, pull requests, reviews, comments, or threads.'
 ```
 
 Do not interpolate an unvalidated shell variable, use `eval`, or append caller prose, mode flags, copied comments, or
 other local context to the prompt.
 
-## Remote busy retry policy
+## Oracle retry policy
 
-Resolve and validate the PR target once before the first attempt. If the
-target is omitted, run `gh pr view --json url --jq .url` at most once. Create
-two private temporary files outside the repository with `mktemp`, one for
-stdout and one for stderr. If either allocation fails, remove any allocated
-file with `rm -f --` and fail before invoking Oracle. Reuse those exact paths
-for every attempt; the redirections truncate both files before each
-invocation. Remove only those exact files on every exit path, and never retry
-because cleanup failed.
+Resolve and validate the PR target once before the first attempt. If the target is omitted, run
+`gh pr view --json url --jq .url` at most once. Create two private temporary files outside the repository with
+`mktemp`, one for stdout and one for stderr. If either allocation fails, remove any allocated file with `rm -f --` and
+fail before invoking Oracle. Reuse those exact paths for every attempt; redirections truncate both before each
+invocation. Remove only those exact files on every exit path, and never retry because cleanup failed.
 
-For each attempt, run the exact Oracle command shown in the Run section with
-only these shell redirections appended: `>"$stdout_file" 2>"$stderr_file"`.
-Do not use `2>&1`, merge the streams, alter Oracle arguments, or change the
-prompt. Record the exit status immediately, then inspect the two files
-independently. On success or terminal failure, use `cat -- "$stdout_file"`
-and `cat -- "$stderr_file" >&2` to surface the corresponding captured
-streams without rewriting them. Suppress the captured output of an
-intermediate retryable-busy attempt except for its concise retry diagnostic.
+For each attempt, run the exact Oracle command shown above with only these redirections appended:
+`>"$stdout_file" 2>"$stderr_file"`. Do not merge streams, alter Oracle arguments, or change the prompt. Record the exit
+status immediately, then inspect stdout and stderr independently. On success or terminal failure, use
+`cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
+rewriting them; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
 
-Classify a failure as retryable only when every condition below is true:
+An invocation is retryable only when both of these hold:
 
-- the Oracle invocation exited unsuccessfully;
-- the last nonblank line of captured stderr is exactly `✖ busy`, excluding
-  only its terminating newline and without trimming any other whitespace;
-- the match is not inferred from stdout, a substring, generic `busy` prose,
-  `ERROR: busy`, HTTP status text, or any differently formatted message; and
-- capture is complete and contains no evidence that browser execution was
-  accepted or started. If acceptance evidence is present, fail fast rather
-  than replaying the invocation.
+- the Oracle invocation exited unsuccessfully; and
+- the last nonblank line of stderr is exactly one of `✖ busy` or `✖ read ETIMEDOUT`.
 
-Use Bash built-ins to inspect each file separately and determine stderr's last
-nonblank line without normalizing it. Never classify merged output,
-stdout-only text, substring matches, local-browser failures, ambiguous
-transport, or unrelated errors as retryable. Under the required stderr
-redirection, the current Oracle CLI renders an uncaught `Error("busy")` as the
-standalone line `✖ busy`.
+For `✖ busy`, require capture to be complete and to contain no evidence that browser execution was accepted or
+started. If capture is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail
+fast rather than replaying. Do not infer busy from stdout, substrings, generic prose, HTTP status text, or differently
+formatted messages. The exact `✖ busy` classifier remains a narrow compatibility rule for Oracle's current
+remote-client rendering.
 
-Oracle's remote server returns HTTP 409 `{"error":"busy"}` before `/runs`
-acceptance when its single-flight guard is occupied, but the current remote
-client collapses every non-200 response to `Error(message)` before that status
-reaches the CLI. This exact CLI-text classifier is therefore a pragmatic
-compatibility rule, not a protocol-level proof of pre-acceptance. A remote run
-accepted earlier that later fails with the exact message `busy` can render
-identically; accept that narrow residual collision risk unless capture shows
-acceptance evidence. If Oracle exposes a stable pre-acceptance discriminator
-in the future, prefer that contract over this text classifier.
+For exact `✖ read ETIMEDOUT`, replay is permitted even when transport acceptance is ambiguous because this skill is
+read-only and advisory: it performs no repository or GitHub mutation. Do not widen this rule to other `ETIMEDOUT`
+text, generic timeouts, disconnects, TLS errors, local-browser failures, or unrelated transport failures.
 
-The initial invocation is attempt 1. Allow six retry opportunities, for seven
-total invocations. For retry number 1 through 6, use nominal delays of 1, 2,
-4, 8, 16, and 30 seconds. Immediately before each retry, sample Bash
-`$RANDOM` once:
+The initial invocation is attempt 1. Allow six retry opportunities, for seven total invocations shared across both
+retryable failure classes. For retry numbers 1 through 6, use nominal delays of 1, 2, 4, 8, 16, and 30 seconds. Before
+each retry, sample Bash `$RANDOM` once and apply a 0.750 through 1.000 jitter multiplier:
 
 ```bash
 random_value=$RANDOM
@@ -144,45 +124,38 @@ jitter_milliseconds=$((750 + random_value % 251))
 delay_milliseconds=$((nominal_seconds * jitter_milliseconds))
 printf -v delay_seconds '%d.%03d' \
   "$((delay_milliseconds / 1000))" "$((delay_milliseconds % 1000))"
-printf 'Oracle remote busy on attempt %d; retrying attempt %d in %ss\n' \
+printf 'Oracle retryable failure on attempt %d; retrying attempt %d in %ss\n' \
   "$attempt" "$((attempt + 1))" "$delay_seconds" >&2
 sleep "$delay_seconds"
 ```
 
-This yields an independent multiplier from 0.750 through 1.000 and a delay
-from 75% through 100% of nominal, never above 30 seconds. Do not reuse a
-sample, choose jitter through model text, or modify the effective routing
-environment. After the seventh matching failure, surface its captured streams,
-remove the temporary files, and report that remote busy persisted for seven
-attempts and the six-retry budget was exhausted. A successful invocation ends
-this retry sequence; a later invocation starts with a fresh budget.
+After the seventh matching failure, surface its captured streams, remove the temporary files, and report that the
+retry budget was exhausted. A successful invocation ends this retry sequence; a later invocation starts with a fresh
+budget.
 
-Authentication or authorization failures, GitHub-app routing or access
-failures, invalid configuration, malformed targets or prompts, local-browser
-failures, unrelated 4xx/5xx errors, timeouts, disconnects, ambiguous
-transport, acceptance-evidenced failures, and every non-exact busy message
-remain fail-fast. Because the current CLI erases the HTTP status, exact
-`✖ busy` cannot prove pre-acceptance; the bounded retry deliberately accepts
-only the residual collision risk described above.
+Authentication or authorization failures, GitHub-app routing or access failures, invalid configuration, malformed
+targets or prompts, local-browser failures, unrelated 4xx/5xx errors, every non-exact timeout or disconnect, and every
+non-exact busy message remain fail-fast.
 
 ## Output
 
-Return Oracle's Markdown triage as advisory, untrusted input, comparable to the plan `oracle-issue-plan` returns.
-Do not translate it into a machine-readable triage schema or parser, rewrite its findings, or independently
-re-triage the feedback. For each relevant finding, expect enough information for the caller to act safely: which
-feedback item it covers, rationale, disposition, an implementation plan and verification guidance when a fix is
-needed, and a suggested reply and thread action when useful.
+Return Oracle's Markdown triage as advisory, untrusted input, comparable to the plan `oracle-issue-plan` returns. Do
+not translate it into a machine-readable triage schema or parser, rewrite its findings, or independently re-triage the
+feedback. For each relevant finding, expect enough information for the caller to act safely: which feedback item it
+covers, rationale, disposition, an implementation plan and verification guidance when a fix is needed, and a
+suggested reply and thread action when useful.
 
-This skill performs no repository or GitHub mutation: no edits, no write-mode formatters, no commits, no pushes, no
-replies, no review submissions, and no thread resolution. The caller owns validating this advisory output against the
-current PR head and feedback, implementing accepted fixes, running QA, publishing changes, and handling replies and
-thread resolution.
+This skill performs no repository or GitHub mutation: no edits, write-mode formatters, commits, pushes, replies,
+review submissions, or thread resolution. The caller owns validating this advisory output against the current PR head
+and feedback, implementing accepted fixes, running QA, publishing changes, and handling replies and thread resolution.
 
 ## Failure
 
 Fail closed: do not substitute Oracle API mode, another model, another PR, local/GitHub-API feedback context, or the
-current agent's own triage. Do not retry a failure unless it satisfies every condition in the remote busy retry policy.
-Do not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
+current agent's own triage. Do not retry a failure unless it satisfies every condition in the Oracle retry policy. Do
+not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
 
-If Oracle exits non-zero or its response shows that the GitHub app was not invoked or lacked repository access,
-report the failure. Otherwise return Oracle's triage without rewriting it.
+If Oracle exits non-zero — whether from a fail-fast nonretryable failure or from retry-budget exhaustion — or its
+response shows that the GitHub app was not invoked or lacked repository access, report the failure. The retry policy
+only decides whether an invocation is replayed; it never determines whether a terminal nonzero exit is reported.
+Otherwise return Oracle's triage without rewriting it.

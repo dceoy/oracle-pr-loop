@@ -60,26 +60,37 @@ hits another explicit blocker.
 Both discovery roots are local symlinks to the canonical directories under
 `skills/`; no discovery path points outside this repository.
 
-## Oracle remote contention
+## Oracle retry and timeout behavior
 
-The three Oracle leaf skills use a bounded six-retry backoff only when a
-failed Oracle invocation's captured stderr ends with the exact standalone
-line `✖ busy`. This matches the current Oracle CLI rendering of
-`Error("busy")` under the required stderr redirection. Oracle's remote server
-returns HTTP 409 `{"error":"busy"}` before `/runs` acceptance when its
-single-flight guard is occupied, but the current remote client collapses that
-status to the error message before the CLI renders it.
+The two read-only leaf skills, `oracle-issue-plan` and
+`oracle-pr-feedback-plan`, allow six retry opportunities (seven total
+invocations) for invocations that exited unsuccessfully with captured stderr
+ending in the exact standalone line `✖ busy` or `✖ read ETIMEDOUT`. Every
+attempt uses an independent capture; only exact `✖ busy` additionally
+requires that capture to be complete and to contain no evidence that browser
+execution was accepted or started — a guard specific to `✖ busy`, because
+exact `✖ read ETIMEDOUT` is retried precisely when transport acceptance is
+ambiguous. The read-timeout retry is limited to these skills because they
+perform no repository or GitHub mutation. Every terminal nonzero exit is
+reported; the retry policy only decides whether a failed invocation is
+replayed. Other failures, including non-exact timeout text, fail fast.
 
-This is therefore a pragmatic best-effort classifier rather than a
-protocol-level proof of pre-acceptance. Generic or embedded `busy` text is
-never retried, and any capture containing evidence that browser execution was
-accepted fails immediately. A post-acceptance error whose final message is
-exactly `busy` is theoretically indistinguishable with the current CLI; the
-bounded policy deliberately accepts that narrow residual risk so transient
-remote contention can recover. Permanent routing, access, authentication,
-configuration, local-browser, and unrelated failures still fail immediately.
-If Oracle later exposes a stable pre-acceptance discriminator, prefer that
-contract over the CLI-text classifier.
+`oracle-pr-review` allows the same six-retry backoff only for exact
+`✖ busy`, with the same complete-capture and no-acceptance guard. Exact
+`✖ read ETIMEDOUT` is terminal and is never replayed, because a review run
+has a GitHub write side effect: no captured-stdout marker is a trusted
+publication receipt, so the failure is always reported with publication
+state indeterminate. The orchestrator never adds another retry loop.
+
+For exact `✖ busy`, the current Oracle remote server returns HTTP 409
+`{"error":"busy"}` before `/runs` acceptance when its single-flight guard is
+occupied, while the remote client collapses that status to the error message
+before the CLI renders it. The classifier is therefore a pragmatic
+best-effort rule rather than protocol-level proof of pre-acceptance. Generic
+or embedded `busy` text is never retried, and a post-acceptance error whose
+final message is exactly `busy` is a narrow residual collision risk. If
+Oracle later exposes a stable pre-acceptance discriminator, prefer it over
+the CLI-text classifier.
 
 ## Requirements
 
