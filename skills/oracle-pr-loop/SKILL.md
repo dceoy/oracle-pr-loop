@@ -53,9 +53,10 @@ when no PR review workflow is intended.
   where a fix is needed, its implementation plan; it performs no repository
   or GitHub mutation of its own.
 - `oracle-issue-plan` and `oracle-pr-feedback-plan` own their bounded retry
-  policy for exact `✖ busy` and exact `✖ read ETIMEDOUT` failures. The
-  read-timeout replay is safe only because both skills are read-only; every
-  terminal nonzero exit remains fail-closed.
+  policy for exact `✖ busy`. Exact `✖ read ETIMEDOUT` is terminal in both:
+  remote acceptance may already have occurred and the browser run may still
+  be active, so replay can duplicate ChatGPT work or self-collide as busy even
+  though both leaves are read-only with respect to GitHub.
 - `oracle-pr-review` owns its bounded exact-`✖ busy` retry policy. Exact
   `✖ read ETIMEDOUT` is terminal: it never replays a review after that
   timeout and never accepts a captured-stdout marker as proof of
@@ -350,8 +351,8 @@ of:
 - a caller-specified iteration limit, when present, including an unreconciled
   same-head feedback delta when the refresh budget is exhausted;
 - a leaf skill exhausting its six retry opportunities after seven total
-  Oracle attempts (for exact `✖ busy` in every applicable leaf and exact
-  `✖ read ETIMEDOUT` only in the two read-only planning/triage leaves);
+  Oracle attempts for exact `✖ busy`;
+- any exact `✖ read ETIMEDOUT`, which is terminal in every leaf;
 - `oracle-pr-feedback-plan` advising clarification needed, a deliberate
   defer/won't-fix, or another explicit blocker, once the main agent has
   attempted the applicable reply or thread action for that disposition
@@ -369,14 +370,15 @@ of:
 
 An exact `✖ busy` contention candidate is handled entirely inside the invoked
 leaf skill. Retry exhaustion is terminal; the orchestrator must not replay the
-leaf invocation or multiply its retry budget. The two read-only planning and
-triage leaves also handle exact `✖ read ETIMEDOUT` inside that same bounded
-retry policy. Any nonmatching busy output, incomplete capture, or capture
-containing evidence that browser execution was accepted remains terminal.
-Because the current Oracle CLI erases the remote HTTP status, an accepted run
-that later fails with the exact message `busy` is theoretically
-indistinguishable; the leaf policy deliberately accepts that narrow residual
-collision risk until Oracle exposes a stable pre-acceptance discriminator.
+leaf invocation or multiply its retry budget. Exact `✖ read ETIMEDOUT` is
+terminal in every leaf and must not be replayed: the remote run may already
+have been accepted and may still be executing after the client read timeout.
+Any nonmatching busy output, incomplete capture, or capture containing evidence
+that browser execution was accepted remains terminal. Because the current
+Oracle CLI erases the remote HTTP status, an accepted run that later fails
+with the exact message `busy` is theoretically indistinguishable; the leaf
+policy deliberately accepts that narrow residual collision risk until Oracle
+exposes a stable pre-acceptance discriminator.
 
 For PR review, exact `✖ read ETIMEDOUT` as the final nonblank stderr line is
 terminal: `oracle-pr-review` never replays it and never accepts any
