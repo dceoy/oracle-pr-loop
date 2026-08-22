@@ -68,8 +68,7 @@ stderr ending in the exact standalone line `✖ busy`. Each retry additionally
 requires that capture to be complete and to contain no evidence that browser
 execution was accepted or started. Every attempt uses an independent capture;
 every terminal nonzero exit is reported, and the retry policy only decides
-whether a failed invocation is replayed. Generic or embedded `busy` text is
-never retried.
+whether a failed invocation is replayed.
 
 Exact `✖ read ETIMEDOUT` is terminal in every leaf and is never replayed. A
 read timeout can occur after the remote `/runs` request was accepted and after

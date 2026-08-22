@@ -117,14 +117,14 @@ status immediately, then inspect stdout and stderr independently. On success or 
 `cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
 rewriting them; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
 
-An invocation is retryable as remote busy only when both of these hold:
+An invocation is retryable as remote busy only when every condition below is true:
 
-- the Oracle invocation exited unsuccessfully; and
-- the last nonblank line of stderr is exactly `✖ busy`.
+- the Oracle invocation exited unsuccessfully;
+- the last nonblank line of stderr is exactly `✖ busy`; and
+- capture is complete and contains no evidence that browser execution was accepted or started.
 
-Require capture to be complete and to contain no evidence that browser execution was accepted or started. If capture
-is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail fast rather than
-replaying. This is the existing narrow compatibility rule for Oracle's remote HTTP 409 busy response; do not infer
+If capture is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail fast rather
+than replaying. This is the existing narrow compatibility rule for Oracle's remote HTTP 409 busy response; do not infer
 busy from stdout, substrings, HTTP status prose, or differently formatted messages.
 
 Treat a last nonblank stderr line exactly equal to `✖ read ETIMEDOUT` as terminal. A read timeout can happen after the

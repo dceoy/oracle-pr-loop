@@ -147,8 +147,7 @@ prove that the timed-out browser run will not publish later.
 
 Always surface the captured streams, remove the temporary files, and fail closed with the publication state marked
 indeterminate. Do not retry automatically. Do not accept any captured-stdout marker as proof of publication for this
-condition: a browser-mode transcript is not a trusted GitHub receipt, and the read-only leaves' no-replay-needed
-reasoning does not extend to a run with a write side effect. Do not widen this terminal condition to other
+condition: a browser-mode transcript is not a trusted GitHub receipt. Do not widen this terminal condition to other
 `ETIMEDOUT` text, generic timeouts, disconnects, TLS errors, or ambiguous transport failures.
 
 Authentication or authorization failures, GitHub-app routing or access failures, invalid configuration, malformed
