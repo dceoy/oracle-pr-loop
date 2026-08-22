@@ -117,24 +117,25 @@ status immediately, then inspect stdout and stderr independently. On success or 
 `cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
 rewriting them; suppress captured output for intermediate retryable attempts except for the concise retry diagnostic.
 
-An invocation is retryable only when both of these hold:
+An invocation is retryable as remote busy only when every condition below is true:
 
-- the Oracle invocation exited unsuccessfully; and
-- the last nonblank line of stderr is exactly one of `✖ busy` or `✖ read ETIMEDOUT`.
+- the Oracle invocation exited unsuccessfully;
+- the last nonblank line of stderr is exactly `✖ busy`; and
+- capture is complete and contains no evidence that browser execution was accepted or started.
 
-For `✖ busy`, require capture to be complete and to contain no evidence that browser execution was accepted or
-started. If capture is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail
-fast rather than replaying. This is the existing narrow compatibility rule for Oracle's remote HTTP 409 busy response;
-do not infer busy from stdout, substrings, HTTP status prose, or differently formatted messages.
+If capture is incomplete or its completeness cannot be established, or if acceptance evidence exists, fail fast rather
+than replaying. This is the existing narrow compatibility rule for Oracle's remote HTTP 409 busy response; do not infer
+busy from stdout, substrings, HTTP status prose, or differently formatted messages.
 
-For exact `✖ read ETIMEDOUT`, replay is permitted even when transport acceptance is ambiguous because this skill is
-read-only: it does not mutate the repository, GitHub Issues, pull requests, reviews, comments, or threads. Do not widen
-this rule to other `ETIMEDOUT` text, generic timeouts, disconnects, TLS errors, local-browser failures, or unrelated
-transport failures.
+Treat a last nonblank stderr line exactly equal to `✖ read ETIMEDOUT` as terminal. A read timeout can happen after the
+remote `/runs` request was accepted and after ChatGPT received the prompt while the server-side browser run continues.
+Replaying in that state can duplicate ChatGPT work or immediately collide with the still-active run as `✖ busy`, even
+though this skill itself is read-only with respect to GitHub. Surface the captured streams, remove the temporary files,
+and fail closed rather than replaying. Do not widen this condition to other timeout text or disconnects.
 
-The initial invocation is attempt 1. Allow six retry opportunities, for seven total invocations shared across both
-retryable failure classes. For retry numbers 1 through 6, use nominal delays of 1, 2, 4, 8, 16, and 30 seconds. Before
-each retry, sample Bash `$RANDOM` once and apply the existing 0.750 through 1.000 jitter multiplier:
+The initial invocation is attempt 1. Allow six busy retry opportunities, for seven total invocations. For retry numbers
+1 through 6, use nominal delays of 1, 2, 4, 8, 16, and 30 seconds. Before each retry, sample Bash `$RANDOM` once and
+apply the existing 0.750 through 1.000 jitter multiplier:
 
 ```bash
 random_value=$RANDOM
@@ -142,17 +143,17 @@ jitter_milliseconds=$((750 + random_value % 251))
 delay_milliseconds=$((nominal_seconds * jitter_milliseconds))
 printf -v delay_seconds '%d.%03d' \
   "$((delay_milliseconds / 1000))" "$((delay_milliseconds % 1000))"
-printf 'Oracle retryable failure on attempt %d; retrying attempt %d in %ss\n' \
+printf 'Oracle remote busy on attempt %d; retrying attempt %d in %ss\n' \
   "$attempt" "$((attempt + 1))" "$delay_seconds" >&2
 sleep "$delay_seconds"
 ```
 
-After the seventh matching failure, surface its captured streams, remove the temporary files, and report that the
-retry budget was exhausted. A successful invocation ends this retry sequence; a later invocation starts with a fresh
-budget.
+After the seventh matching busy failure, surface its captured streams, remove the temporary files, and report that the
+six-retry budget was exhausted. A successful invocation ends this retry sequence; a later invocation starts with a
+fresh budget.
 
 Authentication or authorization failures, GitHub-app routing or access failures, invalid configuration, malformed
-targets or prompts, local-browser failures, unrelated 4xx/5xx errors, every non-exact timeout or disconnect, and every
+targets or prompts, local-browser failures, unrelated 4xx/5xx errors, all non-exact timeouts or disconnects, and every
 non-exact busy message remain fail-fast.
 
 ## Failure and output

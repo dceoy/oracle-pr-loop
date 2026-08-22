@@ -62,25 +62,22 @@ Both discovery roots are local symlinks to the canonical directories under
 
 ## Oracle retry and timeout behavior
 
-The two read-only leaf skills, `oracle-issue-plan` and
-`oracle-pr-feedback-plan`, allow six retry opportunities (seven total
-invocations) for invocations that exited unsuccessfully with captured stderr
-ending in the exact standalone line `✖ busy` or `✖ read ETIMEDOUT`. Every
-attempt uses an independent capture; only exact `✖ busy` additionally
+All three Oracle leaf skills allow six retry opportunities (seven total
+invocations) only for invocations that exited unsuccessfully with captured
+stderr ending in the exact standalone line `✖ busy`. Each retry additionally
 requires that capture to be complete and to contain no evidence that browser
-execution was accepted or started — a guard specific to `✖ busy`, because
-exact `✖ read ETIMEDOUT` is retried precisely when transport acceptance is
-ambiguous. The read-timeout retry is limited to these skills because they
-perform no repository or GitHub mutation. Every terminal nonzero exit is
-reported; the retry policy only decides whether a failed invocation is
-replayed. Other failures, including non-exact timeout text, fail fast.
+execution was accepted or started. Every attempt uses an independent capture;
+every terminal nonzero exit is reported, and the retry policy only decides
+whether a failed invocation is replayed.
 
-`oracle-pr-review` allows the same six-retry backoff only for exact
-`✖ busy`, with the same complete-capture and no-acceptance guard. Exact
-`✖ read ETIMEDOUT` is terminal and is never replayed, because a review run
-has a GitHub write side effect: no captured-stdout marker is a trusted
-publication receipt, so the failure is always reported with publication
-state indeterminate. The orchestrator never adds another retry loop.
+Exact `✖ read ETIMEDOUT` is terminal in every leaf and is never replayed. A
+read timeout can occur after the remote `/runs` request was accepted and after
+ChatGPT received the prompt while the server-side browser run continues. Even
+the read-only planning and triage leaves therefore fail closed instead of
+starting a second run that could duplicate ChatGPT work or immediately collide
+with the still-active run as `✖ busy`. For `oracle-pr-review`, the timeout also
+leaves GitHub publication state indeterminate, so no captured-stdout marker is
+accepted as a trusted publication receipt.
 
 For exact `✖ busy`, the current Oracle remote server returns HTTP 409
 `{"error":"busy"}` before `/runs` acceptance when its single-flight guard is
