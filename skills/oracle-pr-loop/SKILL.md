@@ -36,7 +36,7 @@ For each unchanged head, keep an `analyzed_feedback_baseline` sufficient to dete
 - PR-level comment identities and content fingerprint;
 - review identities, reviewer, persisted state, submission time, and body fingerprint.
 
-Track successful loop-created replies/resolutions in `own_mutations_since_baseline`. When comparing a fresh snapshot, subtract only those known effects. Any unexplained new/edited comment, thread, review, review state, or body is an external delta.
+Track successful loop-created replies/resolutions in `own_mutations_since_baseline`, including any GitHub-generated `COMMENTED` review submission implicitly associated with an inline reply when that effect can be identified as part of the mutation. When comparing a fresh snapshot, subtract only those known effects. Any unexplained new/edited comment, thread, review, review state, or body is an external delta.
 
 Head movement always wins: discard the old baseline and restart review on the new head. On an unchanged head with external feedback delta, re-run only `oracle-pr-feedback-plan`, promote the fresh snapshot after triage returns on the same head, reset the own-mutation ledger, and reconcile again.
 
