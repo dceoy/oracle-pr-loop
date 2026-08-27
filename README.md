@@ -62,14 +62,17 @@ Both discovery roots are local symlinks to the canonical directories under
 
 ## Oracle retry and timeout behavior
 
-All three Oracle leaf skills allow six retry opportunities (seven total
+All three Oracle leaf skills allow ten retry opportunities (eleven total
 invocations) only for invocations that exited unsuccessfully with an exact
 busy record: either stderr's last nonblank line is `✖ busy`, or stdout's last
-nonblank `ERROR:` line is exactly `ERROR: busy`. Each retry additionally
-requires that capture to be complete and to contain no evidence that browser
-execution was accepted or started. Stdout and stderr are captured separately;
-every terminal nonzero exit is reported, and the retry policy only decides
-whether a failed invocation is replayed.
+nonblank `ERROR:` line is exactly `ERROR: busy`. Retries use nominal delays
+`1, 2, 4, 8, 16, 30, 30, 30, 30, 30` seconds with 0.750–1.000 jitter, keeping
+the retry path bounded while allowing roughly three minutes for a legitimate
+single-flight remote run to finish. Each retry additionally requires that
+capture to be complete and to contain no evidence that browser execution was
+accepted or started. Stdout and stderr are captured separately; every terminal
+nonzero exit is reported, and the retry policy only decides whether a failed
+invocation is replayed.
 
 Exact final `✖ read ETIMEDOUT` on stderr or `ERROR: read ETIMEDOUT` as stdout's
 last nonblank `ERROR:` line is terminal in every leaf and is never replayed. A
