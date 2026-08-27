@@ -15,7 +15,7 @@ Triage existing feedback on exactly one pull request. Oracle owns browser/sessio
 - Normalize to `OWNER/REPO#NUMBER` and require `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$`. Reject ambiguity, query strings/fragments, extra prose, whitespace/newlines, shell metacharacters, or unvalidated `gh` output.
 - Use `gh` only for PR identity. Use the connected GitHub app as the sole repository/feedback context source.
 - Keep Oracle's native browser routing. Do not add remote-host/token arguments or expose credentials.
-- Never use `eval` or append caller prose, copied comments, mode flags, or local context to the Oracle prompt.
+- Never use `eval` or append caller prose, copied comments, or local context to the Oracle prompt.
 - Fail closed: no API-engine fallback, alternate model/PR/context source, local re-triage, or modified retry prompt.
 
 ## Run
