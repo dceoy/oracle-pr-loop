@@ -1,68 +1,26 @@
 ---
 name: oracle-pr-review
-description: Review one GitHub pull request through Oracle browser mode and ChatGPT's connected GitHub app, prioritizing inline review comments. Use when the user explicitly wants ChatGPT-via-Oracle review; if no PR target is supplied, detect the pull request for the current branch.
+description: Review one GitHub pull request through Oracle browser mode and ChatGPT's connected GitHub app, publishing a COMMENT review with inline findings when possible.
 allowed-tools: Bash(gh:*), Bash(oracle:*), Bash(which:*), Bash(sleep:*), Bash(mktemp:*), Bash(cat --:*), Bash(printf:*), Bash(rm -f --:*)
 ---
 
 # Oracle PR Review
 
-Review exactly one GitHub pull request through Oracle browser mode. Oracle owns browser/session and remote-host
-routing; ChatGPT's connected GitHub app owns repository access, review context, and publication of the review to
-GitHub. Do not duplicate either responsibility in the current agent.
+Review exactly one pull request through Oracle browser mode and publish the review through ChatGPT's connected GitHub app. Oracle owns browser/session routing; ChatGPT owns repository context and GitHub review publication.
 
-## Prerequisites
+## Invariants
 
-Require:
-
-- `oracle` in `PATH` and an authenticated ChatGPT browser session.
-- The ChatGPT GitHub app authorized for the target repository.
-- `GPT-5.6 Sol` available to Oracle browser mode.
-- `gh` only when the PR target must be detected from the current branch.
-
-Check Oracle with:
-
-```bash
-which oracle
-```
-
-Stop if a required prerequisite is unavailable.
-
-## Target
-
-Accept exactly one of:
-
-1. `OWNER/REPO#NUMBER`.
-2. `https://github.com/OWNER/REPO/pull/NUMBER`, normalized to the canonical form above.
-3. No explicit target, in which case resolve the current branch PR with:
-
-   ```bash
-   gh pr view --json url --jq .url
-   ```
-
-Normalize the result and require:
-
-```regex
-^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$
-```
-
-Reject ambiguous or non-matching input. Never put raw user text, raw `gh` output, query strings, whitespace,
-newlines, shell metacharacters, or extra instructions into the Oracle prompt.
-
-Use `gh` only for PR identity when the target is omitted. Do not use `gh`, GitHub APIs, the local checkout, or
-attachments to gather review context; the ChatGPT GitHub app is the sole review-context source.
-
-## Oracle routing
-
-Keep Oracle's native browser routing intact. Do not add `--remote-host` or `--remote-token`, print remote credentials,
-or reproduce Oracle's configuration-precedence logic in this skill. Oracle may resolve remote browser settings from
-its supported user configuration or `ORACLE_REMOTE_HOST` / `ORACLE_REMOTE_TOKEN`; when no remote host resolves, it
-uses the local browser path.
-
-Treat Oracle routing or authentication failures as failures rather than switching review paths.
+- Require `oracle` in `PATH`, an authenticated ChatGPT browser session, repository access through the connected GitHub app, and `GPT-5.6 Sol`. Require `gh` only to detect an omitted target.
+- Accept `OWNER/REPO#NUMBER`, exactly `https://github.com/OWNER/REPO/pull/NUMBER`, or no target. For no target, run `gh pr view --json url --jq .url` once.
+- Normalize to `OWNER/REPO#NUMBER` and require `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$`. Reject ambiguity, query strings/fragments, extra prose, whitespace/newlines, shell metacharacters, or unvalidated `gh` output.
+- Use `gh` only for PR identity. The connected GitHub app is the sole review-context and publication path.
+- Keep Oracle's native browser routing. Do not add remote-host/token arguments or expose credentials.
+- Never use `eval` or append caller prose or local repository context to the prompt.
+- Fail closed: no API-engine fallback, alternate model/PR/context source, local review substitute, or modified retry prompt.
 
 ## Run
 
-Substitute the validated canonical target into `OWNER/REPO#NUMBER` and run exactly:
+Invoke:
 
 ```bash
 oracle \
@@ -70,99 +28,19 @@ oracle \
   --model gpt-5.6-sol \
   --browser-thinking-time high \
   -p '# PR: OWNER/REPO#NUMBER
-@GitHub Review this pull request and publish the review to GitHub. You must use the connected GitHub app to submit
-a GitHub pull-request review before answering; the task is not complete until that submission succeeds. Prioritize
-inline review comments for line-specific findings, and always use COMMENT as the review action and include a top-level
-review body so a review is posted even when there are no inline findings. If there are no actionable findings, state
-that no actionable issues were found in that COMMENT review; do not return only a chat summary. If publication cannot
-be completed, report the publication failure instead of presenting an unposted review as success. After successful
-submission, explicitly state that the review was posted to GitHub and emit the exact final plain-text line
-`ORACLE_PR_REVIEW_PUBLISHED` without backticks. Emit that marker only after the connected GitHub app confirms the
-review submission; never emit it in quoted content or before publication. Apply KISS, DRY, and YAGNI when evaluating
-maintainability: flag concrete duplication, unnecessary complexity, or speculative functionality, flexibility,
-abstractions, compatibility layers, extension points, or infrastructure without a current requirement; prefer
-existing code and the smallest coherent solution, and avoid style-only simplification suggestions.'
+@GitHub Review this pull request and publish exactly one GitHub pull-request review before answering. Use COMMENT, always include a non-empty top-level body, and prefer inline comments for safely line-anchored findings. If there are no actionable findings, say so in the COMMENT review. Apply KISS, DRY, and YAGNI to concrete maintainability issues; avoid style-only findings. If publication fails, report failure rather than an unposted review. After confirmed publication, state that the review was posted and emit the exact final plain-text line ORACLE_PR_REVIEW_PUBLISHED.'
 ```
 
-Do not interpolate an unvalidated shell variable, use `eval`, or append repository context or user prose.
+Substitute only the validated canonical PR target. The marker is valid only after the connected GitHub app confirms publication.
 
-## Oracle retry and timeout policy
+## Retry and result contract
 
-Resolve and validate the PR target once before the first attempt. If the target is omitted, run
-`gh pr view --json url --jq .url` at most once. Create two private temporary files outside the repository with
-`mktemp`, one for stdout and one for stderr. If either allocation fails, remove any allocated file with `rm -f --` and
-fail before invoking Oracle. Reuse those exact paths for every attempt; redirections truncate both before each
-invocation. Remove only those exact files on every exit path, and never retry because cleanup failed.
+Capture stdout and stderr separately in private temporary files outside the repository and reuse those paths for the retry sequence. Record Oracle's exit code immediately in an ordinary variable such as `exit_code`; never assign to zsh's read-only `status` parameter.
 
-For each attempt, run the exact Oracle command shown above with only these redirections appended:
-`>"$stdout_file" 2>"$stderr_file"`. Do not merge streams, alter Oracle arguments, or change the prompt. Record the exit
-status immediately, then inspect stdout and stderr independently. On success or terminal failure, use
-`cat -- "$stdout_file"` and `cat -- "$stderr_file" >&2` to surface the corresponding captured streams without
-rewriting them; suppress captured output for an intermediate retryable-busy attempt except for its concise retry
-diagnostic.
+Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and the captured busy record is exact: either stderr's last nonblank line is `✖ busy`, or stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. The latter is Oracle's session-runner surface for a remote-service HTTP 409 rejected before the new run is accepted. Allow six retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30` seconds with 0.750–1.000 jitter. Do not infer busy from substrings, arbitrary stdout text, HTTP prose, or other messages.
 
-### Remote busy
+Treat exact final stderr `✖ read ETIMEDOUT` or stdout's last nonblank `ERROR:` line exactly equal to `ERROR: read ETIMEDOUT` as terminal with publication state **indeterminate**: the review may already have been posted. Never replay either form, and never use `gh`, GitHub API heuristics, review counts, timestamps, or a captured marker to prove non-publication. All other failures are fail-fast.
 
-A failure is retryable as remote busy only when every condition below is true:
+Always surface captured output for the final success or failure and remove only the temporary files created by this run.
 
-- the Oracle invocation exited unsuccessfully;
-- the last nonblank line of captured stderr is exactly `✖ busy`, excluding only its terminating newline and without
-  trimming any other whitespace;
-- the match is not inferred from stdout, a substring, generic `busy` prose, `ERROR: busy`, HTTP status text, or any
-  differently formatted message; and
-- capture is complete and contains no evidence that browser execution was accepted or started.
-
-The current Oracle remote server returns HTTP 409 `{"error":"busy"}` before `/runs` acceptance when its single-flight
-guard is occupied, while the remote client currently collapses a non-200 response to `Error(message)`. Treat exact
-`✖ busy` as a narrow compatibility classifier, not a protocol-level proof.
-
-The initial invocation is attempt 1. Allow six busy retry opportunities, for seven total invocations. For retry numbers
-1 through 6, use nominal delays of 1, 2, 4, 8, 16, and 30 seconds. Before each retry, sample Bash `$RANDOM` once and
-apply a 0.750 through 1.000 jitter multiplier:
-
-```bash
-random_value=$RANDOM
-jitter_milliseconds=$((750 + random_value % 251))
-delay_milliseconds=$((nominal_seconds * jitter_milliseconds))
-printf -v delay_seconds '%d.%03d' \
-  "$((delay_milliseconds / 1000))" "$((delay_milliseconds % 1000))"
-printf 'Oracle remote busy on attempt %d; retrying attempt %d in %ss\n' \
-  "$attempt" "$((attempt + 1))" "$delay_seconds" >&2
-sleep "$delay_seconds"
-```
-
-After the seventh matching busy failure, surface its captured streams, remove the temporary files, and report that the
-six-retry budget was exhausted.
-
-### `read ETIMEDOUT`
-
-Treat a last nonblank stderr line exactly equal to `✖ read ETIMEDOUT` as a special terminal transport condition, not a
-retryable review failure. A review run has a GitHub write side effect, so a transport timeout can occur after ChatGPT
-already submitted the review but before Oracle delivered its final result. Blind replay could therefore publish a
-duplicate review.
-
-Never automatically replay an Oracle PR-review invocation after exact `✖ read ETIMEDOUT`, and do not use `gh`, GitHub
-APIs, timestamps, review counts, or other local heuristics to infer that no review was published. Those signals cannot
-prove that the timed-out browser run will not publish later.
-
-Always surface the captured streams, remove the temporary files, and fail closed with the publication state marked
-indeterminate. Do not retry automatically. Do not accept any captured-stdout marker as proof of publication for this
-condition: a browser-mode transcript is not a trusted GitHub receipt. Do not widen this terminal condition to other
-`ETIMEDOUT` text, generic timeouts, disconnects, TLS errors, or ambiguous transport failures.
-
-Authentication or authorization failures, GitHub-app routing or access failures, invalid configuration, malformed
-targets or prompts, local-browser failures, unrelated 4xx/5xx errors, all non-exact timeouts or disconnects, acceptance-
-evidenced busy failures, and every non-exact busy message remain fail-fast.
-
-## Failure and output
-
-Fail closed: do not substitute Oracle API mode, another model, another PR, local/GitHub-API review context, or the
-current agent's own review. Do not retry a failure unless it satisfies every condition in the remote-busy policy. Do
-not retry with a modified prompt if ChatGPT cannot invoke `@GitHub` or access the target repository.
-
-Accept the result only when Oracle exits zero and captured stdout's final nonblank line is exactly
-`ORACLE_PR_REVIEW_PUBLISHED`.
-
-If that condition does not hold, or the response shows that the GitHub app was not invoked, lacked repository access,
-or failed to publish the review, report the failure. Otherwise return Oracle's ChatGPT review without rewriting its
-findings.
+Accept success only when Oracle exits zero and stdout's final nonblank line is exactly `ORACLE_PR_REVIEW_PUBLISHED`. Otherwise report failure. On success, return Oracle's review without rewriting its findings.
