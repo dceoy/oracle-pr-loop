@@ -37,10 +37,10 @@ Substitute only the validated canonical PR target. The marker is valid only afte
 
 Capture stdout and stderr separately in private temporary files outside the repository and reuse those paths for the retry sequence. Record Oracle's exit code immediately in an ordinary variable such as `exit_code`; never assign to zsh's read-only `status` parameter.
 
-Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and the captured busy record is exact: either stderr's last nonblank line is `✖ busy`, or stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. The latter is Oracle's session-runner surface for a remote-service HTTP 409 rejected before the new run is accepted. Allow six retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30` seconds with 0.750–1.000 jitter. Do not infer busy from substrings, arbitrary stdout text, HTTP prose, or other messages.
+Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and the captured busy record is exact: either stderr's last nonblank line is `✖ busy`, or stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. The latter is Oracle's session-runner surface for a remote-service HTTP 409 rejected before the new run is accepted. Allow ten retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30, 30, 30, 30, 30` seconds with 0.750–1.000 jitter. This keeps the retry path bounded while allowing roughly three minutes for a legitimate single-flight remote run to finish. Do not infer busy from substrings, arbitrary stdout text, HTTP prose, or other messages.
 
 Treat exact final stderr `✖ read ETIMEDOUT` or stdout's last nonblank `ERROR:` line exactly equal to `ERROR: read ETIMEDOUT` as terminal with publication state **indeterminate**: the review may already have been posted. Never replay either form, and never use `gh`, GitHub API heuristics, review counts, timestamps, or a captured marker to prove non-publication. All other failures are fail-fast.
 
-Always surface captured output for the final success or failure and remove only the temporary files created by this run.
+Always surface captured output for the final success or failure and remove only the temporary files created by this run with `rm -f -- "$out_file" "$err_file"`.
 
 Accept success only when Oracle exits zero and stdout's final nonblank line is exactly `ORACLE_PR_REVIEW_PUBLISHED`. Otherwise report failure. On success, return Oracle's review without rewriting its findings.
