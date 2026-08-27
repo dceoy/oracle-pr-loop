@@ -22,21 +22,11 @@ The top-level agent owns implementation, QA, Git/GitHub mutation, freshness chec
 - Validate Oracle plans and triage against current repository state, requested scope, exact head, and feedback before acting.
 - Preserve unrelated work. Stop if loop-owned edits/commits cannot be safely isolated from other local changes.
 - Keep changes minimal and scoped; apply KISS, DRY, and YAGNI.
+- Honor explicit caller constraints on implementation and Git/GitHub mutation. If a constraint prevents a required action, do not treat that action or dependent feedback as complete; leave affected feedback open and report the blocker.
 - Do not add an orchestrator-level Oracle retry loop. Each leaf owns its own busy/timeout policy.
 - A successful `oracle-pr-review` must satisfy that skill's publication marker contract. Any leaf-designated terminal/indeterminate `read ETIMEDOUT` result must not be replayed.
 - Re-review after a code-head change. For feedback-only changes on the same head, refresh triage without re-running review.
-- Never resolve feedback because a requested action was suppressed or failed.
 - An active unsuperseded `CHANGES_REQUESTED` review remains `awaiting_re_review`. A later `COMMENTED` review does not clear it; only dismissal or a later same-reviewer `APPROVED`/`CHANGES_REQUESTED` review supersedes the earlier state.
-
-## Modes
-
-Honor caller constraints equivalent to:
-
-- `dry_run`: do not implement fixes or perform main-agent Git/GitHub mutations; Oracle review/triage may still run when the caller requested review.
-- `no_push`: local implementation/QA/commit may run, but do not push, create a PR, or resolve feedback whose fix is unpublished.
-- `no_reply`: do not post replies or resolve threads. It does not suppress `oracle-pr-review` unless the caller separately forbids review publication.
-
-A mode-suppressed action is `skipped_by_mode`, not success. Keep affected code-dependent threads open. Active `CHANGES_REQUESTED` remains `awaiting_re_review`.
 
 ## Feedback Freshness
 
@@ -55,8 +45,8 @@ Track review rounds across the workflow and same-head triage refreshes per head 
 ## Issue-Started Flow
 
 1. Run `oracle-issue-plan` for the exact same-repository Issue set and validate its plan.
-2. Unless `dry_run`, implement the smallest coherent change, run repository QA, commit, push, and open one PR. Honor `no_push`.
-3. If a PR exists, enter the review loop below. Otherwise report the local/planned state and stop.
+2. Implement the smallest coherent change, run repository QA, commit, push, and open one PR. Honor explicit caller constraints; if one prevents a required step, report the partial state and stop.
+3. Enter the review loop below on the resulting PR.
 
 For an existing PR, enter the review loop directly.
 
@@ -68,7 +58,7 @@ For an existing PR, enter the review loop directly.
 4. **Reconcile feedback.** Re-fetch feedback. If external feedback changed on the same head, refresh triage on the fresh snapshot until stable or a caller limit is reached.
 5. **Validate dispositions.** Validate each Oracle disposition against current code and feedback. Batch all accepted fixes for this head into one coherent change and run QA.
 6. **Gate before publication.** Re-check exact head and feedback immediately before creating the fix commit, and re-check both again immediately before pushing that commit. If either gate is stale, do not publish the fix; discard or safely reconstruct loop-owned edits/commit and restart review or same-head triage as appropriate.
-7. **Push once.** Unless suppressed, push the coherent fix batch and verify the PR's exact resulting head. A successful push changes the reviewed head, so restart review before replying/resolving code-dependent feedback.
+7. **Push once.** Push the coherent fix batch and verify the PR's exact resulting head. A successful push changes the reviewed head, so restart review before replying/resolving code-dependent feedback.
 8. **Gate feedback mutations.** For non-fix dispositions on an unchanged reviewed head, immediately re-check exact head and feedback before each reply/resolution. On an external delta, refresh triage first. Record successful own mutations.
 9. **Finish or continue.** Re-fetch head and feedback. New head → review again. Same-head external feedback → triage again. Stable state with every item terminal → finish.
 
@@ -97,7 +87,7 @@ flowchart TD
 
 ## Terminal States
 
-Use `resolved`, `replied_left_open`, `not_resolvable`, `skipped_by_mode`, `awaiting_re_review`, or `failed_action`.
+Use `resolved`, `replied_left_open`, `not_resolvable`, `awaiting_re_review`, or `failed_action`.
 
 A `defer` or `will not fix` disposition is always a blocker for this loop, even after a reply; neither becomes a terminal completion state.
 
@@ -108,6 +98,7 @@ Completion is blocked by any of:
 - any `defer` or `will not fix`;
 - active `awaiting_re_review`;
 - `failed_action`;
+- a caller constraint that prevents a required action;
 - unreconciled head/feedback state;
 - exhausted caller limits;
 - unsafe worktree/branch state, permission failure, or QA failure;
@@ -117,4 +108,4 @@ Completion is blocked by any of:
 
 ## Output
 
-Report the outcome, active modes, implemented Issues/resulting PR when applicable, review rounds, final head SHA, review-publication status, same-head triage refreshes, disposition/terminal-state summary, skipped actions, and any blocker.
+Report the outcome, implemented Issues/resulting PR when applicable, review rounds, final head SHA, review-publication status, same-head triage refreshes, disposition/terminal-state summary, and any blocker.
