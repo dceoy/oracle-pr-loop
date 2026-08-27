@@ -63,23 +63,25 @@ Both discovery roots are local symlinks to the canonical directories under
 ## Oracle retry and timeout behavior
 
 All three Oracle leaf skills allow six retry opportunities (seven total
-invocations) only for invocations that exited unsuccessfully with captured
-stderr ending in the exact standalone line `✖ busy`. Each retry additionally
+invocations) only for invocations that exited unsuccessfully with an exact
+busy record: either stderr's last nonblank line is `✖ busy`, or stdout's last
+nonblank `ERROR:` line is exactly `ERROR: busy`. Each retry additionally
 requires that capture to be complete and to contain no evidence that browser
-execution was accepted or started. Every attempt uses an independent capture;
+execution was accepted or started. Stdout and stderr are captured separately;
 every terminal nonzero exit is reported, and the retry policy only decides
 whether a failed invocation is replayed.
 
-Exact `✖ read ETIMEDOUT` is terminal in every leaf and is never replayed. A
+Exact final `✖ read ETIMEDOUT` on stderr or `ERROR: read ETIMEDOUT` as stdout's
+last nonblank `ERROR:` line is terminal in every leaf and is never replayed. A
 read timeout can occur after the remote `/runs` request was accepted and after
 ChatGPT received the prompt while the server-side browser run continues. Even
 the read-only planning and triage leaves therefore fail closed instead of
 starting a second run that could duplicate ChatGPT work or immediately collide
-with the still-active run as `✖ busy`. For `oracle-pr-review`, the timeout also
+with the still-active run as `busy`. For `oracle-pr-review`, the timeout also
 leaves GitHub publication state indeterminate, so no captured-stdout marker is
 accepted as a trusted publication receipt.
 
-For exact `✖ busy`, the current Oracle remote server returns HTTP 409
+For exact busy records, the current Oracle remote server returns HTTP 409
 `{"error":"busy"}` before `/runs` acceptance when its single-flight guard is
 occupied, while the remote client collapses that status to the error message
 before the CLI renders it. The classifier is therefore a pragmatic
