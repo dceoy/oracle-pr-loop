@@ -23,7 +23,7 @@ The top-level agent owns implementation, QA, Git/GitHub mutation, freshness chec
 - Preserve unrelated work. Stop if loop-owned edits/commits cannot be safely isolated from other local changes.
 - Keep changes minimal and scoped; apply KISS, DRY, and YAGNI.
 - Do not add an orchestrator-level Oracle retry loop. Each leaf owns its own busy/timeout policy.
-- A successful `oracle-pr-review` must satisfy that skill's publication marker contract. Exact `✖ read ETIMEDOUT` is terminal/indeterminate and must not be replayed.
+- A successful `oracle-pr-review` must satisfy that skill's publication marker contract. Any leaf-designated terminal/indeterminate `read ETIMEDOUT` result must not be replayed.
 - Re-review after a code-head change. For feedback-only changes on the same head, refresh triage without re-running review.
 - Never resolve feedback because a requested action was suppressed or failed.
 - An active unsuperseded `CHANGES_REQUESTED` review remains `awaiting_re_review`. A later `COMMENTED` review does not clear it; only dismissal or a later same-reviewer `APPROVED`/`CHANGES_REQUESTED` review supersedes the earlier state.
@@ -99,11 +99,13 @@ flowchart TD
 
 Use `resolved`, `replied_left_open`, `not_resolvable`, `skipped_by_mode`, `awaiting_re_review`, or `failed_action`.
 
+A `defer` or `will not fix` disposition is always a blocker for this loop, even after a reply; neither becomes a terminal completion state.
+
 Completion is blocked by any of:
 
 - a fix still requiring publication;
 - unresolved `clarify`;
-- non-terminal `defer` or `will not fix`;
+- any `defer` or `will not fix`;
 - active `awaiting_re_review`;
 - `failed_action`;
 - unreconciled head/feedback state;

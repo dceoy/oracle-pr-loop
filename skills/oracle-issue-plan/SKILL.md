@@ -36,11 +36,11 @@ For one Issue, use singular `# Issue:` and equivalent singular wording. Build th
 
 ## Retry and result contract
 
-Capture stdout and stderr separately in private temporary files outside the repository and reuse those paths for a retry sequence.
+Capture stdout and stderr separately in private temporary files outside the repository and reuse those paths for the retry sequence. Record Oracle's exit code immediately in an ordinary variable such as `exit_code`; never assign to zsh's read-only `status` parameter.
 
-Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and stderr's last nonblank line is exactly `✖ busy`. Allow six retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30` seconds with 0.750–1.000 jitter. Do not infer busy from substrings, stdout, HTTP prose, or other messages.
+Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and the captured busy record is exact: either stderr's last nonblank line is `✖ busy`, or stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. The latter is Oracle's session-runner surface for a remote-service HTTP 409 rejected before the new run is accepted. Allow six retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30` seconds with 0.750–1.000 jitter. Do not infer busy from substrings, arbitrary stdout text, HTTP prose, or other messages.
 
-Treat exact final stderr `✖ read ETIMEDOUT` as terminal because the remote run may already have been accepted. Do not replay it. All other failures are fail-fast.
+Treat exact final stderr `✖ read ETIMEDOUT` or stdout's last nonblank `ERROR:` line exactly equal to `ERROR: read ETIMEDOUT` as terminal because the remote run may already have been accepted. Do not replay either form. All other failures are fail-fast.
 
 Always surface captured output for the final success or failure and remove only the temporary files created by this run. On retry-budget exhaustion, report failure.
 
