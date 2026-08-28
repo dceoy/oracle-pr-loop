@@ -62,13 +62,19 @@ Both discovery roots are local symlinks to the canonical directories under
 
 ## Oracle retry and timeout behavior
 
-All three Oracle leaf skills allow ten retry opportunities (eleven total
-invocations) only for invocations that exited unsuccessfully with an exact
-busy record: either stderr's last nonblank line is `✖ busy`, or stdout's last
-nonblank `ERROR:` line is exactly `ERROR: busy`. Retries use nominal delays
-`1, 2, 4, 8, 16, 30, 30, 30, 30, 30` seconds with 0.750–1.000 jitter, keeping
-the retry path bounded while allowing roughly three minutes for a legitimate
-single-flight remote run to finish. Each retry additionally requires that
+All three Oracle leaf skills retry only invocations that exited unsuccessfully
+with an exact busy record: either stderr's last nonblank line is `✖ busy`, or
+stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. Each complete
+leaf execution must instead be bounded by a finite deadline supplied by the
+caller or guaranteed by the runtime. The skill need not observe a runtime
+bound's concrete value, but neither the orchestrator nor a leaf may invent,
+shorten, or override that bound. If no finite caller/runtime bound is
+guaranteed, the leaf fails closed before invoking Oracle.
+
+While the caller/runtime deadline remains live, exact-busy retries use nominal
+delays `1, 2, 4, 8, 16` seconds and then `30` seconds for each subsequent
+retry, with 0.750–1.000 jitter. There is no independent retry-count or
+roughly-three-minute elapsed-time cap. Each retry additionally requires that
 capture to be complete and to contain no evidence that browser execution was
 accepted or started. Stdout and stderr are captured separately; every terminal
 nonzero exit is reported, and the retry policy only decides whether a failed
@@ -83,14 +89,16 @@ a second run that could duplicate ChatGPT work or immediately collide with the
 still-active run as `busy`.
 
 `oracle-pr-review` also never replays a timed-out review, because publication
-may already have happened. Each review prompt now carries a unique hidden
+may already have happened. Each review prompt carries a unique hidden
 correlation marker in its top-level GitHub review body. After an exact read
-timeout, the skill performs one read-only GitHub lookup and accepts recovered
-publication only when exactly one persisted `COMMENTED` review contains that
-exact per-run marker. The marker is positive proof for that invocation; review
-counts, timestamps, partial matches, stdout, or marker absence are never used
-to infer publication or non-publication. Zero or multiple matches leave the
-publication state indeterminate and block the loop.
+timeout, the skill polls the PR's reviews read-only while the same
+caller/runtime deadline remains live and accepts recovered publication as soon
+as exactly one persisted `COMMENTED` review contains that exact per-run marker.
+The marker is positive proof for that invocation; review counts, timestamps,
+partial matches, stdout, or marker absence are never used to infer publication
+or non-publication. A GitHub read failure, multiple exact matches, or deadline
+expiry before one exact match is proven leaves publication indeterminate and
+blocks the loop.
 
 For exact busy records, the current Oracle remote server returns HTTP 409
 `{"error":"busy"}` before `/runs` acceptance when its single-flight guard is
