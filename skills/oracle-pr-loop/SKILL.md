@@ -24,7 +24,7 @@ The top-level agent owns implementation, QA, Git/GitHub mutation, freshness chec
 - Keep changes minimal and scoped; apply KISS, DRY, and YAGNI.
 - Honor explicit caller constraints on implementation and Git/GitHub mutation. If a constraint prevents a required action, do not treat that action or dependent feedback as complete; leave affected feedback open and report the blocker.
 - Do not add an orchestrator-level Oracle retry loop. Each leaf owns its own busy/timeout policy.
-- A successful `oracle-pr-review` must satisfy that skill's publication marker contract. Any leaf-designated terminal/indeterminate `read ETIMEDOUT` result must not be replayed.
+- A successful `oracle-pr-review` must satisfy that skill's publication contract. Never replay a leaf-designated terminal `read ETIMEDOUT`; an `oracle-pr-review` timeout is successful only when that leaf proves the already-published `COMMENTED` review with its exact per-run GitHub correlation marker. Otherwise the result remains indeterminate and blocks the loop.
 - Re-review after a code-head change. For feedback-only changes on the same head, refresh triage without re-running review.
 - An active unsuperseded `CHANGES_REQUESTED` review remains `awaiting_re_review`. A later `COMMENTED` review does not clear it; only dismissal or a later same-reviewer `APPROVED`/`CHANGES_REQUESTED` review supersedes the earlier state.
 

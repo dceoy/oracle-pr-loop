@@ -77,12 +77,23 @@ invocation is replayed.
 Exact final `✖ read ETIMEDOUT` on stderr or `ERROR: read ETIMEDOUT` as stdout's
 last nonblank `ERROR:` line is terminal in every leaf and is never replayed. A
 read timeout can occur after the remote `/runs` request was accepted and after
-ChatGPT received the prompt while the server-side browser run continues. Even
-the read-only planning and triage leaves therefore fail closed instead of
-starting a second run that could duplicate ChatGPT work or immediately collide
-with the still-active run as `busy`. For `oracle-pr-review`, the timeout also
-leaves GitHub publication state indeterminate, so no captured-stdout marker is
-accepted as a trusted publication receipt.
+ChatGPT received the prompt while the server-side browser run continues. The
+read-only planning and triage leaves therefore fail closed instead of starting
+a second run that could duplicate ChatGPT work or immediately collide with the
+still-active run as `busy`.
+
+`oracle-pr-review` also never replays a timed-out review, because publication
+may already have happened. Each review prompt carries a unique hidden
+correlation marker in its top-level GitHub review body. After an exact read
+timeout, the skill checks the PR's reviews immediately and then up to 36 more
+times at five-second intervals while the marker is absent, for at most 180
+seconds of recovery waiting. Publication is recovered only when exactly one
+persisted `COMMENTED` review contains that exact per-run marker. The marker is
+positive proof for that invocation; review counts, timestamps, partial matches,
+stdout, or marker absence are never used to infer publication or
+non-publication. A GitHub read failure, multiple exact matches, or exhaustion
+of the bounded recovery window leaves publication indeterminate and blocks the
+loop.
 
 For exact busy records, the current Oracle remote server returns HTTP 409
 `{"error":"busy"}` before `/runs` acceptance when its single-flight guard is
