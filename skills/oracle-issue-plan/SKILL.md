@@ -10,7 +10,7 @@ Produce one advisory implementation plan for one or more same-repository GitHub 
 
 ## Invariants
 
-- Require `oracle` in `PATH`, an authenticated ChatGPT browser session, repository access through the connected GitHub app, and `GPT-5.6 Sol`.
+- Require Oracle CLI 0.18.0 or newer in `PATH`, an authenticated ChatGPT browser session, repository access through the connected GitHub app, and `GPT-5.6 Sol`.
 - Accept `OWNER/REPO#NUMBER` or exactly `https://github.com/OWNER/REPO/issues/NUMBER`. Normalize to `OWNER/REPO#NUMBER` and require `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$`.
 - Validate the complete target set before invocation. All Issues must belong to one repository. Deduplicate case-insensitively by repository and number while preserving first-seen order.
 - Reject ambiguous targets, query strings, fragments, extra prose, whitespace/newlines, shell metacharacters, and partial-validity input.
@@ -22,7 +22,7 @@ Produce one advisory implementation plan for one or more same-repository GitHub 
 
 ## Run
 
-Check availability with `which oracle`, then invoke browser mode with the validated canonical target list:
+Check availability with `which oracle` and verify `oracle --version` reports 0.18.0 or newer; fail closed if the version is older or cannot be established. Then invoke browser mode with the validated canonical target list:
 
 ```bash
 oracle \
@@ -39,7 +39,7 @@ For one Issue, use singular `# Issue:` and equivalent singular wording. Build th
 
 ## Retry and result contract
 
-Capture stdout and stderr separately in private temporary files outside the repository and reuse those paths for the retry sequence. Record Oracle's exit code immediately in an ordinary variable such as `exit_code`; never assign to zsh's read-only `status` parameter.
+Capture stdout and stderr separately in private temporary files outside the repository and reuse those paths for the retry sequence. Record Oracle's exit code immediately in an ordinary variable such as `exit_code`; never assign to zsh's read-only `status` parameter. Heartbeat/progress lines may be present in either capture, but they are not result records: stdout error classification uses the last nonblank `ERROR:` record, while stderr classification still requires the expected result to be the actual last nonblank line. Never discard later stderr text to manufacture a retryable or terminal match.
 
 Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and the captured busy record is exact: either stderr's last nonblank line is `✖ busy`, or stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. The latter is Oracle's session-runner surface for a remote-service HTTP 409 rejected before the new run is accepted. Allow ten retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30, 30, 30, 30, 30` seconds with 0.750–1.000 jitter. This keeps the retry path bounded while allowing roughly three minutes for a legitimate single-flight remote run to finish. Do not infer busy from substrings, arbitrary stdout text, HTTP prose, or other messages.
 
