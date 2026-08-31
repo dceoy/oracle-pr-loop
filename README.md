@@ -62,6 +62,14 @@ Both discovery roots are local symlinks to the canonical directories under
 
 ## Oracle retry and timeout behavior
 
+Every Oracle leaf explicitly passes `--wait` so the original CLI remains
+attached until the browser session completes instead of relying on ambient
+Oracle defaults. Each leaf also passes `--heartbeat 15`; browser heartbeats
+provide regular progress traffic while ChatGPT is reasoning, which keeps the
+remote `/runs` stream active while the final result is being collected. These
+controls are preventive only: they do not make a timed-out accepted run safe
+to replay.
+
 All three Oracle leaf skills allow ten retry opportunities (eleven total
 invocations) only for invocations that exited unsuccessfully with an exact
 busy record: either stderr's last nonblank line is `✖ busy`, or stdout's last
