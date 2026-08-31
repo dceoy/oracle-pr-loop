@@ -62,6 +62,20 @@ Both discovery roots are local symlinks to the canonical directories under
 
 ## Oracle retry and timeout behavior
 
+Every Oracle leaf explicitly passes `--wait` so the original CLI remains
+attached until the browser session completes instead of relying on ambient
+Oracle defaults. Each leaf also passes `--heartbeat 15`; browser heartbeats
+provide regular progress traffic while ChatGPT is reasoning, which keeps the
+remote `/runs` stream active while the final result is being collected. These
+controls are preventive only: they do not make a timed-out accepted run safe
+to replay. This transport contract requires Oracle CLI 0.18.0 or newer on the
+local client and, when Oracle's resolved browser routing uses a remote service,
+on that `oracle serve` endpoint as well. Each leaf verifies the local version
+and uses `oracle bridge doctor` to require an authenticated `/health` response
+reporting remote Oracle 0.18.0 or newer before starting a remote browser run.
+Older, missing, or unparseable endpoint versions fail closed; the skills never
+resolve or inject remote host/token settings themselves.
+
 All three Oracle leaf skills allow ten retry opportunities (eleven total
 invocations) only for invocations that exited unsuccessfully with an exact
 busy record: either stderr's last nonblank line is `✖ busy`, or stdout's last
@@ -73,6 +87,15 @@ capture to be complete and to contain no evidence that browser execution was
 accepted or started. Stdout and stderr are captured separately; every terminal
 nonzero exit is reported, and the retry policy only decides whether a failed
 invocation is replayed.
+
+Heartbeat/progress lines may be present in those captures, but they are never
+result records and do not relax exact matching. Stdout error classification
+uses only the last nonblank `ERROR:` record; stderr busy/timeout classification
+still requires the expected text to be the actual last nonblank stderr line.
+If later output makes a terminal state ambiguous, the leaf fails closed rather
+than discarding progress text to manufacture a retryable or recoverable match.
+For `oracle-pr-review`, normal publication success likewise requires
+`ORACLE_PR_REVIEW_PUBLISHED` to remain stdout's actual final nonblank line.
 
 Exact final `✖ read ETIMEDOUT` on stderr or `ERROR: read ETIMEDOUT` as stdout's
 last nonblank `ERROR:` line is terminal in every leaf and is never replayed. A
@@ -109,8 +132,10 @@ the CLI-text classifier.
 
 - Git and, where the host/triage flow needs it, an authenticated GitHub CLI
   (`gh`) session or equivalent GitHub access;
-- the `oracle` CLI, with an authenticated ChatGPT browser session and the
-  ChatGPT GitHub app authorized for the target repository;
+- Oracle CLI 0.18.0 or newer on the local client and on any configured remote
+  `oracle serve` endpoint used by browser routing, with an authenticated
+  ChatGPT browser session and the ChatGPT GitHub app authorized for the target
+  repository;
 - `GPT-5.6 Sol` available to Oracle browser mode.
 
 ## Usage
