@@ -10,7 +10,7 @@ Review exactly one pull request through Oracle browser mode and publish the revi
 
 ## Invariants
 
-- Require Oracle CLI 0.18.0 or newer in `PATH`, an authenticated ChatGPT browser session, repository access through the connected GitHub app, and `GPT-5.6 Sol`. Require `gh` only to detect an omitted target and to perform the exact-marker timeout recovery defined below.
+- Require Oracle CLI 0.18.0 or newer on every endpoint used by Oracle browser routing, an authenticated ChatGPT browser session, repository access through the connected GitHub app, and `GPT-5.6 Sol`. Require `gh` only to detect an omitted target and to perform the exact-marker timeout recovery defined below.
 - Accept `OWNER/REPO#NUMBER`, exactly `https://github.com/OWNER/REPO/pull/NUMBER`, or no target. For no target, run `gh pr view --json url --jq .url` once.
 - Normalize to `OWNER/REPO#NUMBER` and require `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$`. Reject ambiguity, query strings/fragments, extra prose, whitespace/newlines, shell metacharacters, or unvalidated `gh` output.
 - Use the connected GitHub app as the sole review-context and publication path. Outside timeout recovery, use `gh` only for PR identity.
@@ -21,7 +21,7 @@ Review exactly one pull request through Oracle browser mode and publish the revi
 
 ## Run
 
-Check availability with `which oracle` and verify `oracle --version` reports 0.18.0 or newer; fail closed if the version is older or cannot be established.
+Check availability with `which oracle` and verify `oracle --version` reports 0.18.0 or newer; fail closed if the local version is older or cannot be established. Run `oracle bridge doctor` once using Oracle's resolved configuration. If it reports `Remote service: configured`, require the doctor command to succeed and its authenticated `/health` result to report `oracle VERSION` at 0.18.0 or newer; fail closed if the remote version is missing, older, unparseable, or health cannot be verified. Do not resolve, inject, or override remote host/token settings in the skill. If no remote service is configured, the local version gate is sufficient.
 
 Before the first Oracle attempt, create the stdout and stderr capture files with separate `mktemp` calls. Derive one per-run `review_token` from their random suffixes, validate it against `^[A-Za-z0-9_-]+$`, and define the exact correlation marker `<!-- oracle-pr-review:REVIEW_TOKEN -->`. Reuse the same files, token, marker, and prompt for every busy retry. The token is correlation data only; it must not encode caller prose or repository context.
 

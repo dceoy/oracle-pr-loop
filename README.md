@@ -68,9 +68,13 @@ Oracle defaults. Each leaf also passes `--heartbeat 15`; browser heartbeats
 provide regular progress traffic while ChatGPT is reasoning, which keeps the
 remote `/runs` stream active while the final result is being collected. These
 controls are preventive only: they do not make a timed-out accepted run safe
-to replay. This transport contract requires Oracle CLI 0.18.0 or newer; the
-leaf skills must reject older or unparseable Oracle versions before invoking a
-browser run.
+to replay. This transport contract requires Oracle CLI 0.18.0 or newer on the
+local client and, when Oracle's resolved browser routing uses a remote service,
+on that `oracle serve` endpoint as well. Each leaf verifies the local version
+and uses `oracle bridge doctor` to require an authenticated `/health` response
+reporting remote Oracle 0.18.0 or newer before starting a remote browser run.
+Older, missing, or unparseable endpoint versions fail closed; the skills never
+resolve or inject remote host/token settings themselves.
 
 All three Oracle leaf skills allow ten retry opportunities (eleven total
 invocations) only for invocations that exited unsuccessfully with an exact
@@ -128,8 +132,10 @@ the CLI-text classifier.
 
 - Git and, where the host/triage flow needs it, an authenticated GitHub CLI
   (`gh`) session or equivalent GitHub access;
-- Oracle CLI 0.18.0 or newer, with an authenticated ChatGPT browser session
-  and the ChatGPT GitHub app authorized for the target repository;
+- Oracle CLI 0.18.0 or newer on the local client and on any configured remote
+  `oracle serve` endpoint used by browser routing, with an authenticated
+  ChatGPT browser session and the ChatGPT GitHub app authorized for the target
+  repository;
 - `GPT-5.6 Sol` available to Oracle browser mode.
 
 ## Usage

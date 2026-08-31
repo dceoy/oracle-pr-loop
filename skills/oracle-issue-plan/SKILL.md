@@ -10,7 +10,7 @@ Produce one advisory implementation plan for one or more same-repository GitHub 
 
 ## Invariants
 
-- Require Oracle CLI 0.18.0 or newer in `PATH`, an authenticated ChatGPT browser session, repository access through the connected GitHub app, and `GPT-5.6 Sol`.
+- Require Oracle CLI 0.18.0 or newer on every endpoint used by Oracle browser routing, an authenticated ChatGPT browser session, repository access through the connected GitHub app, and `GPT-5.6 Sol`.
 - Accept `OWNER/REPO#NUMBER` or exactly `https://github.com/OWNER/REPO/issues/NUMBER`. Normalize to `OWNER/REPO#NUMBER` and require `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$`.
 - Validate the complete target set before invocation. All Issues must belong to one repository. Deduplicate case-insensitively by repository and number while preserving first-seen order.
 - Reject ambiguous targets, query strings, fragments, extra prose, whitespace/newlines, shell metacharacters, and partial-validity input.
@@ -22,7 +22,7 @@ Produce one advisory implementation plan for one or more same-repository GitHub 
 
 ## Run
 
-Check availability with `which oracle` and verify `oracle --version` reports 0.18.0 or newer; fail closed if the version is older or cannot be established. Then invoke browser mode with the validated canonical target list:
+Check availability with `which oracle` and verify `oracle --version` reports 0.18.0 or newer; fail closed if the local version is older or cannot be established. Run `oracle bridge doctor` once using Oracle's resolved configuration. If it reports `Remote service: configured`, require the doctor command to succeed and its authenticated `/health` result to report `oracle VERSION` at 0.18.0 or newer; fail closed if the remote version is missing, older, unparseable, or health cannot be verified. Do not resolve, inject, or override remote host/token settings in the skill. If no remote service is configured, the local version gate is sufficient. Then invoke browser mode with the validated canonical target list:
 
 ```bash
 oracle \
