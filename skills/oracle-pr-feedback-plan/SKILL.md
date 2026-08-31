@@ -15,6 +15,7 @@ Triage existing feedback on exactly one pull request. Oracle owns browser/sessio
 - Normalize to `OWNER/REPO#NUMBER` and require `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$`. Reject ambiguity, query strings/fragments, extra prose, whitespace/newlines, shell metacharacters, or unvalidated `gh` output.
 - Use `gh` only for PR identity. Use the connected GitHub app as the sole repository/feedback context source.
 - Keep Oracle's native browser routing. Do not add remote-host/token arguments or expose credentials.
+- Keep the original Oracle CLI attached until the browser session completes and emit periodic browser heartbeats; do not rely on ambient Oracle configuration for either behavior.
 - Never use `eval` or append caller prose, copied comments, or local context to the Oracle prompt.
 - Fail closed: no API-engine fallback, alternate model/PR/context source, local re-triage, or modified retry prompt.
 
@@ -24,6 +25,8 @@ Invoke:
 
 ```bash
 oracle \
+  --wait \
+  --heartbeat 15 \
   --engine browser \
   --model gpt-5.6-sol \
   --browser-thinking-time high \
@@ -31,7 +34,7 @@ oracle \
 @GitHub Triage all existing review feedback on this pull request. For each distinct root cause choose: fix, already addressed, outdated, answer, clarify, defer, or will not fix. For every fix, provide a decision-complete implementation plan and verification guidance. Apply KISS, DRY, and YAGNI and avoid unrelated refactoring. For defer or will-not-fix items, explain the rationale and state that the loop must stop with the item open; do not classify either disposition as terminal completion. Suggest a concise reply and whether any resolvable thread should be resolved or left open. Do not modify the repository, issues, pull requests, reviews, comments, or threads.'
 ```
 
-Substitute only the validated canonical PR target.
+Substitute only the validated canonical PR target. Preserve `--wait` and `--heartbeat 15` unchanged on every invocation so the caller stays attached while Oracle collects the final browser result and the remote stream receives regular progress traffic during long reasoning periods.
 
 ## Retry and result contract
 
@@ -39,7 +42,7 @@ Capture stdout and stderr separately in private temporary files outside the repo
 
 Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and the captured busy record is exact: either stderr's last nonblank line is `✖ busy`, or stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. The latter is Oracle's session-runner surface for a remote-service HTTP 409 rejected before the new run is accepted. Allow ten retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30, 30, 30, 30, 30` seconds with 0.750–1.000 jitter. This keeps the retry path bounded while allowing roughly three minutes for a legitimate single-flight remote run to finish. Do not infer busy from substrings, arbitrary stdout text, HTTP prose, or other messages.
 
-Treat exact final stderr `✖ read ETIMEDOUT` or stdout's last nonblank `ERROR:` line exactly equal to `ERROR: read ETIMEDOUT` as terminal because the remote run may already be active. Do not replay either form. All other failures are fail-fast.
+Treat exact final stderr `✖ read ETIMEDOUT` or stdout's last nonblank `ERROR:` line exactly equal to `ERROR: read ETIMEDOUT` as terminal because the remote run may already be active. Do not replay either form. `--wait` and the heartbeat are preventive transport controls, not evidence that a timed-out accepted run is safe to replay. All other failures are fail-fast.
 
 Always surface captured output for the final success or failure and remove only the temporary files created by this run with `rm -f -- "$out_file" "$err_file"`.
 
