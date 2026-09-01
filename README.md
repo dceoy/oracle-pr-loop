@@ -67,8 +67,8 @@ attached until the browser session completes instead of relying on ambient
 Oracle defaults. Each leaf also passes `--heartbeat 15`; browser heartbeats
 provide regular progress traffic while ChatGPT is reasoning, which keeps the
 remote `/runs` stream active while the final result is being collected. These
-controls are preventive only: they do not make a timed-out accepted run safe
-to replay. This transport contract requires Oracle CLI 0.18.0 or newer on the
+controls are preventive only: they do not prove that a timed-out run was not
+accepted. This transport contract requires Oracle CLI 0.18.0 or newer on the
 local client and, when Oracle's resolved browser routing uses a remote service,
 on that `oracle serve` endpoint as well. Each leaf verifies the local version
 and uses `oracle bridge doctor` to require an authenticated `/health` response
@@ -98,27 +98,38 @@ For `oracle-pr-review`, normal publication success likewise requires
 `ORACLE_PR_REVIEW_PUBLISHED` to remain stdout's actual final nonblank line.
 
 Exact final `✖ read ETIMEDOUT` on stderr or `ERROR: read ETIMEDOUT` as stdout's
-last nonblank `ERROR:` line is terminal in every leaf and is never replayed. A
-read timeout can occur after the remote `/runs` request was accepted and after
-ChatGPT received the prompt while the server-side browser run continues. The
-read-only planning and triage leaves therefore fail closed instead of starting
-a second run that could duplicate ChatGPT work or immediately collide with the
-still-active run as `busy`.
+last nonblank `ERROR:` line remains terminal for `oracle-pr-review`: it is
+never replayed because publication may already have happened. The review leaf
+uses its exact per-run GitHub correlation marker to recover an already-persisted
+`COMMENTED` review instead.
 
-`oracle-pr-review` also never replays a timed-out review, because publication
-may already have happened. Each review prompt carries a unique hidden
-correlation marker in its top-level GitHub review body. After an exact read
-timeout, the leaf delegates marker polling to its bundled script instead of
-having the agent drive each `gh`/`sleep` step. The 15-minute window is split
-into at most two bounded foreground invocations: an initial phase checks
-immediately and then eight more times at 60-second intervals (480 seconds),
-and a continuation phase, used only after the initial phase returns its exact
-`CONTINUE` result, performs seven more reads after seven additional one-minute
-waits (420 seconds). Together they preserve 16 total reads over 15 one-minute
-intervals while keeping each command below Claude Code's 600-second foreground
-Bash limit; Claude Code runs each phase with a 600000 ms tool timeout. The
-continuation is invoked at most once, so recovery needs at most one additional
-model decision rather than fifteen polling turns.
+The two explicitly read-only leaves, `oracle-issue-plan` and
+`oracle-pr-feedback-plan`, may recover from one exact `read ETIMEDOUT` by
+replaying the identical validated Oracle request at most once. A timeout can
+occur after `/runs` acceptance, so this is not treated as a pre-acceptance
+transport retry. Instead the leaf records that timeout recovery has been used
+before replaying. If the original server-side run is still occupying Oracle's
+single-flight slot, exact pre-acceptance `busy` responses may consume the
+remaining ordinary busy-retry budget until the recovery invocation can start.
+The first non-busy recovery invocation is the only accepted replay. A second
+exact `read ETIMEDOUT`, busy-budget exhaustion, or any different timeout or
+network failure remains terminal and fail-closed. This exception is restricted
+to prompts that explicitly prohibit repository and GitHub mutation; it must
+not be applied to the review leaf.
+
+`oracle-pr-review` carries a unique hidden correlation marker in its top-level
+GitHub review body. After an exact read timeout, the leaf delegates marker
+polling to its bundled script instead of having the agent drive each
+`gh`/`sleep` step. The 15-minute window is split into at most two bounded
+foreground invocations: an initial phase checks immediately and then eight more
+times at 60-second intervals (480 seconds), and a continuation phase, used only
+after the initial phase returns its exact `CONTINUE` result, performs seven
+more reads after seven additional one-minute waits (420 seconds). Together
+they preserve 16 total reads over 15 one-minute intervals while keeping each
+command below Claude Code's 600-second foreground Bash limit; Claude Code runs
+each phase with a 600000 ms tool timeout. The continuation is invoked at most
+once, so recovery needs at most one additional model decision rather than
+fifteen polling turns.
 
 Publication is recovered only when exactly one persisted `COMMENTED` review
 contains that exact per-run marker. The marker is positive proof for that
@@ -135,8 +146,8 @@ before the CLI renders it. The classifier is therefore a pragmatic
 best-effort rule rather than protocol-level proof of pre-acceptance. Generic
 or embedded `busy` text is never retried, and a post-acceptance error whose
 final message is exactly `busy` is a narrow residual collision risk. If
-Oracle later exposes a stable pre-acceptance discriminator, prefer it over
-the CLI-text classifier.
+Oracle later exposes a stable pre-acceptance discriminator or durable accepted
+run retrieval, prefer that protocol-level contract over replay-based recovery.
 
 ## Requirements
 
