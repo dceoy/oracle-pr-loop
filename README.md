@@ -108,15 +108,18 @@ still-active run as `busy`.
 `oracle-pr-review` also never replays a timed-out review, because publication
 may already have happened. Each review prompt carries a unique hidden
 correlation marker in its top-level GitHub review body. After an exact read
-timeout, the skill checks the PR's reviews immediately and then up to 36 more
-times at five-second intervals while the marker is absent, for at most 180
-seconds of recovery waiting. Publication is recovered only when exactly one
-persisted `COMMENTED` review contains that exact per-run marker. The marker is
-positive proof for that invocation; review counts, timestamps, partial matches,
-stdout, or marker absence are never used to infer publication or
-non-publication. A GitHub read failure, multiple exact matches, or exhaustion
-of the bounded recovery window leaves publication indeterminate and blocks the
-loop.
+timeout, the leaf invokes its bundled marker-recovery script once instead of
+having the agent drive each polling step. The script checks the PR's reviews
+immediately and then up to 15 more times at 60-second intervals while the
+marker is absent, for at most 900 seconds of recovery waiting and 16 total
+reads. Publication is recovered only when exactly one persisted `COMMENTED`
+review contains that exact per-run marker. The marker is positive proof for
+that invocation; review counts, timestamps, partial matches, stdout, or marker
+absence are never used to infer publication or non-publication. A GitHub read
+failure, multiple exact matches, or exhaustion of the bounded recovery window
+leaves publication indeterminate and blocks the loop. Keeping the wait loop in
+the bundled script also prevents repeated model turns from consuming tokens
+while ChatGPT is still finishing the review.
 
 For exact busy records, the current Oracle remote server returns HTTP 409
 `{"error":"busy"}` before `/runs` acceptance when its single-flight guard is
