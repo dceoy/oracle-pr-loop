@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 3 ]; then
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
   printf 'RESULT=ERROR\nREASON=invalid_arguments\n'
   exit 3
 fi
@@ -9,10 +9,12 @@ fi
 repo="$1"
 pr_number="$2"
 review_token="$3"
+phase="${4:-initial}"
 
 if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
   [[ ! "$pr_number" =~ ^[1-9][0-9]*$ ]] ||
-  [[ ! "$review_token" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  [[ ! "$review_token" =~ ^[A-Za-z0-9_-]+$ ]] ||
+  [[ "$phase" != "initial" && "$phase" != "continue" ]]; then
   printf 'RESULT=ERROR\nREASON=invalid_arguments\n'
   exit 3
 fi
@@ -54,16 +56,33 @@ check_reviews() {
   return 10
 }
 
-if check_reviews; then
-  exit 0
-else
-  result=$?
-fi
-if [ "$result" -ne 10 ]; then
-  exit "$result"
+if [ "$phase" = "initial" ]; then
+  if check_reviews; then
+    exit 0
+  else
+    result=$?
+  fi
+  if [ "$result" -ne 10 ]; then
+    exit "$result"
+  fi
+
+  for _ in {1..8}; do
+    sleep 60
+    if check_reviews; then
+      exit 0
+    else
+      result=$?
+    fi
+    if [ "$result" -ne 10 ]; then
+      exit "$result"
+    fi
+  done
+
+  printf 'RESULT=CONTINUE\nCHECKS=%d\nWAIT_SECONDS=480\n' "$checks"
+  exit 4
 fi
 
-for _ in {1..15}; do
+for _ in {1..7}; do
   sleep 60
   if check_reviews; then
     exit 0
@@ -75,5 +94,5 @@ for _ in {1..15}; do
   fi
 done
 
-printf 'RESULT=NOT_FOUND\nCHECKS=%d\nWAIT_SECONDS=900\n' "$checks"
+printf 'RESULT=NOT_FOUND\nCHECKS=%d\nWAIT_SECONDS=420\n' "$checks"
 exit 1
