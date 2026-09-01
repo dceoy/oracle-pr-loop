@@ -108,13 +108,23 @@ still-active run as `busy`.
 `oracle-pr-review` also never replays a timed-out review, because publication
 may already have happened. Each review prompt carries a unique hidden
 correlation marker in its top-level GitHub review body. After an exact read
-timeout, the skill checks the PR's reviews immediately and then up to 36 more
-times at five-second intervals while the marker is absent, for at most 180
-seconds of recovery waiting. Publication is recovered only when exactly one
-persisted `COMMENTED` review contains that exact per-run marker. The marker is
-positive proof for that invocation; review counts, timestamps, partial matches,
-stdout, or marker absence are never used to infer publication or
-non-publication. A GitHub read failure, multiple exact matches, or exhaustion
+timeout, the leaf delegates marker polling to its bundled script instead of
+having the agent drive each `gh`/`sleep` step. The 15-minute window is split
+into at most two bounded foreground invocations: an initial phase checks
+immediately and then eight more times at 60-second intervals (480 seconds),
+and a continuation phase, used only after the initial phase returns its exact
+`CONTINUE` result, performs seven more reads after seven additional one-minute
+waits (420 seconds). Together they preserve 16 total reads over 15 one-minute
+intervals while keeping each command below Claude Code's 600-second foreground
+Bash limit; Claude Code runs each phase with a 600000 ms tool timeout. The
+continuation is invoked at most once, so recovery needs at most one additional
+model decision rather than fifteen polling turns.
+
+Publication is recovered only when exactly one persisted `COMMENTED` review
+contains that exact per-run marker. The marker is positive proof for that
+invocation; review counts, timestamps, partial matches, stdout, or marker
+absence are never used to infer publication or non-publication. A GitHub read
+failure, multiple exact matches, an unexpected recovery result, or exhaustion
 of the bounded recovery window leaves publication indeterminate and blocks the
 loop.
 

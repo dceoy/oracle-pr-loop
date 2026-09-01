@@ -1,7 +1,7 @@
 ---
 name: oracle-pr-review
 description: Review one GitHub pull request through Oracle browser mode and ChatGPT's connected GitHub app, publishing a COMMENT review with inline findings when possible.
-allowed-tools: Bash(gh:*), Bash(oracle:*), Bash(which:*), Bash(sleep:*), Bash(mktemp:*), Bash(cat --:*), Bash(printf:*), Bash(rm -f --:*)
+allowed-tools: Bash(gh:*), Bash(oracle:*), Bash(which:*), Bash(sleep:*), Bash(mktemp:*), Bash(cat --:*), Bash(printf:*), Bash(rm -f --:*), Bash(bash:*)
 ---
 
 # Oracle PR Review
@@ -46,8 +46,24 @@ Capture stdout and stderr separately in the private temporary files created abov
 
 Retry only when Oracle exits non-zero, capture is complete with no evidence execution was accepted or started, and the captured busy record is exact: either stderr's last nonblank line is `✖ busy`, or stdout's last nonblank `ERROR:` line is exactly `ERROR: busy`. The latter is Oracle's session-runner surface for a remote-service HTTP 409 rejected before the new run is accepted. Allow ten retries after the initial attempt, using nominal delays `1, 2, 4, 8, 16, 30, 30, 30, 30, 30` seconds with 0.750–1.000 jitter. This keeps the retry path bounded while allowing roughly three minutes for a legitimate single-flight remote run to finish. Do not infer busy from substrings, arbitrary stdout text, HTTP prose, or other messages.
 
-Treat exact final stderr `✖ read ETIMEDOUT` or stdout's last nonblank `ERROR:` line exactly equal to `ERROR: read ETIMEDOUT` as terminal for Oracle transport and never replay it. `--wait` and the heartbeat are preventive transport controls, not evidence that a timed-out accepted run is safe to replay. Instead, read the PR's review collection with `gh api --paginate` and look for a persisted review whose state is `COMMENTED` and whose top-level body contains the exact per-run correlation marker. Check immediately, then allow up to 36 additional reads separated by exactly 5 seconds when zero reviews match, for at most 180 seconds of recovery waiting. Accept recovered publication as soon as exactly one review matches. If more than one review matches or any GitHub read fails, keep publication state **indeterminate** and fail closed immediately. If no exact match is found after the final read, remain **indeterminate** and stop. The exact marker is positive proof of publication, not a heuristic. Do not use review counts, timestamps, reviewer identity, partial-marker matches, stdout content, or absence of the marker to infer publication or non-publication.
+Treat exact final stderr `✖ read ETIMEDOUT` or stdout's last nonblank `ERROR:` line exactly equal to `ERROR: read ETIMEDOUT` as terminal for Oracle transport and never replay it. `--wait` and the heartbeat are preventive transport controls, not evidence that a timed-out accepted run is safe to replay. Instead, resolve the directory containing this loaded `SKILL.md` once as `skill_dir`, then invoke the bundled recovery script in at most two foreground Bash calls with the validated repository, PR number, and per-run review token. Claude Code may use `${CLAUDE_SKILL_DIR}` for `skill_dir`; other Agent Skills hosts should use the filesystem path from which they loaded this skill. Do not use background execution for recovery. On Claude Code, set each foreground Bash call's timeout to 600000 ms so the bounded phase can complete within the host's maximum foreground timeout.
 
-Always surface captured output for the final success or failure and remove only the temporary files created by this run with `rm -f -- "$out_file" "$err_file"`.
+Run the initial phase first:
 
-Accept success in either of two cases: Oracle exits zero and stdout's final nonblank line is exactly `ORACLE_PR_REVIEW_PUBLISHED`; or Oracle ends with the exact `read ETIMEDOUT` form above and exact-marker GitHub recovery proves one `COMMENTED` review. On normal success, return Oracle's review without rewriting its findings. On recovered success, do not reconstruct findings from partial stdout; report the recovered review identity and let GitHub remain the durable handoff to feedback triage.
+```bash
+bash "$skill_dir/scripts/wait-for-review-marker.sh" OWNER/REPO NUMBER REVIEW_TOKEN
+```
+
+The initial phase checks immediately and then performs up to eight additional reads separated by exactly 60 seconds. It therefore waits at most 480 seconds and performs nine reads. Exit 0 with `RESULT=FOUND` proves exactly one matching review and recovered publication. Exit 4 with `RESULT=CONTINUE` is the only nonterminal recovery result; when and only when that exact result is returned, invoke the continuation phase once, again as a foreground Bash call with a 600000 ms timeout on Claude Code:
+
+```bash
+bash "$skill_dir/scripts/wait-for-review-marker.sh" OWNER/REPO NUMBER REVIEW_TOKEN continue
+```
+
+The continuation phase waits 60 seconds before its first read and then performs seven reads separated by 60-second intervals, for at most 420 additional seconds. Across both phases the recovery contract remains exactly 16 reads over 15 one-minute intervals, with at most 900 seconds of waiting. Do not reproduce either polling loop with agent-driven `gh` or `sleep` calls, and do not invoke the continuation phase more than once.
+
+The script reads the PR's review collection with `gh api --paginate` and looks only for a persisted review whose state is `COMMENTED` and whose top-level body contains the exact per-run correlation marker. Exit 1 with `RESULT=NOT_FOUND` from the continuation phase means the bounded window was exhausted; exit 2 with `RESULT=MULTIPLE` means more than one review matched; exit 3 with `RESULT=ERROR` means validation or a GitHub read failed. Any nonzero result other than the initial phase's exact exit-4 `RESULT=CONTINUE`, and any malformed or unexpected result, leaves publication **indeterminate** and fails closed. The exact marker is positive proof of publication, not a heuristic. Do not use review counts, timestamps, reviewer identity, partial-marker matches, stdout content, or absence of the marker to infer publication or non-publication.
+
+Always surface captured Oracle output and the recovery script's final result for the final success or failure, then remove only the temporary files created by this run with `rm -f -- "$out_file" "$err_file"`.
+
+Accept success in either of two cases: Oracle exits zero and stdout's final nonblank line is exactly `ORACLE_PR_REVIEW_PUBLISHED`; or Oracle ends with the exact `read ETIMEDOUT` form above and either recovery phase exits zero after proving one exact-marker `COMMENTED` review. On normal success, return Oracle's review without rewriting its findings. On recovered success, do not reconstruct findings from partial stdout; report the recovered review identity and let GitHub remain the durable handoff to feedback triage.
