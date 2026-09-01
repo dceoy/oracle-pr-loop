@@ -31,7 +31,7 @@ EOF
     PATH="${fake_bin}:${PATH}" \
     GH_ARGS_FILE="${BATS_TEST_TMPDIR}/gh-args" \
     SLEEP_COUNT_FILE="${BATS_TEST_TMPDIR}/sleep-count" \
-    "${recovery_script}" dceoy/example 7 token_123
+    bash "${recovery_script}" dceoy/example 7 token_123
 
   [ "${status}" -eq 0 ]
   [ "${output}" = $'RESULT=FOUND\nREVIEW_ID=12345\nCHECKS=1' ]
@@ -56,10 +56,19 @@ EOF
     PATH="${fake_bin}:${PATH}" \
     GH_COUNT_FILE="${BATS_TEST_TMPDIR}/gh-count" \
     SLEEP_COUNT_FILE="${BATS_TEST_TMPDIR}/sleep-count" \
-    "${recovery_script}" dceoy/example 7 token_123
+    bash "${recovery_script}" dceoy/example 7 token_123
+
+  [ "${status}" -eq 4 ]
+  [ "${output}" = $'RESULT=CONTINUE\nCHECKS=9\nWAIT_SECONDS=480' ]
+
+  run env \
+    PATH="${fake_bin}:${PATH}" \
+    GH_COUNT_FILE="${BATS_TEST_TMPDIR}/gh-count" \
+    SLEEP_COUNT_FILE="${BATS_TEST_TMPDIR}/sleep-count" \
+    bash "${recovery_script}" dceoy/example 7 token_123 continue
 
   [ "${status}" -eq 1 ]
-  [ "${output}" = $'RESULT=NOT_FOUND\nCHECKS=16\nWAIT_SECONDS=900' ]
+  [ "${output}" = $'RESULT=NOT_FOUND\nCHECKS=7\nWAIT_SECONDS=420' ]
   [ "$(cat "${BATS_TEST_TMPDIR}/gh-count")" -eq 16 ]
   [ "$(cat "${BATS_TEST_TMPDIR}/sleep-count")" -eq 15 ]
 }
@@ -75,7 +84,7 @@ EOF
   run env \
     PATH="${fake_bin}:${PATH}" \
     SLEEP_COUNT_FILE="${BATS_TEST_TMPDIR}/sleep-count" \
-    "${recovery_script}" dceoy/example 7 token_123
+    bash "${recovery_script}" dceoy/example 7 token_123
 
   [ "${status}" -eq 2 ]
   [ "${output}" = $'RESULT=MULTIPLE\nMATCHES=2\nCHECKS=1' ]
@@ -92,7 +101,7 @@ EOF
   run env \
     PATH="${fake_bin}:${PATH}" \
     SLEEP_COUNT_FILE="${BATS_TEST_TMPDIR}/sleep-count" \
-    "${recovery_script}" dceoy/example 7 token_123
+    bash "${recovery_script}" dceoy/example 7 token_123
 
   [ "${status}" -eq 3 ]
   [ "${output}" = $'RESULT=ERROR\nREASON=github_read_failed\nCHECKS=1' ]
