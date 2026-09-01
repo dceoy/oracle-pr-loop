@@ -103,7 +103,11 @@ read timeout can occur after the remote `/runs` request was accepted and after
 ChatGPT received the prompt while the server-side browser run continues. The
 read-only planning and triage leaves therefore fail closed instead of starting
 a second run that could duplicate ChatGPT work or immediately collide with the
-still-active run as `busy`.
+still-active run as `busy`. Their prompts explicitly prohibit GitHub mutation,
+but that instruction is not a capability boundary: the connected GitHub app
+still has whatever permissions it was granted. Prompt-level read-only intent
+therefore cannot establish that an accepted run was side-effect-free and must
+not be used as justification for timeout replay.
 
 `oracle-pr-review` also never replays a timed-out review, because publication
 may already have happened. Each review prompt carries a unique hidden
@@ -135,8 +139,9 @@ before the CLI renders it. The classifier is therefore a pragmatic
 best-effort rule rather than protocol-level proof of pre-acceptance. Generic
 or embedded `busy` text is never retried, and a post-acceptance error whose
 final message is exactly `busy` is a narrow residual collision risk. If
-Oracle later exposes a stable pre-acceptance discriminator, prefer it over
-the CLI-text classifier.
+Oracle later exposes a stable pre-acceptance discriminator, durable accepted
+run retrieval, or an enforceable read-only capability boundary, prefer that
+protocol-level contract over replay inferred from CLI output or prompt intent.
 
 ## Requirements
 
