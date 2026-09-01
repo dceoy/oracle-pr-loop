@@ -103,16 +103,18 @@ uses its exact per-run GitHub correlation marker to recover an already-persisted
 
 The two explicitly read-only leaves, `oracle-issue-plan` and
 `oracle-pr-feedback-plan`, additionally keep `timeout_recovery_used=false`
-alongside `busy_retries_used=0`. The first exact `read ETIMEDOUT` sets the
-timeout flag before triggering one replay of the identical validated Oracle
-request; that replay is allowed even if all ten busy-triggered retries were
-already consumed. Exact busy responses on the recovery path still use only the
-remaining busy budget. A second exact read timeout is terminal. Because the two
-budgets are independent, a read-only leaf can invoke Oracle at most twelve
-times: the first invocation, up to ten invocations triggered by busy failures,
-and one invocation triggered by the first read timeout. This exception is
-restricted to prompts that explicitly prohibit repository and GitHub mutation;
-it must not be applied to the review leaf.
+alongside `busy_retries_used=0`. Only a nonzero Oracle invocation whose exact
+terminal error is `read ETIMEDOUT` may set the timeout flag and trigger one
+replay of the identical validated Oracle request; a zero exit remains success
+even if its output quotes that text. The replay is allowed even if all ten
+busy-triggered retries were already consumed. Exact busy responses on the
+recovery path still use only the remaining busy budget. A second exact read
+timeout is terminal. Because the two budgets are independent, a read-only leaf
+can invoke Oracle at most twelve times: the first invocation, up to ten
+invocations triggered by busy failures, and one invocation triggered by the
+first read timeout. This exception is restricted to prompts that explicitly
+prohibit repository and GitHub mutation; it must not be applied to the review
+leaf.
 
 `oracle-pr-review` carries a unique hidden correlation marker in its top-level
 GitHub review body. After an exact read timeout, the leaf delegates marker
