@@ -22,8 +22,18 @@ else
   [[ "${markdownlint_exit_code}" -eq 0 ]] || exit "${markdownlint_exit_code}"
 fi
 
+# Shell scripts
+git ls-files -z -- '*.sh' '*.bash' '*.bats' \
+  | xargs -0 -t shfmt --write --indent=2 --binary-next-line --case-indent --space-redirects
+git ls-files -z -- '*.sh' '*.bash' '*.bats' \
+  | xargs -0 -t shellcheck
+
 # GitHub Actions
 uvx zizmor --fix=safe .github/workflows
 git ls-files -z -- '.github/workflows/*.yml' | xargs -0 -t actionlint
 git ls-files -z -- '.github/workflows/*.yml' | xargs -0 -t uvx yamllint -d '{"extends": "relaxed", "rules": {"line-length": "disable"}}'
 uvx checkov --framework=all --output=github_failed_only --directory=.
+
+# All tracked Bats regression suites.
+git ls-files -z -- '*.bats' \
+  | xargs -0 -t bats
