@@ -76,17 +76,15 @@ reporting remote Oracle 0.18.0 or newer before starting a remote browser run.
 Older, missing, or unparseable endpoint versions fail closed; the skills never
 resolve or inject remote host/token settings themselves.
 
-All three Oracle leaf skills allow ten retry opportunities (eleven total
-invocations) only for invocations that exited unsuccessfully with an exact
-busy record: either stderr's last nonblank line is `✖ busy`, or stdout's last
-nonblank `ERROR:` line is exactly `ERROR: busy`. Retries use nominal delays
-`1, 2, 4, 8, 16, 30, 30, 30, 30, 30` seconds with 0.750–1.000 jitter, keeping
-the retry path bounded while allowing roughly three minutes for a legitimate
-single-flight remote run to finish. Each retry additionally requires that
-capture to be complete and to contain no evidence that browser execution was
-accepted or started. Stdout and stderr are captured separately; every terminal
-nonzero exit is reported, and the retry policy only decides whether a failed
-invocation is replayed.
+All three Oracle leaf skills keep one busy-retry counter across the complete
+leaf run. An exact pre-acceptance busy failure may trigger at most ten
+additional invocations, using nominal delays `1, 2, 4, 8, 16, 30, 30, 30, 30,
+30` seconds with 0.750–1.000 jitter. Each busy retry requires complete capture
+with no evidence that browser execution was accepted or started. Stdout and
+stderr are captured separately; every terminal nonzero exit is reported, and
+the retry policy only decides whether a failed invocation is replayed. For
+`oracle-pr-review`, which has no timeout replay, this bounds Oracle execution to
+at most eleven invocations.
 
 Heartbeat/progress lines may be present in those captures, but they are never
 result records and do not relax exact matching. Stdout error classification
@@ -104,18 +102,17 @@ uses its exact per-run GitHub correlation marker to recover an already-persisted
 `COMMENTED` review instead.
 
 The two explicitly read-only leaves, `oracle-issue-plan` and
-`oracle-pr-feedback-plan`, may recover from one exact `read ETIMEDOUT` by
-replaying the identical validated Oracle request at most once. A timeout can
-occur after `/runs` acceptance, so this is not treated as a pre-acceptance
-transport retry. Instead the leaf records that timeout recovery has been used
-before replaying. If the original server-side run is still occupying Oracle's
-single-flight slot, exact pre-acceptance `busy` responses may consume the
-remaining ordinary busy-retry budget until the recovery invocation can start.
-The first non-busy recovery invocation is the only accepted replay. A second
-exact `read ETIMEDOUT`, busy-budget exhaustion, or any different timeout or
-network failure remains terminal and fail-closed. This exception is restricted
-to prompts that explicitly prohibit repository and GitHub mutation; it must
-not be applied to the review leaf.
+`oracle-pr-feedback-plan`, additionally keep `timeout_recovery_used=false`
+alongside `busy_retries_used=0`. The first exact `read ETIMEDOUT` sets the
+timeout flag before triggering one replay of the identical validated Oracle
+request; that replay is allowed even if all ten busy-triggered retries were
+already consumed. Exact busy responses on the recovery path still use only the
+remaining busy budget. A second exact read timeout is terminal. Because the two
+budgets are independent, a read-only leaf can invoke Oracle at most twelve
+times: the first invocation, up to ten invocations triggered by busy failures,
+and one invocation triggered by the first read timeout. This exception is
+restricted to prompts that explicitly prohibit repository and GitHub mutation;
+it must not be applied to the review leaf.
 
 `oracle-pr-review` carries a unique hidden correlation marker in its top-level
 GitHub review body. After an exact read timeout, the leaf delegates marker
