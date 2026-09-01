@@ -11,10 +11,10 @@ pr_number="$2"
 review_token="$3"
 phase="${4:-initial}"
 
-if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
-  [[ ! "$pr_number" =~ ^[1-9][0-9]*$ ]] ||
-  [[ ! "$review_token" =~ ^[A-Za-z0-9_-]+$ ]] ||
-  [[ "$phase" != "initial" && "$phase" != "continue" ]]; then
+if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+  || [[ ! "$pr_number" =~ ^[1-9][0-9]*$ ]] \
+  || [[ ! "$review_token" =~ ^[A-Za-z0-9_-]+$ ]] \
+  || [[ "$phase" != "initial" && "$phase" != "continue" ]]; then
   printf 'RESULT=ERROR\nREASON=invalid_arguments\n'
   exit 3
 fi

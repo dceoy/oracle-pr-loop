@@ -6,7 +6,7 @@ setup() {
   fake_bin="${BATS_TEST_TMPDIR}/bin"
   mkdir -p "${fake_bin}"
 
-  cat > "${fake_bin}/sleep" <<'EOF'
+  cat > "${fake_bin}/sleep" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 count=0
@@ -19,7 +19,7 @@ EOF
 }
 
 @test "recovers an immediately persisted review" {
-  cat > "${fake_bin}/gh" <<'EOF'
+  cat > "${fake_bin}/gh" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$@" > "${GH_ARGS_FILE}"
@@ -41,7 +41,7 @@ EOF
 }
 
 @test "stops after fifteen one-minute polling intervals" {
-  cat > "${fake_bin}/gh" <<'EOF'
+  cat > "${fake_bin}/gh" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 count=0
@@ -74,7 +74,7 @@ EOF
 }
 
 @test "fails closed when multiple reviews match" {
-  cat > "${fake_bin}/gh" <<'EOF'
+  cat > "${fake_bin}/gh" << 'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '12345\n67890\n'
@@ -92,7 +92,7 @@ EOF
 }
 
 @test "fails closed when the GitHub read fails" {
-  cat > "${fake_bin}/gh" <<'EOF'
+  cat > "${fake_bin}/gh" << 'EOF'
 #!/usr/bin/env bash
 exit 1
 EOF
