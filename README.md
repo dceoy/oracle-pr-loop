@@ -17,6 +17,9 @@ review, while the host agent triages durable GitHub feedback and applies fixes.
   Oracle browser mode and ChatGPT's connected GitHub app.
 - [`oracle-pr-review`](skills/oracle-pr-review/SKILL.md) — reviews one exact
   pull-request head the same way, prioritizing inline review comments.
+- [`oracle-pr-sweep`](skills/oracle-pr-sweep/SKILL.md) — discovers a
+  bounded batch of open non-draft PRs across non-archived repositories owned
+  by the connected GitHub user and returns one read-only consolidated review.
 - [`oracle-pr-feedback-plan`](skills/oracle-pr-feedback-plan/SKILL.md) —
   optionally cross-checks existing GitHub feedback through Oracle. It remains
   a standalone read-only skill and is not required by `oracle-pr-loop`.
@@ -32,6 +35,15 @@ review, while the host agent triages durable GitHub feedback and applies fixes.
    scope, implements the change, runs repository QA, and opens the pull
    request.
 3. Enter the PR workflow below on the resulting PR.
+
+**Account-wide PR sweep:**
+
+1. `oracle-pr-sweep` identifies the connected GitHub user, discovers open
+   non-draft PRs in non-archived repositories owned by that user, and reviews
+   a bounded newest-first batch in one Oracle/ChatGPT browser run.
+2. Each result is bound to an exact PR head SHA and re-checked for freshness
+   before the consolidated read-only report is returned. The sweep never
+   publishes GitHub reviews or other mutations.
 
 **Existing PR** — enter directly at:
 
@@ -79,7 +91,7 @@ reporting remote Oracle 0.18.0 or newer before starting a remote browser run.
 Older, missing, or unparseable endpoint versions fail closed; the skills never
 resolve or inject remote host/token settings themselves.
 
-All three Oracle leaf skills allow ten retry opportunities (eleven total
+All four Oracle leaf skills allow ten retry opportunities (eleven total
 invocations) only for invocations that exited unsuccessfully with an exact
 busy record: either stderr's last nonblank line is `✖ busy`, or stdout's last
 nonblank `ERROR:` line is exactly `ERROR: busy`. Retries use nominal delays
@@ -104,7 +116,7 @@ Exact final `✖ read ETIMEDOUT` on stderr or `ERROR: read ETIMEDOUT` as stdout'
 last nonblank `ERROR:` line is terminal in every leaf and is never replayed. A
 read timeout can occur after the remote `/runs` request was accepted and after
 ChatGPT received the prompt while the server-side browser run continues. The
-read-only planning and triage leaves therefore fail closed instead of starting
+read-only planning, triage, and sweep leaves therefore fail closed instead of starting
 a second run that could duplicate ChatGPT work or immediately collide with the
 still-active run as `busy`. Their prompts explicitly prohibit GitHub mutation,
 but that instruction is not a capability boundary: the connected GitHub app
@@ -167,12 +179,14 @@ protocol-level contract over replay inferred from CLI output or prompt intent.
 - Oracle CLI 0.18.0 or newer on the local client and on any configured remote
   `oracle serve` endpoint used by browser routing, with an authenticated
   ChatGPT browser session and the ChatGPT GitHub app authorized for the target
-  repository;
+  repository or repositories;
 - `GPT-5.6 Sol` available to Oracle browser mode.
 
 ## Usage
 
 Ask a compatible host to implement an open Issue and carry its pull request
-through review, or to review and improve an existing pull request. See
+through review, to review and improve an existing pull request, or to run
+`oracle-pr-sweep` for a read-only batch review of open PRs across repositories
+owned by the connected GitHub user. See
 [`skills/oracle-pr-loop/SKILL.md`](skills/oracle-pr-loop/SKILL.md) for the
-normative sequencing and stop conditions.
+normative sequencing and stop conditions of the mutating loop.
