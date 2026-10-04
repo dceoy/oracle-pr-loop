@@ -30,14 +30,13 @@ jobs:
       - name: Verify canonical skills and discovery links
         run: |
           exit_status=0
-          shopt -s nullglob
-          skill_files=(skills/*/SKILL.md)
-          if [ "${#skill_files[@]}" -eq 0 ]; then
-            echo "::error::no canonical skills found under skills/*/SKILL.md"
-            exit 1
-          fi
-          for skill_file in "${skill_files[@]}"; do
-            name="$(basename "$(dirname "${skill_file}")")"
+          for name in oracle-pr-loop oracle-issue-plan oracle-pr-review oracle-pr-feedback-plan; do
+            skill_file="skills/${name}/SKILL.md"
+            if [ ! -f "${skill_file}" ]; then
+              echo "::error::missing ${skill_file}"
+              exit_status=1
+              continue
+            fi
             if ! grep -qx "name: ${name}" "${skill_file}"; then
               echo "::error::${skill_file} does not declare 'name: ${name}'"
               exit_status=1
