@@ -71,7 +71,8 @@ The consolidated report must include:
 - authenticated owner login and effective PR limit;
 - eligible, reviewed, omitted, stale, and blocked counts when establishable;
 - for every reviewed PR: `OWNER/REPO#NUMBER`, title, exact reviewed head SHA,
-  and freshness state;
+  and final freshness state, exactly `CURRENT` when the final re-read head still
+  matches that SHA or `STALE` when it does not;
 - actionable findings grouped by PR and classification, with relevant file or
   path references when available;
 - PRs with no actionable findings;
@@ -105,7 +106,7 @@ oracle \
 
 Review the selected PRs as one batch. For each PR, inspect the current diff and enough repository context to evaluate correctness, regressions, maintainability, security implications, and dependency/update risk. Inspect CI/check status, existing reviews, and unresolved review feedback when available. Apply KISS, DRY, and YAGNI to concrete maintainability issues and avoid style-only findings.
 
-Bind each result to the exact PR head SHA you reviewed. Before finalizing the report, re-read every reviewed PR head; if a head changed, mark that PR STALE and do not present its findings as current.
+Bind each result to the exact PR head SHA you reviewed. Before finalizing the report, re-read every reviewed PR head. Label each reviewed PR CURRENT only when that final re-read still matches the reviewed SHA; if it changed, label that PR STALE and do not present its findings as current.
 
 Classify actionable findings as blocking, should-fix, or optional. Do not invent findings. Explicitly identify PRs with no actionable findings and PRs that are blocked or incomplete because required context is unavailable.
 
@@ -152,5 +153,7 @@ the temporary files created by this run with
 
 Return Oracle's consolidated report without rewriting its findings only when
 Oracle exits zero and the response demonstrates connected GitHub access,
-identifies the authenticated owner scope, and binds reviewed PRs to exact head
-SHAs. Otherwise report the failure.
+identifies the authenticated owner scope, binds reviewed PRs to exact head
+SHAs, demonstrates the required final head re-read, and classifies every
+reviewed PR with an explicit final `CURRENT` or `STALE` freshness state.
+Otherwise report the failure.
