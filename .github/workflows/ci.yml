@@ -62,19 +62,19 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: dceoy/gha-for-devops/.github/workflows/github-actions-lint-and-scan.yml@main  # zizmor: ignore[unpinned-uses]
+    uses: dceoy/gha-for-devops/.github/workflows/github-actions-lint-and-scan.yml@9e394d7c18b3a00fb853cd3c693cc4eeb5f0c825  # v2.3.0
   markdown-lint:
-    uses: dceoy/gha-for-devops/.github/workflows/markdown-lint.yml@main  # zizmor: ignore[unpinned-uses]
+    uses: dceoy/gha-for-devops/.github/workflows/markdown-lint.yml@9e394d7c18b3a00fb853cd3c693cc4eeb5f0c825  # v2.3.0
   shell-lint:
     permissions:
       contents: read
-    uses: dceoy/gha-for-devops/.github/workflows/shell-lint.yml@main  # zizmor: ignore[unpinned-uses]
+    uses: dceoy/gha-for-devops/.github/workflows/shell-lint.yml@9e394d7c18b3a00fb853cd3c693cc4eeb5f0c825  # v2.3.0
     with:
       search-path: .
   bats-test:
     permissions:
       contents: read
-    uses: dceoy/gha-for-devops/.github/workflows/bats-test.yml@main  # zizmor: ignore[unpinned-uses]
+    uses: dceoy/gha-for-devops/.github/workflows/bats-test.yml@9e394d7c18b3a00fb853cd3c693cc4eeb5f0c825  # v2.3.0
     with:
       search-path: .
   dependabot-auto-merge:
@@ -86,7 +86,7 @@ jobs:
       - markdown-lint
       - shell-lint
       - bats-test
-    uses: dceoy/gha-for-devops/.github/workflows/dependabot-auto-merge.yml@main  # zizmor: ignore[unpinned-uses]
+    uses: dceoy/gha-for-devops/.github/workflows/dependabot-auto-merge.yml@9e394d7c18b3a00fb853cd3c693cc4eeb5f0c825  # v2.3.0
     permissions:
       contents: write
       pull-requests: write

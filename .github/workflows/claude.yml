@@ -23,7 +23,7 @@ jobs:
       issues: write
       id-token: write
       actions: read
-    uses: dceoy/gha-for-devops/.github/workflows/claude-code-review.yml@main  # zizmor: ignore[unpinned-uses]
+    uses: dceoy/gha-for-devops/.github/workflows/claude-code-review.yml@9e394d7c18b3a00fb853cd3c693cc4eeb5f0c825  # v2.3.0
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}  # zizmor: ignore[secrets-outside-env]
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
