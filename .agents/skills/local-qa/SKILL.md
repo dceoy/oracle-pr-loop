@@ -10,7 +10,7 @@ Run the local QA script `scripts/qa.sh` in this skill.
 
 ## Procedure
 
-- Execute the script exactly as shown above when this skill is triggered.
+- Run the script unchanged whenever this skill is triggered.
 - Capture and summarize key output (success/failure, major warnings, and any files modified).
 - If the script fails due to missing tooling (`command not found`, missing executable, or equivalent), install the missing tool(s) and rerun `./scripts/qa.sh`.
 - Install tools using this order of preference:
